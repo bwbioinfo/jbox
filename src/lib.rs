@@ -296,6 +296,7 @@ impl App {
                         base_commit: created.commit.clone(),
                         host_gitfile: host_gitfile.clone(),
                         beads_snapshot: None,
+                        beads_bootstrap: Vec::new(),
                     };
                     let _ = self.git.restore_guest_metadata(&provisional);
                     let _ = self.git.remove_worktree(&repo.source, &worktree, false);
@@ -318,6 +319,7 @@ impl App {
                 base_commit: created.commit,
                 host_gitfile,
                 beads_snapshot,
+                beads_bootstrap: Vec::new(),
             });
         }
 
@@ -374,6 +376,12 @@ impl App {
                 return Err(error);
             }
         };
+        // Capture the host-visible result of trusted bootstrap before a local
+        // TUI can connect. Those files are jbox infrastructure, not agent
+        // edits, and their exact digests remain the safety boundary.
+        for repo in &mut repos {
+            repo.beads_bootstrap = self.git.capture_beads_bootstrap(&repo.worktree);
+        }
 
         let now = Utc::now();
         let session = Session {
@@ -1590,6 +1598,7 @@ mod tests {
                 base_commit: "deadbeef".into(),
                 host_gitfile: source.join("host-gitfile"),
                 beads_snapshot: None,
+                beads_bootstrap: Vec::new(),
                 source,
             }],
             jcode_default_provider: None,

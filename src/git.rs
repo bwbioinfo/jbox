@@ -1,4 +1,7 @@
-use crate::{config::ResolvedGitAuthor, state::RepoState};
+use crate::{
+    config::ResolvedGitAuthor,
+    state::{BeadsBaselineFile, RepoState},
+};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -456,6 +459,33 @@ impl Git {
         Ok(self.change_state(repo)? == WorktreeChangeState::Changes)
     }
 
+    /// Capture only the small, known set of project files that `bd init`
+    /// rewrites. This runs on the host after the guest has become ready and
+    /// before jbox returns control to a client or agent.
+    pub fn capture_beads_bootstrap(&self, worktree: &Path) -> Vec<BeadsBaselineFile> {
+        [
+            ".beads/.gitignore",
+            ".beads/config.yaml",
+            ".beads/metadata.json",
+            ".beads/issues.jsonl",
+            ".gitignore",
+        ]
+        .into_iter()
+        .filter_map(|path| {
+            let file = worktree.join(path);
+            let metadata = fs::symlink_metadata(&file).ok()?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return None;
+            }
+            let bytes = fs::read(file).ok()?;
+            Some(BeadsBaselineFile {
+                path: path.into(),
+                digest: format!("{:x}", Sha256::digest(bytes)),
+            })
+        })
+        .collect()
+    }
+
     /// An unchanged snapshot is jbox-created task context. It must not block
     /// cleanup or resume, while every agent edit remains ordinary user work.
     fn has_uncommitted_changes(&self, repo: &RepoState) -> Result<bool> {
@@ -467,12 +497,16 @@ impl Git {
     }
 
     fn without_jbox_beads_snapshot(&self, repo: &RepoState, status: &str) -> String {
-        if !self.is_unchanged_beads_snapshot(repo) {
+        let snapshot_is_unchanged = self.is_unchanged_beads_snapshot(repo);
+        if !snapshot_is_unchanged && repo.beads_bootstrap.is_empty() {
             return status.into();
         }
         status
             .lines()
-            .filter(|line| !line.ends_with(".beads/issues.jsonl"))
+            .filter(|line| {
+                !((snapshot_is_unchanged && line.ends_with(".beads/issues.jsonl"))
+                    || self.is_unchanged_bootstrap_line(repo, line))
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -494,6 +528,25 @@ impl Git {
             &["diff", "--cached", "--quiet", "--", ".beads/issues.jsonl"],
         )
         .is_ok()
+    }
+
+    fn is_unchanged_bootstrap_line(&self, repo: &RepoState, line: &str) -> bool {
+        let Some(path) = repo
+            .beads_bootstrap
+            .iter()
+            .find(|baseline| line.ends_with(&baseline.path))
+        else {
+            return false;
+        };
+        let Ok(content) = fs::read(repo.worktree.join(&path.path)) else {
+            return false;
+        };
+        format!("{:x}", Sha256::digest(content)) == path.digest
+            && Self::run(
+                &repo.worktree,
+                &["diff", "--cached", "--quiet", "--", &path.path],
+            )
+            .is_ok()
     }
 
     fn run_git_dir(git_dir: &Path, args: &[&str]) -> Result<String> {
@@ -647,7 +700,20 @@ mod tests {
             fs::read_to_string(worktree.join(".beads/issues.jsonl")).unwrap(),
             "current\n"
         );
-        let repo = RepoState {
+        // Model the files `bd init` creates or rewrites before the guest is
+        // handed to an agent. They are untracked/modified from Git's point of
+        // view, but are Jbox bootstrap state rather than user work.
+        fs::write(worktree.join(".beads/.gitignore"), "embeddeddolt/\n").unwrap();
+        fs::write(worktree.join(".beads/config.yaml"), "dolt: embedded\n").unwrap();
+        fs::write(
+            worktree.join(".beads/metadata.json"),
+            "{\"dolt_mode\":\"embedded\"}\n",
+        )
+        .unwrap();
+        fs::write(worktree.join(".gitignore"), ".beads/embeddeddolt/\n").unwrap();
+        let beads_bootstrap = Git.capture_beads_bootstrap(&worktree);
+        assert_eq!(beads_bootstrap.len(), 5);
+        let mut repo = RepoState {
             name: "repo".into(),
             source: source.path().into(),
             worktree: worktree.clone(),
@@ -656,22 +722,30 @@ mod tests {
             base_commit: made.commit,
             host_gitfile,
             beads_snapshot: snapshot,
+            beads_bootstrap,
         };
 
         assert_eq!(Git.change_state(&repo).unwrap(), WorktreeChangeState::Clean);
         assert!(Git.status(&repo).unwrap().contains("## jbox/"));
         assert!(!Git.status(&repo).unwrap().contains("issues.jsonl"));
+        assert!(!Git.status(&repo).unwrap().contains("config.yaml"));
+        assert!(!Git.status(&repo).unwrap().contains("metadata.json"));
         Git.restore_guest_metadata(&repo).unwrap();
         Git.prepare_retained_worktree_for_guest(&repo, &author)
             .unwrap();
         Git.restore_guest_metadata(&repo).unwrap();
 
-        fs::write(worktree.join(".beads/issues.jsonl"), "agent edit\n").unwrap();
+        fs::write(worktree.join(".beads/config.yaml"), "agent changed it\n").unwrap();
         assert_eq!(
             Git.change_state(&repo).unwrap(),
             WorktreeChangeState::Changes
         );
         assert!(Git.has_uncommitted_or_unmerged_changes(&repo).unwrap());
+        // A changed bootstrap file stays visible, just like a changed task
+        // export, so clean/resume cannot discard agent work.
+        assert!(Git.status(&repo).unwrap().contains("config.yaml"));
+        repo.beads_bootstrap.clear();
+        fs::write(worktree.join(".beads/issues.jsonl"), "agent edit\n").unwrap();
         Git.remove_worktree(source.path(), &worktree, true).unwrap();
     }
 
@@ -723,6 +797,7 @@ mod tests {
             base_commit: made.commit,
             host_gitfile,
             beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
         };
         Git.restore_and_import_guest_metadata(&repo).unwrap();
         assert!(wt.join(".git").is_file());
@@ -776,6 +851,7 @@ mod tests {
             base_commit: made.commit,
             host_gitfile,
             beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
         };
         Git.restore_and_import_guest_metadata(&repo).unwrap();
         assert!(wt.join(".git").is_file());
@@ -838,6 +914,7 @@ mod tests {
             base_commit: made.commit,
             host_gitfile,
             beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
         };
 
         std::fs::write(wt.join("a"), "first accepted snapshot").unwrap();

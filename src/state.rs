@@ -24,6 +24,16 @@ pub struct RepoState {
     /// seeded by jbox from an agent's later edit to that export.
     #[serde(default)]
     pub beads_snapshot: Option<String>,
+    /// Exact files that the Beads bootstrap changed before jbox exposed the
+    /// guest. This is host-recorded after readiness, never guest-provided.
+    #[serde(default)]
+    pub beads_bootstrap: Vec<BeadsBaselineFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeadsBaselineFile {
+    pub path: String,
+    pub digest: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
