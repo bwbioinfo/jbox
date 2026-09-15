@@ -195,6 +195,11 @@ metadata requires a hard reset. Commit or stash those files in the retained
 worktree first, then resume. `jbox resume <session>` is available for a direct
 restart from any directory.
 
+When a session branch has been fast-forwarded or otherwise merged into another
+local host branch, selectors label it `accepted` and `jbox clean` permits its
+removal. A branch with uncommitted files or commits not reachable from another
+local branch remains `changes` and still requires `--force`.
+
 The current `.jbox.toml` must still resolve to the same repositories and guest
 mount locations as when the session was created. If it does not, jbox leaves
 the retained worktrees untouched and asks you to inspect, accept, or clean them

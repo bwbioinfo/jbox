@@ -9,6 +9,16 @@ pub struct WorktreeCreated {
     pub branch: String,
     pub commit: String,
 }
+
+/// Whether a retained worktree needs preservation. `Accepted` means its
+/// committed snapshot is already reachable from a different local host branch,
+/// so deleting the worktree does not discard those commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeChangeState {
+    Clean,
+    Accepted,
+    Changes,
+}
 impl Git {
     fn run(repo: &Path, args: &[&str]) -> Result<String> {
         let output = Command::new("git")
@@ -315,12 +325,38 @@ impl Git {
             "Uncommitted:\n{uncommitted}\nStaged:\n{staged}\nUnique commits:\n{commits}\n"
         ))
     }
-    pub fn has_changes_or_unique_commits(&self, repo: &RepoState) -> Result<bool> {
+    pub fn change_state(&self, repo: &RepoState) -> Result<WorktreeChangeState> {
         if !Self::run(&repo.worktree, &["status", "--porcelain"])?.is_empty() {
-            return Ok(true);
+            return Ok(WorktreeChangeState::Changes);
         }
         let range = format!("{}..HEAD", repo.base_commit);
-        Ok(!Self::run(&repo.worktree, &["rev-list", "--count", &range])?.eq("0"))
+        if Self::run(&repo.worktree, &["rev-list", "--count", &range])?.eq("0") {
+            return Ok(WorktreeChangeState::Clean);
+        }
+        let session_ref = format!("refs/heads/{}", repo.branch);
+        let containing = Self::run(
+            &repo.source,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "--contains",
+                &session_ref,
+                "refs/heads",
+            ],
+        )?;
+        if containing.lines().any(|branch| branch != repo.branch) {
+            Ok(WorktreeChangeState::Accepted)
+        } else {
+            Ok(WorktreeChangeState::Changes)
+        }
+    }
+
+    pub fn has_changes_or_unique_commits(&self, repo: &RepoState) -> Result<bool> {
+        Ok(self.change_state(repo)? != WorktreeChangeState::Clean)
+    }
+
+    pub fn has_uncommitted_or_unmerged_changes(&self, repo: &RepoState) -> Result<bool> {
+        Ok(self.change_state(repo)? == WorktreeChangeState::Changes)
     }
 
     fn run_git_dir(git_dir: &Path, args: &[&str]) -> Result<String> {
@@ -548,7 +584,16 @@ mod tests {
         git(&wt, &["add", "a"]);
         git(&wt, &["commit", "-m", "first guest change"]);
         Git.import_guest_commits(&repo).unwrap();
+        assert_eq!(
+            Git.change_state(&repo).unwrap(),
+            WorktreeChangeState::Changes
+        );
         Git.accept_snapshot(&repo, &target).unwrap();
+        assert_eq!(
+            Git.change_state(&repo).unwrap(),
+            WorktreeChangeState::Accepted
+        );
+        assert!(!Git.has_uncommitted_or_unmerged_changes(&repo).unwrap());
         assert!(wt.join(".git").is_dir());
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("a")).unwrap(),

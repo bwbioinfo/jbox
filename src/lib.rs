@@ -729,11 +729,7 @@ impl App {
 
         println!("Jbox sessions for {}:", repository.display());
         for (index, (session, repo)) in candidates.iter().enumerate() {
-            let change = match self.git.has_changes_or_unique_commits(repo) {
-                Ok(true) => "changes",
-                Ok(false) => "clean",
-                Err(_) => "unavailable",
-            };
+            let change = self.change_label(repo);
             println!(
                 "  {}) {}  {:?}  {}  [{}]",
                 index + 1,
@@ -878,11 +874,7 @@ impl App {
         }
         println!("Jbox worktrees for {}:", repository.display());
         for (index, (session, repo)) in candidates.iter().enumerate() {
-            let change = match self.git.has_changes_or_unique_commits(repo) {
-                Ok(true) => "changes",
-                Ok(false) => "clean",
-                Err(_) => "unavailable",
-            };
+            let change = self.change_label(repo);
             println!(
                 "  {}) {}  {:?}  {}  [{}]",
                 index + 1,
@@ -1031,11 +1023,7 @@ impl App {
         }
         println!("Stopped jbox worktrees for {}:", repository.display());
         for (index, (session, repo)) in candidates.iter().enumerate() {
-            let change = match self.git.has_changes_or_unique_commits(repo) {
-                Ok(true) => "changes",
-                Ok(false) => "clean",
-                Err(_) => "unavailable",
-            };
+            let change = self.change_label(repo);
             println!(
                 "  {}) {}  {}  [{}]",
                 index + 1,
@@ -1128,10 +1116,11 @@ impl App {
             None => self.state.list()?,
         };
         for mut session in targets {
-            let changed = session
-                .repos
-                .iter()
-                .any(|r| self.git.has_changes_or_unique_commits(r).unwrap_or(true));
+            let changed = session.repos.iter().any(|r| {
+                self.git
+                    .has_uncommitted_or_unmerged_changes(r)
+                    .unwrap_or(true)
+            });
             if changed && !force {
                 println!(
                     "refusing to clean {}: worktrees contain changes or commits. Use `jbox clean {} --force` only after inspecting `jbox status {}`.",
@@ -1265,11 +1254,7 @@ impl App {
         }
         println!("Jbox worktrees for {}:", repository.display());
         for (index, (session, repo)) in candidates.iter().enumerate() {
-            let change = match self.git.has_changes_or_unique_commits(repo) {
-                Ok(true) => "changes",
-                Ok(false) => "clean",
-                Err(_) => "unavailable",
-            };
+            let change = self.change_label(repo);
             println!(
                 "  {}) {}  {:?}  {}  [{}]",
                 index + 1,
@@ -1333,6 +1318,15 @@ impl App {
         );
         print!("{output}");
         Ok(())
+    }
+
+    fn change_label(&self, repo: &RepoState) -> &'static str {
+        match self.git.change_state(repo) {
+            Ok(git::WorktreeChangeState::Clean) => "clean",
+            Ok(git::WorktreeChangeState::Accepted) => "accepted",
+            Ok(git::WorktreeChangeState::Changes) => "changes",
+            Err(_) => "unavailable",
+        }
     }
 
     fn validate_resume_config(
