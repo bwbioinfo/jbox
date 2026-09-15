@@ -2,7 +2,7 @@
 
 `jbox` creates disposable Kata microVM workspaces for [jcode](https://github.com/1jehuang/jcode). It uses session-specific Git worktrees as the only code persistence layer, never bind-mounting the launching checkout into the guest.
 
-> **MVP status:** the Git isolation, state, Docker/Kata lifecycle, jcode SSH bridge, dedicated credentials, multi-repository config, inspection, safe cleanup, and TTL watcher are implemented. This host does **not** yet have Kata registered, so it cannot launch a microVM until the host prerequisite setup below is completed.
+> **MVP status:** the Git isolation, state, Docker/Kata lifecycle, jcode SSH bridge, dedicated credentials, multi-repository config, inspection, safe cleanup, and TTL watcher are implemented. The target Arch/Manjaro host was validated with Kata 4 runtime-rs and Docker.
 
 ## Implementation plan and result
 
@@ -140,10 +140,10 @@ writable = false
 
 Each repository is resolved and canonicalized before `git worktree add -b jbox/<session>/<repo>`. A dirty original checkout is safe: the worktree starts at its `HEAD`, not its uncommitted state. Submodules are initialized in the worktree. The host checkout itself is not mounted.
 
-With no `image.dockerfile`, jbox copies the locally installed `jcode` binary into a cached local Debian-based image. This bakes jcode, Git, certificates, SSH client/server, Bash, and the jbox guest entrypoint into the image. It is reused as `jbox/jcode:local-v2`. A project Dockerfile should begin with:
+With no `image.dockerfile`, jbox copies the locally installed `jcode` launcher and distribution binary into a cached local Debian-based image. This bakes jcode, Git, certificates, SSH client/server, Bash, and the jbox guest entrypoint into the image. The image tag includes the local UID/GID so the guest workspace is writable without mounting host account state. A project Dockerfile should begin with the tag printed by `jbox`, for example:
 
 ```dockerfile
-FROM jbox/jcode:local-v2
+FROM jbox/jcode:local-v4-1001-1001
 RUN apt-get update && apt-get install -y --no-install-recommends ripgrep
 ```
 
@@ -157,7 +157,8 @@ Implemented invariants:
 - Extra mounts canonicalize symlinks and reject original repositories, `$HOME/.ssh`, `$HOME/.aws`, `$HOME/.config`, jbox state, `/run/user`, SSH-agent paths, Docker/Podman sockets, and `/`.
 - Extra mounts default to read-only. Guest targets must be absolute, non-root paths without traversal components.
 - Containers use Kata, have all Linux capabilities dropped, `no-new-privileges`, a read-only root filesystem, restrictive tmpfs mounts, a PID limit, and no `--privileged`, devices, SSH-agent forwarding, or runtime socket mounts.
-- SSH is only published on `127.0.0.1`. Every session has a fresh local bridge SSH key, stored 0600 in its session directory.
+- SSH is published to a session-specific `127.0.0.0/8` loopback address. Every session has a fresh local bridge SSH key and dedicated local SSH agent, stored 0600/0700 in its session directory.
+- Current jcode native SSH uses the normal OpenSSH known-hosts database and has no per-connection known-hosts option. jbox therefore appends a tagged, session-specific loopback host key (`# jbox:<session>`) to the host's `~/.ssh/known_hosts`, then removes exactly that tagged entry on `stop` or `clean`. It never mounts the host `.ssh` directory or forwards its SSH agent to the guest.
 - Jcode auth persists only in `$XDG_DATA_HOME/jbox/credentials/jcode`, not the user's normal jcode configuration. The first guest login populates this dedicated state.
 - Git uses a newly generated dedicated key at `$XDG_DATA_HOME/jbox/credentials/git/id_ed25519`, not a copied host key or forwarded agent. Register its `.pub` file with the Git provider before guest `git push` works.
 
@@ -174,4 +175,4 @@ cargo clippy -- -D warnings
 cargo run -- doctor
 ```
 
-The test suite verifies TTL/config path validation and proves that a worktree starts from `HEAD` rather than a dirty host checkout.
+The test suite verifies TTL/config path validation and proves that a worktree starts from `HEAD` rather than a dirty host checkout. End-to-end validation on the target host booted a Kata guest, connected the local jcode TUI through the managed loopback SSH bridge, verified the guest jcode daemon and Git worktree, and then exercised `status`, `stop`, and safe `clean`.

@@ -20,8 +20,8 @@ impl<'a> ImageManager<'a> {
     fn exists(&self, tag: &str) -> bool {
         Command::new("docker")
             .args(["image", "inspect", tag])
-            .status()
-            .map(|s| s.success())
+            .output()
+            .map(|output| output.status.success())
             .unwrap_or(false)
     }
     fn project_image(&self, project: &Path, raw: &str) -> Result<String> {

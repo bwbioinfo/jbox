@@ -2,6 +2,7 @@ use crate::state::Session;
 use anyhow::{Context, Result, bail};
 use directories::BaseDirs;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -101,13 +102,98 @@ impl JboxPaths {
         )?;
         Ok(())
     }
+    pub fn start_session_ssh_agent(&self, dir: &Path) -> Result<u32> {
+        let socket = dir.join("agent.sock");
+        if socket.exists() {
+            fs::remove_file(&socket)?;
+        }
+        let output = Command::new("ssh-agent")
+            .args([
+                "-a",
+                socket.to_str().context("non-UTF8 SSH socket path")?,
+                "-s",
+            ])
+            .output()
+            .context("ssh-agent is required for local jcode SSH connections")?;
+        if !output.status.success() {
+            bail!("could not start dedicated jbox SSH agent");
+        }
+        let text = String::from_utf8(output.stdout)?;
+        let pid: u32 = text
+            .split("SSH_AGENT_PID=")
+            .nth(1)
+            .and_then(|value| value.split(';').next())
+            .context("ssh-agent did not report its process ID")?
+            .parse()?;
+        let status = Command::new("ssh-add")
+            .arg(dir.join("id_ed25519"))
+            .env("SSH_AUTH_SOCK", &socket)
+            .status()?;
+        if !status.success() {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+            bail!("could not add the session key to the dedicated jbox SSH agent");
+        }
+        Ok(pid)
+    }
+    pub fn stop_session_ssh_agent(&self, pid: u32) {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+    /// Jcode's native SSH bridge uses the normal OpenSSH known-hosts database
+    /// and exposes no per-connection known-hosts option. Trust only this
+    /// loopback guest key, tag the line, and remove exactly that line at stop.
+    /// The guest never receives the host's `.ssh` directory.
+    pub fn trust_session_host(&self, host: &str, session_id: &str) -> Result<String> {
+        let home = BaseDirs::new().context("could not determine home directory")?;
+        let ssh_dir = home.home_dir().join(".ssh");
+        fs::create_dir_all(&ssh_dir)?;
+        let known_hosts = ssh_dir.join("known_hosts");
+        let mut key = None;
+        for _ in 0..25 {
+            let output = Command::new("ssh-keyscan")
+                .args(["-T", "1", "-t", "ed25519", host])
+                .output()
+                .context("ssh-keyscan is required to trust the loopback jbox guest")?;
+            if !output.stdout.is_empty() {
+                key = Some(output.stdout);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let key =
+            key.context("could not obtain SSH host key for jbox guest within five seconds")?;
+        let tag = format!("# jbox:{session_id}");
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&known_hosts)?;
+        for line in String::from_utf8(key)?.lines() {
+            writeln!(file, "{line} {tag}")?;
+        }
+        Ok(tag)
+    }
+    pub fn untrust_session_host(&self, tag: &str) -> Result<()> {
+        let home = BaseDirs::new().context("could not determine home directory")?;
+        let known_hosts = home.home_dir().join(".ssh/known_hosts");
+        if !known_hosts.exists() {
+            return Ok(());
+        }
+        let text = fs::read_to_string(&known_hosts)?;
+        let retained = text
+            .lines()
+            .filter(|line| !line.ends_with(tag))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&known_hosts, format!("{retained}\n"))?;
+        Ok(())
+    }
     pub fn write_ssh_config(&self, session: &Session) -> Result<PathBuf> {
         let dir = self.session_ssh_dir(&session.id);
         let file = dir.join("config");
         fs::write(
             &file,
             format!(
-                "Host jbox\n  HostName 127.0.0.1\n  Port {}\n  User jbox\n  IdentityFile {}\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n  UserKnownHostsFile {}\n  ForwardAgent no\n",
+                "Host jbox\n  HostName {}\n  Port {}\n  User jbox\n  IdentityFile {}\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n  UserKnownHostsFile {}\n  ForwardAgent no\n",
+                session.ssh_host,
                 session.ssh_port,
                 dir.join("id_ed25519").display(),
                 dir.join("known_hosts").display()

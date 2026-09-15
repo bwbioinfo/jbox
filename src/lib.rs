@@ -99,6 +99,7 @@ impl App {
             self.paths.ensure_credentials()?;
         }
         let image = ImageManager::new(&self.paths).ensure(&config, &primary)?;
+        let ssh_host = self.next_ssh_host(&session_id)?;
         let session_dir = self.paths.sessions.join(&session_id);
         let worktrees = session_dir.join("worktrees");
         std::fs::create_dir_all(&worktrees)?;
@@ -159,12 +160,27 @@ impl App {
             let _ = std::fs::remove_dir_all(&session_dir);
             return Err(error).context("could not create session SSH credentials");
         }
+        let ssh_agent_pid = match self.paths.start_session_ssh_agent(&ssh) {
+            Ok(pid) => pid,
+            Err(error) => {
+                self.cleanup_worktrees(&repos);
+                let _ = std::fs::remove_dir_all(&session_dir);
+                return Err(error);
+            }
+        };
         let container_name = format!("jbox-{session_id}");
-        let spec = match self.container_spec(&config, &repos, &container_name, &ssh, image.clone())
-        {
+        let spec = match self.container_spec(
+            &config,
+            &repos,
+            &container_name,
+            &ssh,
+            image.clone(),
+            &ssh_host,
+        ) {
             Ok(spec) => spec,
             Err(error) => {
                 self.cleanup_worktrees(&repos);
+                self.paths.stop_session_ssh_agent(ssh_agent_pid);
                 let _ = std::fs::remove_dir_all(&session_dir);
                 return Err(error);
             }
@@ -172,6 +188,17 @@ impl App {
         let port = match self.engine.start(&spec) {
             Ok(port) => port,
             Err(error) => {
+                self.cleanup_worktrees(&repos);
+                self.paths.stop_session_ssh_agent(ssh_agent_pid);
+                let _ = std::fs::remove_dir_all(&session_dir);
+                return Err(error);
+            }
+        };
+        let known_hosts_tag = match self.paths.trust_session_host(&ssh_host, &session_id) {
+            Ok(tag) => tag,
+            Err(error) => {
+                let _ = self.engine.stop(&container_name);
+                self.paths.stop_session_ssh_agent(ssh_agent_pid);
                 self.cleanup_worktrees(&repos);
                 let _ = std::fs::remove_dir_all(&session_dir);
                 return Err(error);
@@ -184,7 +211,10 @@ impl App {
             id: session_id.clone(),
             state: SessionState::Running,
             container_name,
+            ssh_host: ssh_host.clone(),
             ssh_port: port,
+            ssh_agent_pid,
+            known_hosts_tag,
             created_at: now,
             last_activity_at: now,
             ttl_seconds: config.resources.ttl_seconds,
@@ -193,7 +223,7 @@ impl App {
             repos,
         };
         self.state.save(&session)?;
-        println!("jbox session {session_id} is running on 127.0.0.1:{port}");
+        println!("jbox session {session_id} is running on {ssh_host}:{port}");
         if !no_attach {
             self.attach(&session_id)?;
         }
@@ -207,6 +237,7 @@ impl App {
         name: &str,
         ssh: &Path,
         image: String,
+        ssh_host: &str,
     ) -> Result<ContainerSpec> {
         let mut mounts = Vec::new();
         for repo in repos {
@@ -248,6 +279,7 @@ impl App {
             cpus: config.resources.cpus,
             memory: config.resources.memory.clone(),
             network: config.network.clone(),
+            ssh_host: ssh_host.to_owned(),
         })
     }
 
@@ -255,11 +287,11 @@ impl App {
         let mut session = self.state.load(id)?;
         self.require_running(&session)?;
         self.touch(&mut session)?;
-        let wrapper = self.paths.write_ssh_wrapper(&session)?;
+        let ssh_socket = self.paths.session_ssh_dir(&session.id).join("agent.sock");
         let status = Command::new("jcode")
             .args([
                 "--ssh",
-                "jbox@127.0.0.1",
+                &format!("jbox@{}", session.ssh_host),
                 "--ssh-binary",
                 "/usr/local/bin/jcode",
                 "--ssh-server-socket",
@@ -267,14 +299,7 @@ impl App {
                 "--remote-working-dir",
                 &session.repos[0].mount,
             ])
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    wrapper.parent().unwrap().display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
+            .env("SSH_AUTH_SOCK", ssh_socket)
             .status()
             .context("could not launch local jcode")?;
         if !status.success() {
@@ -301,6 +326,8 @@ impl App {
         let mut session = self.state.load(id)?;
         if session.state == SessionState::Running {
             self.engine.stop(&session.container_name)?;
+            self.paths.stop_session_ssh_agent(session.ssh_agent_pid);
+            self.paths.untrust_session_host(&session.known_hosts_tag)?;
             for repo in &session.repos {
                 self.git.restore_and_import_guest_metadata(repo)?;
             }
@@ -368,6 +395,8 @@ impl App {
             }
             if session.state == SessionState::Running {
                 self.engine.stop(&session.container_name)?;
+                self.paths.stop_session_ssh_agent(session.ssh_agent_pid);
+                self.paths.untrust_session_host(&session.known_hosts_tag)?;
                 for repo in &session.repos {
                     self.git.restore_and_import_guest_metadata(repo)?;
                 }
@@ -422,5 +451,23 @@ impl App {
                 .git
                 .remove_worktree(&repo.source, &repo.worktree, false);
         }
+    }
+
+    fn next_ssh_host(&self, session_id: &str) -> Result<String> {
+        let used = self
+            .state
+            .list()?
+            .into_iter()
+            .map(|session| session.ssh_host)
+            .collect::<std::collections::HashSet<_>>();
+        let start = (session_id.bytes().fold(0u8, u8::wrapping_add) % 253) + 2;
+        for offset in 0..253u8 {
+            let octet = 2 + ((start - 2 + offset) % 253);
+            let candidate = format!("127.0.0.{octet}");
+            if !used.contains(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        bail!("all dedicated jbox loopback addresses are in use")
     }
 }

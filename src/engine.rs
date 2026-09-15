@@ -10,6 +10,7 @@ pub struct ContainerSpec {
     pub cpus: u16,
     pub memory: String,
     pub network: Network,
+    pub ssh_host: String,
 }
 
 /// Narrow OCI engine contract. The Kata runtime stays behind this interface.
@@ -91,6 +92,7 @@ impl Engine for DockerEngine {
         let uid = current_id("-u")?;
         let gid = current_id("-g")?;
         let home_tmpfs = format!("/home/jbox:rw,nosuid,nodev,uid={uid},gid={gid},mode=0700");
+        let port_mapping = format!("{}:22:2222", spec.ssh_host);
         let mut command = Self::command();
         command.args([
             "run",
@@ -127,7 +129,7 @@ impl Engine for DockerEngine {
             "--memory",
             &spec.memory,
             "-p",
-            "127.0.0.1::2222",
+            &port_mapping,
         ]);
         if !spec.network.internet {
             command.args(["--network", "none"]);
