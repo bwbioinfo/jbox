@@ -17,4 +17,3 @@ RUN apt-get update \
 ENV PATH=/usr/local/cargo/bin:${PATH} \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/home/jbox/.cargo
-USER jbox
