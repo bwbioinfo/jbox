@@ -1,5 +1,5 @@
 use crate::state::Session;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use directories::BaseDirs;
 use std::fs;
 use std::io::Write;
@@ -324,8 +324,16 @@ impl JboxPaths {
         let ssh_dir = home.home_dir().join(".ssh");
         fs::create_dir_all(&ssh_dir)?;
         let known_hosts = ssh_dir.join("known_hosts");
+        // Kata starts a full guest VM. Under image-cache pressure or a busy
+        // host, sshd can legitimately be later than an ordinary OCI process.
+        // Use a real deadline rather than a fixed attempt count because
+        // ssh-keyscan's one-second connection timeout contributes to each
+        // attempt. This is only readiness probing of a per-session loopback
+        // address, before we publish any session state.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut key = None;
-        for _ in 0..25 {
+        let mut last_error = None;
+        while std::time::Instant::now() < deadline {
             let output = Command::new("ssh-keyscan")
                 .args(["-T", "1", "-t", "ed25519", host])
                 .output()
@@ -334,10 +342,18 @@ impl JboxPaths {
                 key = Some(output.stdout);
                 break;
             }
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            if !stderr.is_empty() {
+                last_error = Some(stderr);
+            }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        let key =
-            key.context("could not obtain SSH host key for jbox guest within five seconds")?;
+        let key = key.with_context(|| match last_error {
+            Some(error) => {
+                format!("could not obtain SSH host key for jbox guest within 30 seconds: {error}")
+            }
+            None => "could not obtain SSH host key for jbox guest within 30 seconds".to_owned(),
+        })?;
         let tag = format!("# jbox:{session_id}");
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -497,12 +513,10 @@ mod tests {
             fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert!(
-            !paths
-                .credentials
-                .join("jcode/home/.jcode/config.toml")
-                .exists()
-        );
+        assert!(!paths
+            .credentials
+            .join("jcode/home/.jcode/config.toml")
+            .exists());
 
         fs::write(home.join(".jcode/auth.json"), "new-oauth").unwrap();
         let report = paths.import_local_credentials_from(&home, false).unwrap();
