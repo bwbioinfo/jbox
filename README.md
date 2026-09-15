@@ -26,13 +26,19 @@ Run these commands yourself because they modify the host and need administrator 
 
 ```bash
 yay -S kata-all-bin
+sudo modprobe vhost_vsock vhost_net
 ```
+
+`/dev/kvm` and `/dev/vhost-vsock` must be available. The commands above load the
+Kata VSOCK and guest-networking modules for the current boot. Persist them after a
+successful smoke test with a root-owned `/etc/modules-load.d/kata-containers.conf`
+containing `vhost_vsock` and `vhost_net`.
 
 `kata-all-bin` 4.x packages the supported `runtime-rs` shim at
 `/opt/kata/runtime-rs/bin/containerd-shim-kata-v2`. Register that shim with Docker
 using the packaged QEMU runtime-rs configuration. Merge this `runtimes` entry into
 an existing `/etc/docker/daemon.json`, rather than overwriting any existing daemon
-settings:
+settings. In particular, retain existing runtimes such as NVIDIA:
 
 ```json
 {
