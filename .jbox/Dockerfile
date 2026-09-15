@@ -1,9 +1,10 @@
+ARG JBOX_BASE_IMAGE
+
 # Rust toolchain for developing jbox itself. The runtime base keeps jcode and
 # the guest SSH daemon; the Rust stage supplies a current toolchain compatible
 # with edition 2024.
 FROM rust:1.98-bookworm AS rust
 
-ARG JBOX_BASE_IMAGE
 FROM ${JBOX_BASE_IMAGE}
 
 USER root
