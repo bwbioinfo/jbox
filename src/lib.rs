@@ -13,6 +13,7 @@ use git::Git;
 use image::ImageManager;
 use paths::{JboxPaths, safe_target};
 use state::{RepoState, Session, SessionState, StateStore};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -258,6 +259,22 @@ impl App {
                 mounts.push((source, target, true));
             }
         }
+        // This is deliberately session-scoped rather than credential-scoped.
+        // Mounting a jcode external-provider directory beneath ~/.local/share
+        // can cause Docker to create its parent directories as root, so the
+        // unprivileged guest cannot create the daemon socket without this
+        // explicit, jbox-owned runtime mount.
+        let runtime = ssh
+            .parent()
+            .context("session SSH directory lacks a parent")?
+            .join("runtime/jcode");
+        std::fs::create_dir_all(&runtime)?;
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))?;
+        mounts.push((
+            runtime,
+            PathBuf::from("/home/jbox/.local/share/jcode"),
+            true,
+        ));
         if config.git.network {
             mounts.push((
                 self.paths.credentials.join("git").join("id_ed25519"),
