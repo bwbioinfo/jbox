@@ -1,0 +1,26 @@
+# Project-local jbox workspace configuration.
+version = 1
+
+[runtime]
+backend = "kata"
+
+[workspace]
+mount = "/workspace/jbox"
+
+[resources]
+cpus = 8
+memory = "16G"
+disk = "40G"
+ttl = "24h"
+
+[network]
+internet = true
+host = false
+lan = false
+
+[jcode]
+persistent_credentials = true
+
+[git]
+network = true
+credentials = "jbox"
