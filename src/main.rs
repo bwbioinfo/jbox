@@ -47,6 +47,13 @@ enum Command {
     Stop {
         session: String,
     },
+    /// Fast-forward a host branch to a session's committed snapshot without stopping it.
+    Accept {
+        session: String,
+        /// Existing local branch checked out in each host repository.
+        #[arg(long)]
+        into: String,
+    },
     Clean {
         session: Option<String>,
         #[arg(long)]
@@ -99,6 +106,7 @@ fn main() -> Result<()> {
         Command::Status { session } => app.status(&session, false)?,
         Command::Diff { session } => app.status(&session, true)?,
         Command::Stop { session } => app.stop(&session)?,
+        Command::Accept { session, into } => app.accept(&session, &into)?,
         Command::Clean { session, force } => app.clean(session.as_deref(), force)?,
         Command::Credentials { command } => match command {
             CredentialCommand::Import { all, yes, replace } => {
@@ -127,6 +135,7 @@ fn normalized_args() -> Vec<OsString> {
         "status",
         "diff",
         "stop",
+        "accept",
         "clean",
         "credentials",
         "doctor",

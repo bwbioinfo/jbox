@@ -119,11 +119,20 @@ jbox attach bright-otter-a1b2c3
 jbox shell bright-otter-a1b2c3
 jbox status bright-otter-a1b2c3
 jbox diff bright-otter-a1b2c3
+jbox accept bright-otter-a1b2c3 --into main
 jbox stop bright-otter-a1b2c3
 jbox clean bright-otter-a1b2c3
 ```
 
-An internal detached watcher checks TTL every minute. TTL uses the most recent create, attach, or shell timestamp. Expiry stops the guest and retains its worktrees. `jbox clean` refuses when a worktree has staged, unstaged, untracked, or post-base commits unless `--force` is explicit.
+`jbox accept <session> --into <branch>` accepts the latest **committed** snapshot
+from every session repository into the named local host branch without stopping
+the guest. The target branch must already be checked out and clean in every
+host repository, and the acceptance is fast-forward only. Uncommitted guest
+changes remain in the running session and later commits can be accepted again.
+If the target has diverged, jbox refuses without changing it. `jbox stop` is
+still the finalization action that restores normal linked-worktree metadata.
+
+An internal detached watcher checks TTL every minute. TTL uses the most recent create, attach, shell, or accept timestamp. Expiry stops the guest and retains its worktrees. `jbox clean` refuses when a worktree has staged, unstaged, untracked, or post-base commits unless `--force` is explicit.
 
 ## `.jbox.toml`
 

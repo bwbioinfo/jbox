@@ -555,6 +555,31 @@ impl App {
         Ok(())
     }
 
+    /// Accept the latest committed snapshot from every repository in a session
+    /// into the explicitly selected host branch. Unlike `stop`, this keeps a
+    /// running guest and its isolated Git metadata intact for further work.
+    pub fn accept(&self, id: &str, target: &str) -> Result<()> {
+        let mut session = self.state.load(id)?;
+        for repo in &session.repos {
+            self.git.import_guest_commits(repo)?;
+        }
+        for repo in &session.repos {
+            self.git.preflight_accept_snapshot(repo, target)?;
+        }
+        for repo in &session.repos {
+            self.git.fast_forward_snapshot(repo, target)?;
+            println!(
+                "accepted {} snapshot from {} into {}",
+                repo.name, repo.branch, target
+            );
+        }
+        self.touch(&mut session)?;
+        if session.state == SessionState::Running {
+            println!("jbox session {id} remains running for further work.");
+        }
+        Ok(())
+    }
+
     pub fn list(&self) -> Result<()> {
         let sessions = self.state.list()?;
         if sessions.is_empty() {

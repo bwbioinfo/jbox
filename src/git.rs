@@ -134,9 +134,10 @@ impl Git {
         Ok(())
     }
 
-    /// Import commits made using the guest metadata, then restore the normal
-    /// linked-worktree git file so the branch remains a standard host branch.
-    pub fn restore_and_import_guest_metadata(&self, repo: &RepoState) -> Result<()> {
+    /// Import the guest's latest committed snapshot while leaving its isolated
+    /// Git directory in place. This is safe to use for a running session: any
+    /// later commits remain on the same guest branch and can be imported again.
+    pub fn import_guest_commits(&self, repo: &RepoState) -> Result<()> {
         let gitfile = repo.worktree.join(".git");
         if !gitfile.is_dir() {
             return Ok(());
@@ -145,15 +146,102 @@ impl Git {
             &repo.source,
             &["fetch", "--quiet", &gitfile.to_string_lossy(), &repo.branch],
         )?;
+        let session_ref = format!("refs/heads/{}", repo.branch);
+        let is_fast_forward = Command::new("git")
+            .arg("-C")
+            .arg(&repo.source)
+            .args(["merge-base", "--is-ancestor", &session_ref, "FETCH_HEAD"])
+            .status()
+            .context("could not verify imported guest history")?;
+        if !is_fast_forward.success() {
+            bail!(
+                "guest branch `{}` rewrote history; refusing to replace its host snapshot",
+                repo.branch
+            );
+        }
         Self::run(
             &repo.source,
             &[
                 "update-ref",
-                &format!("refs/heads/{}", repo.branch),
+                &session_ref,
                 "FETCH_HEAD",
             ],
         )?;
+        Ok(())
+    }
+
+    /// Import commits made using the guest metadata, then restore the normal
+    /// linked-worktree git file so the branch remains a standard host branch.
+    pub fn restore_and_import_guest_metadata(&self, repo: &RepoState) -> Result<()> {
+        self.import_guest_commits(repo)?;
         self.restore_guest_metadata(repo)
+    }
+
+    /// Verify that the host checkout is clean and currently on `target`, then
+    /// fast-forward it to the imported guest session branch. The caller imports
+    /// all session branches before calling this method, avoiding a live guest
+    /// metadata mutation during the merge itself.
+    pub fn preflight_accept_snapshot(&self, repo: &RepoState, target: &str) -> Result<()> {
+        let target = Self::run(&repo.source, &["check-ref-format", "--branch", target])?;
+        let current = Self::run(&repo.source, &["branch", "--show-current"])?;
+        if current.is_empty() {
+            bail!(
+                "cannot accept {}: host repository {} is detached; check out `{target}` first",
+                repo.name,
+                repo.source.display()
+            );
+        }
+        if current != target {
+            bail!(
+                "cannot accept {}: host repository {} is on `{current}`, not `{target}`; check out the target branch first",
+                repo.name,
+                repo.source.display()
+            );
+        }
+        if !Self::run(&repo.source, &["status", "--porcelain"])?.is_empty() {
+            bail!(
+                "cannot accept {}: host repository {} has uncommitted changes",
+                repo.name,
+                repo.source.display()
+            );
+        }
+        let target_ref = format!("refs/heads/{target}");
+        Self::run(&repo.source, &["rev-parse", "--verify", &target_ref])?;
+        let ancestor = Command::new("git")
+            .arg("-C")
+            .arg(&repo.source)
+            .args(["merge-base", "--is-ancestor", &target, &repo.branch])
+            .status()
+            .context("could not verify whether the guest snapshot can fast-forward the host")?;
+        if !ancestor.success() {
+            bail!(
+                "cannot accept {}: `{target}` has diverged from guest branch `{}`; merge or rebase it manually",
+                repo.name,
+                repo.branch
+            );
+        }
+        Ok(())
+    }
+
+    /// Fast-forward a host branch after `preflight_accept_snapshot` succeeded.
+    /// `git merge` still protects the checkout if another process changes it
+    /// between the preflight and this final operation.
+    pub fn fast_forward_snapshot(&self, repo: &RepoState, target: &str) -> Result<()> {
+        let target = Self::run(&repo.source, &["check-ref-format", "--branch", target])?;
+        let current = Self::run(&repo.source, &["branch", "--show-current"])?;
+        if current != target {
+            bail!(
+                "cannot accept {}: host branch changed from `{target}` before it could be merged",
+                repo.name
+            );
+        }
+        Self::run(&repo.source, &["merge", "--ff-only", &repo.branch])?;
+        Ok(())
+    }
+
+    pub fn accept_snapshot(&self, repo: &RepoState, target: &str) -> Result<()> {
+        self.preflight_accept_snapshot(repo, target)?;
+        self.fast_forward_snapshot(repo, target)
     }
 
     pub fn restore_guest_metadata(&self, repo: &RepoState) -> Result<()> {
@@ -305,6 +393,68 @@ mod tests {
             std::fs::read_to_string(wt.join("a")).unwrap(),
             "guest change"
         );
+        assert!(Git.remove_worktree(tmp.path(), &wt, false).is_ok());
+    }
+
+    #[test]
+    fn accepts_committed_snapshots_without_stopping_the_guest_worktree() {
+        let tmp = tempdir().unwrap();
+        git(tmp.path(), &["init"]);
+        git(tmp.path(), &["config", "user.email", "host@example.com"]);
+        git(tmp.path(), &["config", "user.name", "Host"]);
+        let target = Git::run(tmp.path(), &["branch", "--show-current"]).unwrap();
+        std::fs::write(tmp.path().join("a"), "base").unwrap();
+        git(tmp.path(), &["add", "."]);
+        git(tmp.path(), &["commit", "-m", "base"]);
+
+        // Real jbox worktrees are outside the host checkout. Keep the test
+        // layout faithful so the host cleanliness gate can be exercised.
+        let session = tempdir().unwrap();
+        let wt = session.path().join("worktree");
+        let made = Git
+            .add_worktree(tmp.path(), &wt, "bright-fox-123", "repo")
+            .unwrap();
+        let host_gitfile = session.path().join("host-gitfile");
+        let guest_author = ResolvedGitAuthor {
+            name: Some("Guest".into()),
+            email: Some("guest@example.com".into()),
+        };
+        Git.isolate_guest_metadata(
+            tmp.path(),
+            &wt,
+            &made.branch,
+            &made.commit,
+            &host_gitfile,
+            &guest_author,
+        )
+        .unwrap();
+        let repo = RepoState {
+            name: "repo".into(),
+            source: tmp.path().into(),
+            worktree: wt.clone(),
+            mount: "/workspace/repo".into(),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile,
+        };
+
+        std::fs::write(wt.join("a"), "first accepted snapshot").unwrap();
+        git(&wt, &["add", "a"]);
+        git(&wt, &["commit", "-m", "first guest change"]);
+        Git.import_guest_commits(&repo).unwrap();
+        Git.accept_snapshot(&repo, &target).unwrap();
+        assert!(wt.join(".git").is_dir());
+        assert_eq!(std::fs::read_to_string(tmp.path().join("a")).unwrap(), "first accepted snapshot");
+
+        std::fs::write(wt.join("a"), "second accepted snapshot").unwrap();
+        git(&wt, &["add", "a"]);
+        git(&wt, &["commit", "-m", "second guest change"]);
+        Git.import_guest_commits(&repo).unwrap();
+        Git.accept_snapshot(&repo, &target).unwrap();
+        assert!(wt.join(".git").is_dir());
+        assert_eq!(std::fs::read_to_string(tmp.path().join("a")).unwrap(), "second accepted snapshot");
+
+        Git.restore_and_import_guest_metadata(&repo).unwrap();
         assert!(Git.remove_worktree(tmp.path(), &wt, false).is_ok());
     }
 }
