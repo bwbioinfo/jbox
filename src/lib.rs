@@ -47,6 +47,25 @@ impl App {
                 "missing"
             }
         );
+        println!(
+            "VSOCK: {}",
+            if Path::new("/dev/vhost-vsock").exists() {
+                "available"
+            } else {
+                "missing: load vhost_vsock"
+            }
+        );
+        let vhost_net = std::fs::read_to_string("/proc/modules")
+            .map(|modules| modules.lines().any(|line| line.starts_with("vhost_net ")))
+            .unwrap_or(false);
+        println!(
+            "Kata guest networking: {}",
+            if vhost_net {
+                "vhost_net loaded"
+            } else {
+                "vhost_net missing: run `sudo modprobe vhost_net`"
+            }
+        );
         match self.engine.check() {
             Ok(()) => println!("Docker + Kata runtime: ready"),
             Err(error) => {

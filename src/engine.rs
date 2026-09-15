@@ -1,6 +1,6 @@
 use crate::config::Network;
 use anyhow::{Context, Result, bail};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct ContainerSpec {
@@ -38,6 +38,29 @@ impl DockerEngine {
         }
         Ok(String::from_utf8(output.stdout)?.trim().into())
     }
+
+    fn check_host_prerequisites(needs_network: bool) -> Result<()> {
+        if !Path::new("/dev/kvm").exists() {
+            bail!("Kata requires an accessible /dev/kvm device");
+        }
+        if !Path::new("/dev/vhost-vsock").exists() {
+            bail!("Kata requires /dev/vhost-vsock; load the vhost_vsock kernel module");
+        }
+        if needs_network && !module_loaded("vhost_net")? {
+            bail!(
+                "Kata guest networking requires the vhost_net kernel module; run `sudo modprobe vhost_net`"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn module_loaded(name: &str) -> Result<bool> {
+    let modules = std::fs::read_to_string("/proc/modules")
+        .context("could not inspect loaded kernel modules")?;
+    Ok(modules
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(name)))
 }
 
 impl Engine for DockerEngine {
@@ -63,6 +86,7 @@ impl Engine for DockerEngine {
     }
 
     fn start(&self, spec: &ContainerSpec) -> Result<u16> {
+        Self::check_host_prerequisites(spec.network.internet)?;
         let cpus = spec.cpus.to_string();
         let mut command = Self::command();
         command.args([
