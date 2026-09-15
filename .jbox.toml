@@ -7,6 +7,9 @@ backend = "kata"
 [workspace]
 mount = "/workspace/jbox"
 
+[image]
+dockerfile = ".jbox/Dockerfile"
+
 [resources]
 cpus = 8
 memory = "16G"
