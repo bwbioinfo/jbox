@@ -163,6 +163,12 @@ jbox stop bright-otter-a1b2c3
 jbox clean bright-otter-a1b2c3
 ```
 
+When jbox opens Jcode or a guest shell from an interactive terminal, it first
+renders a boxed **📦 JBOX GUEST** marker and sets the terminal title to
+`[📦 JBOX] <session> · <workspace>`. This distinguishes the Kata-isolated
+session in terminal tabs and window lists. Jcode's native remote header still
+identifies the SSH host; jbox does not alter Jcode's own TUI theme.
+
 From inside a host repository, `jbox accept` presents only retained sessions
 whose worktree belongs to that repository. It defaults to the currently checked
 out branch, shows session state and whether each worktree has changes, then asks
