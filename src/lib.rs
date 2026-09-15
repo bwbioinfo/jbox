@@ -260,17 +260,6 @@ impl App {
                     return Err(error);
                 }
             };
-            if let Err(error) = self.git.snapshot_beads_export(&repo.source, &worktree) {
-                let _ = self.git.remove_worktree(&repo.source, &worktree, false);
-                self.cleanup_worktrees(&repos);
-                let _ = std::fs::remove_dir_all(&session_dir);
-                return Err(error).with_context(|| {
-                    format!(
-                        "could not snapshot Beads task context for {}",
-                        repo.source.display()
-                    )
-                });
-            }
             println!(
                 "{}: sandbox branch {} starts at {}",
                 repo.name, created.branch, created.commit
@@ -291,6 +280,35 @@ impl App {
                 let _ = std::fs::remove_dir_all(&session_dir);
                 return Err(error).context("could not prepare isolated guest Git metadata");
             }
+            // `isolate_guest_metadata` hard-resets the generated worktree to
+            // its session base. Snapshot Beads *after* that reset so a current
+            // host export, including uncommitted task updates, reaches the
+            // guest rather than being silently reverted to HEAD.
+            let beads_snapshot = match self.git.snapshot_beads_export(&repo.source, &worktree) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    let provisional = RepoState {
+                        name: repo.name.clone(),
+                        source: repo.source.clone(),
+                        worktree: worktree.clone(),
+                        mount: repo.mount.clone(),
+                        branch: created.branch.clone(),
+                        base_commit: created.commit.clone(),
+                        host_gitfile: host_gitfile.clone(),
+                        beads_snapshot: None,
+                    };
+                    let _ = self.git.restore_guest_metadata(&provisional);
+                    let _ = self.git.remove_worktree(&repo.source, &worktree, false);
+                    self.cleanup_worktrees(&repos);
+                    let _ = std::fs::remove_dir_all(&session_dir);
+                    return Err(error).with_context(|| {
+                        format!(
+                            "could not snapshot Beads task context for {}",
+                            repo.source.display()
+                        )
+                    });
+                }
+            };
             repos.push(RepoState {
                 name: repo.name.clone(),
                 source: repo.source.clone(),
@@ -299,6 +317,7 @@ impl App {
                 branch: created.branch,
                 base_commit: created.commit,
                 host_gitfile,
+                beads_snapshot,
             });
         }
 
@@ -1344,7 +1363,7 @@ impl App {
         let output = if diff {
             self.git.diff_stat(repo)?
         } else {
-            self.git.status(&repo.worktree)?
+            self.git.status(repo)?
         };
         println!(
             "\n{} ({:?})\n{} [{}]",
@@ -1570,6 +1589,7 @@ mod tests {
                 branch: format!("jbox/{id}/repo"),
                 base_commit: "deadbeef".into(),
                 host_gitfile: source.join("host-gitfile"),
+                beads_snapshot: None,
                 source,
             }],
             jcode_default_provider: None,

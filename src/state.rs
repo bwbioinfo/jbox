@@ -19,6 +19,11 @@ pub struct RepoState {
     pub branch: String,
     pub base_commit: String,
     pub host_gitfile: PathBuf,
+    /// Digest of the portable Beads JSONL snapshot that jbox itself placed in
+    /// this worktree. This lets lifecycle commands distinguish task context
+    /// seeded by jbox from an agent's later edit to that export.
+    #[serde(default)]
+    pub beads_snapshot: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {

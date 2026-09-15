@@ -1,5 +1,6 @@
 use crate::{config::ResolvedGitAuthor, state::RepoState};
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -77,7 +78,7 @@ impl Git {
     /// files rule: task context needs to follow an agent into its disposable
     /// workspace. The copy is session-local and is hydrated into a guest-local
     /// database during guest startup.
-    pub fn snapshot_beads_export(&self, source: &Path, worktree: &Path) -> Result<bool> {
+    pub fn snapshot_beads_export(&self, source: &Path, worktree: &Path) -> Result<Option<String>> {
         let source = source.canonicalize().with_context(|| {
             format!(
                 "cannot resolve Beads source repository {}",
@@ -86,7 +87,7 @@ impl Git {
         })?;
         let export = source.join(".beads/issues.jsonl");
         if !export.exists() {
-            return Ok(false);
+            return Ok(None);
         }
         let export = export
             .canonicalize()
@@ -155,7 +156,7 @@ impl Git {
                 destination.display()
             )
         })?;
-        Ok(true)
+        Ok(Some(format!("{:x}", Sha256::digest(&content))))
     }
     pub fn remove_worktree(&self, repo: &Path, worktree: &Path, force: bool) -> Result<()> {
         if !worktree.exists() {
@@ -283,7 +284,7 @@ impl Git {
         repo: &RepoState,
         author: &ResolvedGitAuthor,
     ) -> Result<()> {
-        if !Self::run(&repo.worktree, &["status", "--porcelain"])?.is_empty() {
+        if self.has_uncommitted_changes(repo)? {
             bail!(
                 "cannot resume {}: retained worktree {} has uncommitted changes; commit or stash them before resuming",
                 repo.name,
@@ -383,14 +384,15 @@ impl Git {
         Self::run(&repo.worktree, &["reset", "--mixed", &repo.branch])?;
         Ok(())
     }
-    pub fn status(&self, worktree: &Path) -> Result<String> {
-        Self::run(worktree, &["status", "--short", "--branch"])
+    pub fn status(&self, repo: &RepoState) -> Result<String> {
+        let status = Self::run(&repo.worktree, &["status", "--short", "--branch"])?;
+        Ok(self.without_jbox_beads_snapshot(repo, &status))
     }
     pub fn current_branch(&self, repository: &Path) -> Result<String> {
         Self::run(repository, &["branch", "--show-current"])
     }
     pub fn rebase_worktree(&self, repo: &RepoState, onto: &str) -> Result<()> {
-        if !Self::run(&repo.worktree, &["status", "--porcelain"])?.is_empty() {
+        if self.has_uncommitted_changes(repo)? {
             bail!(
                 "cannot rebase {}: worktree {} has uncommitted changes; commit or stash them first",
                 repo.name,
@@ -421,7 +423,7 @@ impl Git {
         ))
     }
     pub fn change_state(&self, repo: &RepoState) -> Result<WorktreeChangeState> {
-        if !Self::run(&repo.worktree, &["status", "--porcelain"])?.is_empty() {
+        if self.has_uncommitted_changes(repo)? {
             return Ok(WorktreeChangeState::Changes);
         }
         let range = format!("{}..HEAD", repo.base_commit);
@@ -452,6 +454,46 @@ impl Git {
 
     pub fn has_uncommitted_or_unmerged_changes(&self, repo: &RepoState) -> Result<bool> {
         Ok(self.change_state(repo)? == WorktreeChangeState::Changes)
+    }
+
+    /// An unchanged snapshot is jbox-created task context. It must not block
+    /// cleanup or resume, while every agent edit remains ordinary user work.
+    fn has_uncommitted_changes(&self, repo: &RepoState) -> Result<bool> {
+        let status = Self::run(&repo.worktree, &["status", "--porcelain"])?;
+        Ok(!self
+            .without_jbox_beads_snapshot(repo, &status)
+            .trim()
+            .is_empty())
+    }
+
+    fn without_jbox_beads_snapshot(&self, repo: &RepoState, status: &str) -> String {
+        if !self.is_unchanged_beads_snapshot(repo) {
+            return status.into();
+        }
+        status
+            .lines()
+            .filter(|line| !line.ends_with(".beads/issues.jsonl"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn is_unchanged_beads_snapshot(&self, repo: &RepoState) -> bool {
+        let Some(expected) = &repo.beads_snapshot else {
+            return false;
+        };
+        let Ok(content) = fs::read(repo.worktree.join(".beads/issues.jsonl")) else {
+            return false;
+        };
+        if format!("{:x}", Sha256::digest(&content)) != *expected {
+            return false;
+        }
+        // Staging a version is an explicit user action, even if the current
+        // worktree content happens to equal the original snapshot again.
+        Self::run(
+            &repo.worktree,
+            &["diff", "--cached", "--quiet", "--", ".beads/issues.jsonl"],
+        )
+        .is_ok()
     }
 
     fn run_git_dir(git_dir: &Path, args: &[&str]) -> Result<String> {
@@ -530,6 +572,7 @@ mod tests {
         assert!(
             Git.snapshot_beads_export(source.path(), worktree.path())
                 .unwrap()
+                .is_some()
         );
         assert_eq!(
             fs::read_to_string(worktree.path().join(".beads/issues.jsonl")).unwrap(),
@@ -565,6 +608,71 @@ mod tests {
                 .to_string()
                 .contains("outside source repository")
         );
+    }
+
+    #[test]
+    fn unchanged_jbox_beads_snapshot_is_clean_but_an_edit_is_preserved() {
+        let source = tempdir().unwrap();
+        git(source.path(), &["init"]);
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test"]);
+        fs::create_dir_all(source.path().join(".beads")).unwrap();
+        fs::write(source.path().join(".beads/issues.jsonl"), "base\n").unwrap();
+        git(source.path(), &["add", "."]);
+        git(source.path(), &["commit", "-m", "base"]);
+        // This models a current host task export that is newer than HEAD.
+        fs::write(source.path().join(".beads/issues.jsonl"), "current\n").unwrap();
+
+        let session = tempdir().unwrap();
+        let worktree = session.path().join("worktree");
+        let made = Git
+            .add_worktree(source.path(), &worktree, "bright-fox-123", "repo")
+            .unwrap();
+        let host_gitfile = source.path().join("host-gitfile");
+        let author = ResolvedGitAuthor {
+            name: Some("Guest".into()),
+            email: Some("guest@example.com".into()),
+        };
+        Git.isolate_guest_metadata(
+            source.path(),
+            &worktree,
+            &made.branch,
+            &made.commit,
+            &host_gitfile,
+            &author,
+        )
+        .unwrap();
+        let snapshot = Git.snapshot_beads_export(source.path(), &worktree).unwrap();
+        assert_eq!(
+            fs::read_to_string(worktree.join(".beads/issues.jsonl")).unwrap(),
+            "current\n"
+        );
+        let repo = RepoState {
+            name: "repo".into(),
+            source: source.path().into(),
+            worktree: worktree.clone(),
+            mount: "/workspace/repo".into(),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile,
+            beads_snapshot: snapshot,
+        };
+
+        assert_eq!(Git.change_state(&repo).unwrap(), WorktreeChangeState::Clean);
+        assert!(Git.status(&repo).unwrap().contains("## jbox/"));
+        assert!(!Git.status(&repo).unwrap().contains("issues.jsonl"));
+        Git.restore_guest_metadata(&repo).unwrap();
+        Git.prepare_retained_worktree_for_guest(&repo, &author)
+            .unwrap();
+        Git.restore_guest_metadata(&repo).unwrap();
+
+        fs::write(worktree.join(".beads/issues.jsonl"), "agent edit\n").unwrap();
+        assert_eq!(
+            Git.change_state(&repo).unwrap(),
+            WorktreeChangeState::Changes
+        );
+        assert!(Git.has_uncommitted_or_unmerged_changes(&repo).unwrap());
+        Git.remove_worktree(source.path(), &worktree, true).unwrap();
     }
 
     #[test]
@@ -614,6 +722,7 @@ mod tests {
             branch: made.branch.clone(),
             base_commit: made.commit,
             host_gitfile,
+            beads_snapshot: None,
         };
         Git.restore_and_import_guest_metadata(&repo).unwrap();
         assert!(wt.join(".git").is_file());
@@ -666,6 +775,7 @@ mod tests {
             branch: made.branch,
             base_commit: made.commit,
             host_gitfile,
+            beads_snapshot: None,
         };
         Git.restore_and_import_guest_metadata(&repo).unwrap();
         assert!(wt.join(".git").is_file());
@@ -727,6 +837,7 @@ mod tests {
             branch: made.branch,
             base_commit: made.commit,
             host_gitfile,
+            beads_snapshot: None,
         };
 
         std::fs::write(wt.join("a"), "first accepted snapshot").unwrap();
