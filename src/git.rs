@@ -258,6 +258,28 @@ impl Git {
     pub fn current_branch(&self, repository: &Path) -> Result<String> {
         Self::run(repository, &["branch", "--show-current"])
     }
+    pub fn rebase_worktree(&self, repo: &RepoState, onto: &str) -> Result<()> {
+        if !Self::run(&repo.worktree, &["status", "--porcelain"])?.is_empty() {
+            bail!(
+                "cannot rebase {}: worktree {} has uncommitted changes; commit or stash them first",
+                repo.name,
+                repo.worktree.display()
+            );
+        }
+        let onto = Self::run(&repo.source, &["check-ref-format", "--branch", onto])?;
+        Self::run(
+            &repo.source,
+            &["rev-parse", "--verify", &format!("refs/heads/{onto}")],
+        )?;
+        Self::run(&repo.worktree, &["rebase", &onto]).with_context(|| {
+            format!(
+                "rebase stopped for {}; resolve conflicts in {}, then run `git rebase --continue` there",
+                repo.name,
+                repo.worktree.display()
+            )
+        })?;
+        Ok(())
+    }
     pub fn diff_stat(&self, repo: &RepoState) -> Result<String> {
         let uncommitted = Self::run(&repo.worktree, &["diff", "--stat"])?;
         let staged = Self::run(&repo.worktree, &["diff", "--cached", "--stat"])?;

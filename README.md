@@ -168,6 +168,12 @@ merge of sibling repositories. Pass a session explicitly with
 `jbox accept <session> --into <branch>` to retain the existing all-repository
 acceptance workflow.
 
+Similarly, `jbox rebase` from a repository selects one of its worktrees and
+rebases it onto the checked-out branch, or a branch given by `--onto`. It asks
+for confirmation and stops a running guest before rebasing so its Git metadata
+is synchronized. Commit or stash guest changes first. Resolve a conflict in the
+reported retained worktree, then run `git rebase --continue` and `jbox accept`.
+
 `jbox accept <session> --into <branch>` accepts the latest **committed** snapshot
 from every session repository into the named local host branch without stopping
 the guest. The target branch must already be checked out and clean in every

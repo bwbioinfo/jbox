@@ -55,6 +55,12 @@ enum Command {
         #[arg(long)]
         into: Option<String>,
     },
+    /// Stop a selected guest if needed and rebase its matching worktree onto a host branch.
+    Rebase {
+        /// Branch to rebase onto. Defaults to the current host branch.
+        #[arg(long)]
+        onto: Option<String>,
+    },
     Clean {
         session: Option<String>,
         #[arg(long)]
@@ -116,6 +122,9 @@ fn main() -> Result<()> {
             )?,
             None => app.accept_from_repository(&std::env::current_dir()?, into.as_deref())?,
         },
+        Command::Rebase { onto } => {
+            app.rebase_from_repository(&std::env::current_dir()?, onto.as_deref())?
+        }
         Command::Clean { session, force } => app.clean(session.as_deref(), force)?,
         Command::Credentials { command } => match command {
             CredentialCommand::Import { all, yes, replace } => {
@@ -145,6 +154,7 @@ fn normalized_args() -> Vec<OsString> {
         "diff",
         "stop",
         "accept",
+        "rebase",
         "clean",
         "credentials",
         "doctor",

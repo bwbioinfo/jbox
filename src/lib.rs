@@ -709,6 +709,80 @@ impl App {
         Ok(())
     }
 
+    /// Rebase a single selected session worktree from its host repository. A
+    /// live guest is explicitly stopped first so its isolated Git metadata is
+    /// imported and restored before the host-side rebase changes the branch.
+    pub fn rebase_from_repository(&self, input: &Path, onto: Option<&str>) -> Result<()> {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!("`jbox rebase` needs an interactive terminal");
+        }
+        let repository = Config::repository_root(input)?;
+        let candidates = self.sessions_for_repository(&repository)?;
+        if candidates.is_empty() {
+            bail!(
+                "no retained jbox worktrees belong to {}",
+                repository.display()
+            );
+        }
+        let onto = match onto {
+            Some(branch) => branch.to_owned(),
+            None => self.git.current_branch(&repository)?,
+        };
+        if onto.is_empty() {
+            bail!("{} is detached; pass --onto <branch>", repository.display());
+        }
+        println!("Jbox worktrees for {}:", repository.display());
+        for (index, (session, repo)) in candidates.iter().enumerate() {
+            println!(
+                "  {}) {}  {:?}  {}",
+                index + 1,
+                session.id,
+                session.state,
+                repo.branch
+            );
+        }
+        print!("Select a worktree to rebase onto `{onto}` (blank cancels): ");
+        io::stdout().flush()?;
+        let mut selected = String::new();
+        io::stdin().read_line(&mut selected)?;
+        let selected = selected.trim();
+        if selected.is_empty() {
+            println!("rebase cancelled.");
+            return Ok(());
+        }
+        let index: usize = selected
+            .parse()
+            .context("select a worktree by its displayed number")?;
+        if index == 0 || index > candidates.len() {
+            bail!("selection must be between 1 and {}", candidates.len());
+        }
+        let (session, repo) = &candidates[index - 1];
+        print!(
+            "Rebase {} from session {} onto `{onto}`? [y/N]: ",
+            repo.branch, session.id
+        );
+        io::stdout().flush()?;
+        let mut confirmed = String::new();
+        io::stdin().read_line(&mut confirmed)?;
+        if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
+            println!("rebase cancelled.");
+            return Ok(());
+        }
+        if session.state == SessionState::Running {
+            println!(
+                "stopping {} to safely synchronize its Git metadata...",
+                session.id
+            );
+            self.stop(&session.id)?;
+        }
+        self.git.rebase_worktree(repo, &onto)?;
+        println!(
+            "rebased {} onto `{onto}`. Run `jbox accept` to fast-forward it.",
+            repo.branch
+        );
+        Ok(())
+    }
+
     fn sessions_for_repository(&self, repository: &Path) -> Result<Vec<(Session, RepoState)>> {
         Ok(self
             .state
