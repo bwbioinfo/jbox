@@ -7,6 +7,21 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+const CREDENTIAL_FILE_LIMIT: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct LocalCredential {
+    pub provider_hint: String,
+    pub source: PathBuf,
+    pub destination: PathBuf,
+}
+
+#[derive(Debug, Default)]
+pub struct CredentialImportReport {
+    pub imported: Vec<LocalCredential>,
+    pub retained: Vec<LocalCredential>,
+}
+
 #[derive(Clone)]
 pub struct JboxPaths {
     pub data: PathBuf,
@@ -67,6 +82,146 @@ impl JboxPaths {
         }
         fs::set_permissions(&key, fs::Permissions::from_mode(0o600))?;
         Ok(())
+    }
+    /// The only credential locations that may be exposed to the guest. They
+    /// live below jbox-owned state, never beneath the user's normal home.
+    pub fn jcode_credential_mounts(&self) -> Result<Vec<(PathBuf, PathBuf)>> {
+        let root = self.credentials.join("jcode").join("home");
+        let mounts = [
+            (root.join(".jcode"), "/home/jbox/.jcode"),
+            (root.join(".config/jcode"), "/home/jbox/.config/jcode"),
+            (
+                root.join(".config/github-copilot"),
+                "/home/jbox/.config/github-copilot",
+            ),
+            (root.join(".codex"), "/home/jbox/.codex"),
+            (root.join(".claude"), "/home/jbox/.claude"),
+            (root.join(".gemini"), "/home/jbox/.gemini"),
+            (
+                root.join(".local/share/opencode"),
+                "/home/jbox/.local/share/opencode",
+            ),
+            (root.join(".pi/agent"), "/home/jbox/.pi/agent"),
+            (root.join(".openclaw"), "/home/jbox/.openclaw"),
+            (root.join(".hermes"), "/home/jbox/.hermes"),
+        ];
+        let mut resolved = Vec::new();
+        for (source, target) in mounts {
+            fs::create_dir_all(&source)?;
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o700))?;
+            resolved.push((source, PathBuf::from(target)));
+        }
+        Ok(resolved)
+    }
+
+    /// Enumerate a deliberately narrow allowlist of credential files that
+    /// Jcode documents as provider authentication stores. This does not read
+    /// arbitrary ~/.jcode configuration, SSH material, shells, or keyrings.
+    pub fn local_credentials(&self) -> Result<Vec<LocalCredential>> {
+        let home = BaseDirs::new()
+            .context("could not determine home directory")?
+            .home_dir()
+            .to_path_buf();
+        self.local_credentials_from(&home)
+    }
+
+    fn local_credentials_from(&self, home: &Path) -> Result<Vec<LocalCredential>> {
+        let root = self.credentials.join("jcode").join("home");
+        let mut files = vec![
+            ("Claude OAuth", ".jcode/auth.json"),
+            ("OpenAI OAuth", ".jcode/openai-auth.json"),
+            ("Gemini OAuth", ".jcode/gemini_oauth.json"),
+            ("OpenAI Codex OAuth", ".codex/auth.json"),
+            ("Claude Code OAuth", ".claude/.credentials.json"),
+            ("Gemini CLI OAuth", ".gemini/oauth_creds.json"),
+            ("GitHub Copilot", ".config/github-copilot/hosts.json"),
+            ("OpenCode", ".local/share/opencode/auth.json"),
+            ("pi", ".pi/agent/auth.json"),
+            ("OpenClaw", ".openclaw/agent/auth.json"),
+            ("OpenClaw", ".openclaw/credentials/oauth.json"),
+            ("Hermes", ".hermes/auth.json"),
+        ];
+        let mut credentials = Vec::new();
+        for (provider_hint, relative) in files.drain(..) {
+            let source = home.join(relative);
+            if is_safe_credential_file(&source)? {
+                credentials.push(LocalCredential {
+                    provider_hint: provider_hint.to_owned(),
+                    source,
+                    destination: root.join(relative),
+                });
+            }
+        }
+        // Jcode stores API-provider credentials as individual .env files. The
+        // extension is the allowlist: config.toml, session history, and other
+        // Jcode configuration are intentionally excluded.
+        let env_dir = home.join(".config/jcode");
+        if let Ok(entries) = fs::read_dir(&env_dir) {
+            for entry in entries.flatten() {
+                let source = entry.path();
+                if source.extension().is_some_and(|ext| ext == "env")
+                    && source.file_name().is_none_or(|name| name != "lmstudio.env")
+                    && is_safe_credential_file(&source)?
+                {
+                    let name = source.file_name().context("credential file lacks a name")?;
+                    credentials.push(LocalCredential {
+                        provider_hint: format!("Jcode API credential ({})", name.to_string_lossy()),
+                        destination: root.join(".config/jcode").join(name),
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(credentials)
+    }
+
+    /// Copy an explicitly selected local provider-store allowlist into private
+    /// jbox state. Existing guest credentials are never replaced unless the
+    /// user makes that choice with `--replace`.
+    pub fn import_local_credentials(&self, replace: bool) -> Result<CredentialImportReport> {
+        let home = BaseDirs::new()
+            .context("could not determine home directory")?
+            .home_dir()
+            .to_path_buf();
+        self.import_local_credentials_from(&home, replace)
+    }
+
+    fn import_local_credentials_from(
+        &self,
+        home: &Path,
+        replace: bool,
+    ) -> Result<CredentialImportReport> {
+        let mut report = CredentialImportReport::default();
+        for credential in self.local_credentials_from(home)? {
+            let destination_parent = credential
+                .destination
+                .parent()
+                .context("credential destination lacks a parent")?;
+            fs::create_dir_all(destination_parent)?;
+            fs::set_permissions(destination_parent, fs::Permissions::from_mode(0o700))?;
+            if credential.destination.exists() {
+                if !replace {
+                    report.retained.push(credential);
+                    continue;
+                }
+                if fs::symlink_metadata(&credential.destination)?
+                    .file_type()
+                    .is_symlink()
+                {
+                    bail!(
+                        "refusing to replace symlinked jbox credential {}",
+                        credential.destination.display()
+                    );
+                }
+            }
+            let temporary = credential.destination.with_extension("jbox-importing");
+            let _ = fs::remove_file(&temporary);
+            fs::copy(&credential.source, &temporary)?;
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+            fs::rename(&temporary, &credential.destination)?;
+            report.imported.push(credential);
+        }
+        Ok(report)
     }
     pub fn session_ssh_dir(&self, id: &str) -> PathBuf {
         self.sessions.join(id).join("ssh")
@@ -216,6 +371,17 @@ impl JboxPaths {
         Ok(file)
     }
 }
+
+fn is_safe_credential_file(path: &Path) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(metadata.file_type().is_file()
+        && !metadata.file_type().is_symlink()
+        && metadata.len() <= CREDENTIAL_FILE_LIMIT)
+}
 fn shell_quote(value: &Path) -> String {
     format!("'{}'", value.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -283,5 +449,43 @@ mod tests {
         assert!(safe_target("/workspace/project").is_ok());
         assert!(safe_target("/workspace/../etc").is_err());
         assert!(safe_target("relative").is_err());
+    }
+
+    #[test]
+    fn imports_only_allowlisted_credential_files_without_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("host-home");
+        let paths = JboxPaths {
+            data: tmp.path().join("data"),
+            cache: tmp.path().join("cache"),
+            sessions: tmp.path().join("data/sessions"),
+            credentials: tmp.path().join("data/credentials"),
+        };
+        fs::create_dir_all(home.join(".jcode")).unwrap();
+        fs::create_dir_all(home.join(".config/jcode")).unwrap();
+        fs::write(home.join(".jcode/auth.json"), "oauth-only").unwrap();
+        fs::write(home.join(".config/jcode/openrouter.env"), "API_KEY=secret").unwrap();
+        fs::write(home.join(".jcode/config.toml"), "unrelated = true").unwrap();
+
+        let report = paths.import_local_credentials_from(&home, false).unwrap();
+        assert_eq!(report.imported.len(), 2);
+        let destination = paths.credentials.join("jcode/home/.jcode/auth.json");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "oauth-only");
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            !paths
+                .credentials
+                .join("jcode/home/.jcode/config.toml")
+                .exists()
+        );
+
+        fs::write(home.join(".jcode/auth.json"), "new-oauth").unwrap();
+        let report = paths.import_local_credentials_from(&home, false).unwrap();
+        assert_eq!(report.imported.len(), 0);
+        assert_eq!(report.retained.len(), 2);
+        assert_eq!(fs::read_to_string(destination).unwrap(), "oauth-only");
     }
 }

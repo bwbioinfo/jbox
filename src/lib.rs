@@ -254,11 +254,9 @@ impl App {
             ));
         }
         if config.jcode.persistent_credentials {
-            mounts.push((
-                self.paths.credentials.join("jcode"),
-                PathBuf::from("/home/jbox/.local/share/jcode"),
-                true,
-            ));
+            for (source, target) in self.paths.jcode_credential_mounts()? {
+                mounts.push((source, target, true));
+            }
         }
         if config.git.network {
             mounts.push((
@@ -319,6 +317,48 @@ impl App {
         if !status.success() {
             bail!("ssh exited with {status}");
         }
+        Ok(())
+    }
+
+    pub fn import_credentials(&self, all: bool, confirmed: bool, replace: bool) -> Result<()> {
+        if !all {
+            bail!(
+                "credential import requires `--all`; jbox never guesses which provider credentials to copy"
+            );
+        }
+        let candidates = self.paths.local_credentials()?;
+        if candidates.is_empty() {
+            println!("No supported local Jcode credential stores were found.");
+            return Ok(());
+        }
+        println!("The following provider credential stores may be copied into jbox-managed state:");
+        for credential in &candidates {
+            println!(
+                "- {} ({})",
+                credential.provider_hint,
+                credential.source.display()
+            );
+        }
+        if !confirmed {
+            println!(
+                "Nothing was copied. Re-run with `jbox credentials import --all --yes` to explicitly copy these credentials. This never mounts your host credential directories."
+            );
+            return Ok(());
+        }
+        let report = self.paths.import_local_credentials(replace)?;
+        for credential in &report.imported {
+            println!("imported {}", credential.provider_hint);
+        }
+        for credential in &report.retained {
+            println!(
+                "retained existing jbox credential for {}; use --replace to overwrite it",
+                credential.provider_hint
+            );
+        }
+        println!(
+            "Credentials are stored only under {} and are available to newly created jbox guests.",
+            self.paths.credentials.join("jcode").display()
+        );
         Ok(())
     }
 

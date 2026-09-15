@@ -44,10 +44,30 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    Credentials {
+        #[command(subcommand)]
+        command: CredentialCommand,
+    },
     Doctor,
     Expire,
     #[command(hide = true)]
     WatchExpiry,
+}
+
+#[derive(Subcommand)]
+enum CredentialCommand {
+    /// Explicitly copy supported provider stores to jbox-managed credential state.
+    Import {
+        /// Select every supported local credential store.
+        #[arg(long)]
+        all: bool,
+        /// Confirm copying provider credentials into jbox-managed state.
+        #[arg(long)]
+        yes: bool,
+        /// Replace existing jbox-managed copies. Never affects host source files.
+        #[arg(long)]
+        replace: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -71,6 +91,11 @@ fn main() -> Result<()> {
         Command::Diff { session } => app.status(&session, true)?,
         Command::Stop { session } => app.stop(&session)?,
         Command::Clean { session, force } => app.clean(session.as_deref(), force)?,
+        Command::Credentials { command } => match command {
+            CredentialCommand::Import { all, yes, replace } => {
+                app.import_credentials(all, yes, replace)?
+            }
+        },
         Command::Doctor => app.doctor()?,
         Command::Expire => app.expire()?,
         Command::WatchExpiry => loop {
@@ -93,6 +118,7 @@ fn normalized_args() -> Vec<OsString> {
         "diff",
         "stop",
         "clean",
+        "credentials",
         "doctor",
         "expire",
         "watch-expiry",

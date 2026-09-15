@@ -162,6 +162,19 @@ Implemented invariants:
 - Jcode auth persists only in `$XDG_DATA_HOME/jbox/credentials/jcode`, not the user's normal jcode configuration. The first guest login populates this dedicated state.
 - Git uses a newly generated dedicated key at `$XDG_DATA_HOME/jbox/credentials/git/id_ed25519`, not a copied host key or forwarded agent. Register its `.pub` file with the Git provider before guest `git push` works.
 
+### Explicit local provider import
+
+Jcode's built-in SSH import only transfers selected Jcode-managed OpenAI or Claude OAuth logins. To make the other supported locally configured providers available to **new** jbox guests, use the explicit jbox importer:
+
+```bash
+jbox credentials import --all        # preview only, copies nothing
+jbox credentials import --all --yes  # one-time copy into jbox-managed state
+```
+
+It copies only a documented allowlist of provider credential stores: Jcode OAuth files, Jcode provider `*.env` API-key files, and supported external stores for Codex, Claude Code, Gemini CLI, GitHub Copilot, OpenCode, pi, OpenClaw, and Hermes. Jcode-managed files and API-key files become available directly. External-client stores are staged at their documented guest paths for Jcode's guest-side external-source consent flow, so they are not claimed configured until `jcode auth status --json` in the guest reports them available. It never mounts or copies `~/.ssh`, arbitrary Jcode configuration, shell configuration, keyrings, or an entire home directory. Existing jbox-managed credential copies are retained unless `--replace` is explicit. The copied credentials live under `$XDG_DATA_HOME/jbox/credentials/jcode`, owned 0700 with files mode 0600, and are mounted into guests from there rather than from the host locations.
+
+The operation intentionally requires `--yes` because it gives the disposable guest usable provider credentials. Credentials can refresh independently and OAuth refresh-token rotation can invalidate a host login. Host-local endpoint providers such as LM Studio are not imported because the guest's `localhost` is not the host and `host = false` forbids relying on that connection.
+
 **Network limitation:** Docker's normal bridge provides the required Internet access, but it cannot by itself prove host and LAN denial. jbox does not claim that it can. Apply host firewall rules to the Docker bridge before treating `host = false` and `lan = false` as strict policy. `internet = false` does enforce Docker `--network none`. Networking is explicitly isolated in the engine policy so a future rootless Podman, namespace firewall, or dedicated egress gateway backend can enforce the full policy.
 
 **Resource limitation:** CPU and memory limits are enforced by Docker. The declared disk size is retained in state/config but not enforced by the Docker/Kata MVP.
