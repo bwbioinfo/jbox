@@ -18,26 +18,31 @@ The shipped Rust implementation follows this plan. It has narrow `Engine` and `C
 
 The initial preference was Podman + Kata. Current Arch-based Kata deployment is rootful, however, while Podman's strongest host-isolation networking configuration is rootless. This makes the combination unsuitable as the default secure path on this target. Docker is installed on this host and its Kata runtime registration is a direct, supported OCI-runtime integration, so this MVP selects **Docker + Kata** behind the engine abstraction.
 
-Host investigation found hardware virtualization available (`/dev/kvm`, Intel VT-x, and `kvm_intel`), but neither Kata nor Podman installed. The current AUR package is [`kata-all-bin`](https://aur.archlinux.org/packages/kata-all-bin). Kata's [quick start](https://kata-containers.github.io/kata-containers/quick-start-guide/) and [installation guide](https://kata-containers.github.io/kata-containers/installation/) describe the runtime model. Kata 4.x defaults to the `runtime-rs` shim, while the older Go `kata-runtime` remains available but deprecated.
+Host investigation found hardware virtualization available (`/dev/kvm`, Intel VT-x, and `kvm_intel`). The current AUR package is [`kata-all-bin`](https://aur.archlinux.org/packages/kata-all-bin). Kata's [quick start](https://kata-containers.github.io/kata-containers/quick-start-guide/) and [installation guide](https://kata-containers.github.io/kata-containers/installation/) describe the runtime model. Kata 4.x defaults to the `runtime-rs` shim, while the older Go `kata-runtime` remains available but deprecated.
 
 ### Host setup for Arch/Manjaro
 
 Run these commands yourself because they modify the host and need administrator access:
 
 ```bash
-sudo pacman -S podman                 # optional, useful for future backend work
 yay -S kata-all-bin
-sudo install -d /etc/kata-containers
-sudo cp /opt/kata/share/defaults/kata-containers/configuration-qemu.toml \
-  /etc/kata-containers/configuration.toml
 ```
 
-Register the installed Kata runtime with Docker. Use the executable supplied by your installed Kata package. For a package exposing the legacy runtime, `/etc/docker/daemon.json` is:
+`kata-all-bin` 4.x packages the supported `runtime-rs` shim at
+`/opt/kata/runtime-rs/bin/containerd-shim-kata-v2`. Register that shim with Docker
+using the packaged QEMU runtime-rs configuration. Merge this `runtimes` entry into
+an existing `/etc/docker/daemon.json`, rather than overwriting any existing daemon
+settings:
 
 ```json
 {
   "runtimes": {
-    "kata": { "path": "/opt/kata/bin/kata-runtime" }
+    "kata": {
+      "runtimeType": "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2",
+      "options": {
+        "ConfigPath": "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-qemu-runtime-rs.toml"
+      }
+    }
   }
 }
 ```
@@ -47,11 +52,15 @@ Then restart Docker and verify it before using jbox:
 ```bash
 sudo systemctl restart docker
 docker info --format '{{json .Runtimes}}'
-docker run --runtime kata --rm hello-world
+docker run --runtime kata --rm alpine:latest uname -r
 jbox doctor
 ```
 
-If your Kata 4.x package documents `/opt/kata/bin/containerd-shim-kata-v2` as the Docker runtime entrypoint instead, register that path instead. `jbox doctor` refuses to launch unless Docker reports a runtime named `kata`.
+The `ConfigPath` avoids needing a system-wide copy. If a local override is required,
+the correct source for this package is
+`/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-qemu-runtime-rs.toml`,
+not the absent legacy `configuration-qemu.toml`. `jbox doctor` refuses to launch
+unless Docker reports a runtime named `kata`.
 
 ## Use
 
