@@ -13,6 +13,14 @@ RUN apt-get update \
         build-essential \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
+# sshd supplies a conservative PATH for remote commands. Keep small wrappers
+# in /usr/local/bin so shells and jcode tool processes find the Rust toolchain
+# even when Docker's image ENV is not retained by the SSH login path.
+RUN for tool in cargo rustc rustdoc rustup; do \
+        printf '%s\n' '#!/bin/sh' 'export RUSTUP_HOME=/usr/local/rustup' \
+            "exec /usr/local/cargo/bin/$tool \"\$@\"" > "/usr/local/bin/$tool"; \
+        chmod 0755 "/usr/local/bin/$tool"; \
+    done
 
 ENV PATH=/usr/local/cargo/bin:${PATH} \
     RUSTUP_HOME=/usr/local/rustup \
