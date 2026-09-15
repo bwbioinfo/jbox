@@ -12,7 +12,9 @@ const JBOX_ENTRYPOINT: &str = r#"#!/bin/sh
 set -eu
 mkdir -p /run/sshd
 if [ -n "${JBOX_SKILLS_REPOSITORY:-}" ]; then
-    rm -rf /tmp/jbox-skills
+    # The clone is owned by jbox. With CAP_DAC_OVERRIDE intentionally absent,
+    # root must not try to remove its contents during a subsequent bootstrap.
+    su -s /bin/sh jbox -c 'rm -rf /tmp/jbox-skills'
     mkdir -p /tmp/jbox-skills
     chown jbox:jbox /tmp/jbox-skills
     # The guest root process intentionally lacks DAC_OVERRIDE. The isolated
@@ -20,7 +22,7 @@ if [ -n "${JBOX_SKILLS_REPOSITORY:-}" ]; then
     # as that unprivileged user rather than failing during guest bootstrap.
     su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.agents/skills && HOME=/home/jbox git clone --depth 1 --no-tags "$JBOX_SKILLS_REPOSITORY" /tmp/jbox-skills/repository'
     su -s /bin/sh jbox -c 'cp -a "/tmp/jbox-skills/repository/${JBOX_SKILLS_PATH}/." /home/jbox/.agents/skills/'
-    rm -rf /tmp/jbox-skills
+    su -s /bin/sh jbox -c 'rm -rf /tmp/jbox-skills'
 fi
 if [ "${JBOX_GITHUB_CLI_CREDENTIALS:-}" = "1" ]; then
     su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.config/gh && HOME=/home/jbox GH_CONFIG_DIR=/home/jbox/.config/gh gh auth setup-git'
