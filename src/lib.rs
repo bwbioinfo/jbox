@@ -466,12 +466,7 @@ impl App {
         self.require_running(&session)?;
         self.touch(&mut session)?;
         let ssh_socket = self.paths.session_ssh_dir(&session.id).join("agent.sock");
-        let args = jcode_attach_args(
-            &session.ssh_host,
-            &session.repos[0].mount,
-            session.jcode_default_provider.as_deref(),
-            session.jcode_default_model.as_deref(),
-        );
+        let args = jcode_attach_args(&session.ssh_host, &session.repos[0].mount);
         let status = Command::new("jcode")
             .args(args)
             .env("SSH_AUTH_SOCK", ssh_socket)
@@ -730,13 +725,8 @@ fn valid_apt_package(package: &str) -> bool {
         })
 }
 
-fn jcode_attach_args(
-    ssh_host: &str,
-    remote_working_dir: &str,
-    default_provider: Option<&str>,
-    default_model: Option<&str>,
-) -> Vec<String> {
-    let mut args = vec![
+fn jcode_attach_args(ssh_host: &str, remote_working_dir: &str) -> Vec<String> {
+    vec![
         "--ssh".into(),
         format!("jbox@{ssh_host}"),
         "--ssh-binary".into(),
@@ -745,14 +735,7 @@ fn jcode_attach_args(
         JCODE_SOCKET.into(),
         "--remote-working-dir".into(),
         remote_working_dir.into(),
-    ];
-    if let Some(provider) = default_provider {
-        args.extend(["--provider".into(), provider.into()]);
-    }
-    if let Some(model) = default_model {
-        args.extend(["--model".into(), model.into()]);
-    }
-    args
+    ]
 }
 
 fn guest_jcode_config(jcode: &config::Jcode) -> String {
@@ -905,14 +888,9 @@ mod tests {
     }
 
     #[test]
-    fn attach_arguments_apply_configured_provider_and_model() {
+    fn attach_arguments_do_not_override_remote_server_configuration() {
         assert_eq!(
-            jcode_attach_args(
-                "127.0.0.2",
-                "/workspace/project",
-                Some("auto"),
-                Some("gpt-5.5"),
-            ),
+            jcode_attach_args("127.0.0.2", "/workspace/project"),
             vec![
                 "--ssh",
                 "jbox@127.0.0.2",
@@ -922,17 +900,13 @@ mod tests {
                 JCODE_SOCKET,
                 "--remote-working-dir",
                 "/workspace/project",
-                "--provider",
-                "auto",
-                "--model",
-                "gpt-5.5",
             ]
         );
     }
 
     #[test]
-    fn attach_arguments_leave_selection_to_host_jcode_without_overrides() {
-        let args = jcode_attach_args("127.0.0.2", "/workspace/project", None, None);
+    fn attach_arguments_never_supply_local_selection_overrides() {
+        let args = jcode_attach_args("127.0.0.2", "/workspace/project");
 
         assert!(!args.iter().any(|arg| arg == "--provider"));
         assert!(!args.iter().any(|arg| arg == "--model"));
