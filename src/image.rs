@@ -72,7 +72,15 @@ impl<'a> ImageManager<'a> {
     }
     fn base_image(&self) -> Result<String> {
         let (uid, gid) = current_user_ids()?;
-        let tag = format!("jbox/jcode:local-v9-{uid}-{gid}");
+        // The base is generated from both strings below. Include their content
+        // in the tag so an entrypoint security or startup fix cannot silently
+        // reuse a stale local base image, which would also poison project-image
+        // caching through its base-image build argument.
+        let mut hasher = Sha256::new();
+        hasher.update(BASE_DOCKERFILE.as_bytes());
+        hasher.update(JBOX_ENTRYPOINT.as_bytes());
+        let fingerprint = format!("{:x}", hasher.finalize());
+        let tag = format!("jbox/jcode:local-v10-{uid}-{gid}-{}", &fingerprint[..16]);
         if self.exists(&tag) {
             return Ok(tag);
         }
