@@ -18,6 +18,7 @@ pub struct RepoState {
     pub mount: String,
     pub branch: String,
     pub base_commit: String,
+    pub host_gitfile: PathBuf,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {

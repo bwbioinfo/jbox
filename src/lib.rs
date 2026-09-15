@@ -127,6 +127,21 @@ impl App {
                 "{}: sandbox branch {} starts at {}",
                 repo.name, created.branch, created.commit
             );
+            let host_gitfile = session_dir
+                .join("host-gitfiles")
+                .join(format!("{}.git", repo.name));
+            if let Err(error) = self.git.isolate_guest_metadata(
+                &repo.source,
+                &worktree,
+                &created.branch,
+                &created.commit,
+                &host_gitfile,
+            ) {
+                let _ = self.git.remove_worktree(&repo.source, &worktree, false);
+                self.cleanup_worktrees(&repos);
+                let _ = std::fs::remove_dir_all(&session_dir);
+                return Err(error).context("could not prepare isolated guest Git metadata");
+            }
             repos.push(RepoState {
                 name: repo.name.clone(),
                 source: repo.source.clone(),
@@ -134,21 +149,31 @@ impl App {
                 mount: repo.mount.clone(),
                 branch: created.branch,
                 base_commit: created.commit,
+                host_gitfile,
             });
         }
 
         let ssh = self.paths.session_ssh_dir(&session_id);
-        self.paths.create_session_ssh(&ssh)?;
+        if let Err(error) = self.paths.create_session_ssh(&ssh) {
+            self.cleanup_worktrees(&repos);
+            let _ = std::fs::remove_dir_all(&session_dir);
+            return Err(error).context("could not create session SSH credentials");
+        }
         let container_name = format!("jbox-{session_id}");
-        let spec = self.container_spec(&config, &repos, &container_name, &ssh, image.clone())?;
+        let spec = match self.container_spec(&config, &repos, &container_name, &ssh, image.clone())
+        {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.cleanup_worktrees(&repos);
+                let _ = std::fs::remove_dir_all(&session_dir);
+                return Err(error);
+            }
+        };
         let port = match self.engine.start(&spec) {
             Ok(port) => port,
             Err(error) => {
-                for repo in &repos {
-                    let _ = self
-                        .git
-                        .remove_worktree(&repo.source, &repo.worktree, false);
-                }
+                self.cleanup_worktrees(&repos);
+                let _ = std::fs::remove_dir_all(&session_dir);
                 return Err(error);
             }
         };
@@ -276,6 +301,9 @@ impl App {
         let mut session = self.state.load(id)?;
         if session.state == SessionState::Running {
             self.engine.stop(&session.container_name)?;
+            for repo in &session.repos {
+                self.git.restore_and_import_guest_metadata(repo)?;
+            }
             session.state = SessionState::Stopped;
             self.state.save(&session)?;
         }
@@ -340,6 +368,9 @@ impl App {
             }
             if session.state == SessionState::Running {
                 self.engine.stop(&session.container_name)?;
+                for repo in &session.repos {
+                    self.git.restore_and_import_guest_metadata(repo)?;
+                }
                 session.state = SessionState::Stopped;
             }
             for repo in &session.repos {
@@ -382,5 +413,14 @@ impl App {
     fn touch(&self, session: &mut Session) -> Result<()> {
         session.last_activity_at = Utc::now();
         self.state.save(session)
+    }
+
+    fn cleanup_worktrees(&self, repos: &[RepoState]) {
+        for repo in repos {
+            let _ = self.git.restore_guest_metadata(repo);
+            let _ = self
+                .git
+                .remove_worktree(&repo.source, &repo.worktree, false);
+        }
     }
 }

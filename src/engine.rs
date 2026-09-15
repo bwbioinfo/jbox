@@ -88,6 +88,9 @@ impl Engine for DockerEngine {
     fn start(&self, spec: &ContainerSpec) -> Result<u16> {
         Self::check_host_prerequisites(spec.network.internet)?;
         let cpus = spec.cpus.to_string();
+        let uid = current_id("-u")?;
+        let gid = current_id("-g")?;
+        let home_tmpfs = format!("/home/jbox:rw,nosuid,nodev,uid={uid},gid={gid},mode=0700");
         let mut command = Self::command();
         command.args([
             "run",
@@ -98,6 +101,16 @@ impl Engine for DockerEngine {
             "kata",
             "--cap-drop",
             "ALL",
+            // The entrypoint begins as root so sshd can start, then `su` drops
+            // to the unprivileged jbox account before launching jcode. sshd
+            // also chroots its pre-auth privilege-separation process. These
+            // are the only capabilities those operations require.
+            "--cap-add",
+            "SETGID",
+            "--cap-add",
+            "SETUID",
+            "--cap-add",
+            "SYS_CHROOT",
             "--security-opt",
             "no-new-privileges",
             "--read-only",
@@ -106,7 +119,7 @@ impl Engine for DockerEngine {
             "--tmpfs",
             "/run:rw,nosuid,nodev",
             "--tmpfs",
-            "/home/jbox:rw,nosuid,nodev,uid=1000,gid=1000,mode=0700",
+            &home_tmpfs,
             "--pids-limit",
             "4096",
             "--cpus",
@@ -135,24 +148,58 @@ impl Engine for DockerEngine {
         command
             .arg(&spec.image)
             .arg("/usr/local/bin/jbox-entrypoint");
-        Self::run_checked(command).context("could not start Kata session. Confirm Docker's `kata` runtime and /dev/kvm are available")?;
+        Self::run_checked(command).context(
+            "could not start Kata session. Confirm Docker's `kata` runtime and /dev/kvm are available",
+        )?;
 
-        let mut port_command = Self::command();
-        port_command.args(["port", &spec.name, "2222/tcp"]);
-        let port = Self::run_checked(port_command)?;
-        port.rsplit(':')
-            .next()
-            .context("Docker did not report SSH port")?
-            .trim()
-            .parse()
-            .context("invalid SSH port from Docker")
+        // A successful `docker run -d` merely means the runtime accepted the
+        // process. Verify that it survives long enough to expose SSH before
+        // publishing session state to the caller.
+        for _ in 0..25 {
+            if !self.is_running(&spec.name)? {
+                let mut logs = Self::command();
+                logs.args(["logs", &spec.name]);
+                let output = logs.output()?;
+                let _ = self.stop(&spec.name);
+                bail!(
+                    "Kata session exited during startup: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            let mut port_command = Self::command();
+            port_command.args(["port", &spec.name, "2222/tcp"]);
+            let output = port_command.output()?;
+            if output.status.success() && !output.stdout.is_empty() {
+                let port = String::from_utf8(output.stdout)?;
+                return port
+                    .rsplit(':')
+                    .next()
+                    .context("Docker did not report SSH port")?
+                    .trim()
+                    .parse()
+                    .context("invalid SSH port from Docker");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let _ = self.stop(&spec.name);
+        bail!("Kata session did not publish its SSH port within five seconds")
     }
 
     fn stop(&self, name: &str) -> Result<()> {
         let mut command = Self::command();
         command.args(["rm", "-f", name]);
-        Self::run_checked(command)?;
-        Ok(())
+        let output = command.output()?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let error = String::from_utf8_lossy(&output.stderr);
+        // Docker may report this while another jbox invocation is already
+        // stopping the same disposable machine. Both desired end states are
+        // equivalent, so cleanup remains idempotent.
+        if error.contains("No such container") || error.contains("removal of container") {
+            return Ok(());
+        }
+        bail!("docker failed: {}", error.trim());
     }
 
     fn is_running(&self, name: &str) -> Result<bool> {
@@ -161,4 +208,12 @@ impl Engine for DockerEngine {
             .output()?;
         Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true")
     }
+}
+
+fn current_id(flag: &str) -> Result<String> {
+    let output = Command::new("id").arg(flag).output()?;
+    if !output.status.success() {
+        bail!("could not determine the current user identity")
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }

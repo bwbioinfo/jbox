@@ -91,7 +91,9 @@ impl JboxPaths {
             bail!("could not generate session SSH key");
         }
         fs::set_permissions(&key, fs::Permissions::from_mode(0o600))?;
-        let public = fs::read_to_string(key.with_extension("ed25519.pub"))?;
+        // `with_extension("ed25519.pub")` would turn `id_ed25519` into
+        // `id_ed25519.ed25519.pub`. ssh-keygen writes `id_ed25519.pub`.
+        let public = fs::read_to_string(format!("{}.pub", key.display()))?;
         fs::write(dir.join("authorized_keys"), public)?;
         fs::set_permissions(
             dir.join("authorized_keys"),
