@@ -152,6 +152,10 @@ credentials.
 jbox ls
 jbox attach bright-otter-a1b2c3
 jbox shell bright-otter-a1b2c3
+# Omit the session in a repository to choose one matching worktree.
+jbox status
+jbox diff
+jbox resume
 jbox status bright-otter-a1b2c3
 jbox diff bright-otter-a1b2c3
 jbox accept bright-otter-a1b2c3 --into main
@@ -173,6 +177,28 @@ rebases it onto the checked-out branch, or a branch given by `--onto`. It asks
 for confirmation and stops a running guest before rebasing so its Git metadata
 is synchronized. Commit or stash guest changes first. Resolve a conflict in the
 reported retained worktree, then run `git rebase --continue` and `jbox accept`.
+
+`jbox attach`, `jbox shell`, `jbox status`, `jbox diff`, `jbox stop`, and
+`jbox clean` without a session ID use a repository-scoped selection UI. Attach
+and shell list running worktrees and begin in the selected guest mount. Status
+and diff inspect only that worktree. Stop and clean remain operations on the
+whole development machine, so their confirmations state how many sibling
+repository worktrees they affect. `jbox clean --all` retains the previous
+all-session maintenance workflow.
+
+`jbox resume` lists stopped retained sessions containing the current repository,
+then starts the selected session with its existing worktrees and image. It
+creates fresh per-session SSH credentials, reuses completed session-local
+skills, and never rebuilds the image. To preserve data, resume refuses a
+retained worktree with uncommitted changes because recreating guest-only Git
+metadata requires a hard reset. Commit or stash those files in the retained
+worktree first, then resume. `jbox resume <session>` is available for a direct
+restart from any directory.
+
+The current `.jbox.toml` must still resolve to the same repositories and guest
+mount locations as when the session was created. If it does not, jbox leaves
+the retained worktrees untouched and asks you to inspect, accept, or clean them
+before creating a new session.
 
 `jbox accept <session> --into <branch>` accepts the latest **committed** snapshot
 from every session repository into the named local host branch without stopping

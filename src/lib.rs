@@ -89,6 +89,15 @@ pub struct App {
     engine: DockerEngine,
 }
 
+/// Values that differ between a new guest and restarting a retained session.
+/// Grouping them prevents the container construction interface from growing
+/// as restart-specific behavior is added.
+struct SessionLaunch {
+    image: String,
+    ssh_host: String,
+    reuse_runtime_state: bool,
+}
+
 impl App {
     pub fn open() -> Result<Self> {
         let paths = JboxPaths::discover()?;
@@ -302,8 +311,11 @@ impl App {
             &repos,
             &container_name,
             &ssh,
-            image.clone(),
-            &ssh_host,
+            SessionLaunch {
+                image: image.clone(),
+                ssh_host: ssh_host.clone(),
+                reuse_runtime_state: false,
+            },
         ) {
             Ok(spec) => spec,
             Err(error) => {
@@ -366,8 +378,7 @@ impl App {
         repos: &[RepoState],
         name: &str,
         ssh: &Path,
-        image: String,
-        ssh_host: &str,
+        launch: SessionLaunch,
     ) -> Result<ContainerSpec> {
         let mut mounts = Vec::new();
         let mut environment = Vec::new();
@@ -458,25 +469,35 @@ impl App {
             mounts.push((skills_dir, PathBuf::from("/home/jbox/.agents/skills"), true));
             environment.push((
                 "JBOX_SKILL_COUNT".into(),
-                config.jcode.skills.len().to_string(),
+                if launch.reuse_runtime_state {
+                    // A session reaches Stopped only after its guest ran
+                    // successfully. Its session-owned skills directory is
+                    // therefore complete and can be reused without another
+                    // network-bound `gh skill install` before SSH starts.
+                    "0".into()
+                } else {
+                    config.jcode.skills.len().to_string()
+                },
             ));
-            for (index, source) in config.jcode.skills.iter().enumerate() {
-                environment.push((
-                    format!("JBOX_SKILL_{index}_REPOSITORY"),
-                    source.repository.clone(),
-                ));
-                environment.push((
-                    format!("JBOX_SKILL_{index}_NAME"),
-                    source.skill.clone().unwrap_or_default(),
-                ));
-                environment.push((
-                    format!("JBOX_SKILL_{index}_PIN"),
-                    source.pin.clone().unwrap_or_default(),
-                ));
-                environment.push((
-                    format!("JBOX_SKILL_{index}_ALLOW_HIDDEN"),
-                    if source.allow_hidden_dirs { "1" } else { "0" }.into(),
-                ));
+            if !launch.reuse_runtime_state {
+                for (index, source) in config.jcode.skills.iter().enumerate() {
+                    environment.push((
+                        format!("JBOX_SKILL_{index}_REPOSITORY"),
+                        source.repository.clone(),
+                    ));
+                    environment.push((
+                        format!("JBOX_SKILL_{index}_NAME"),
+                        source.skill.clone().unwrap_or_default(),
+                    ));
+                    environment.push((
+                        format!("JBOX_SKILL_{index}_PIN"),
+                        source.pin.clone().unwrap_or_default(),
+                    ));
+                    environment.push((
+                        format!("JBOX_SKILL_{index}_ALLOW_HIDDEN"),
+                        if source.allow_hidden_dirs { "1" } else { "0" }.into(),
+                    ));
+                }
             }
         }
         if config.git.network && config.git.credentials == "jbox" {
@@ -501,22 +522,38 @@ impl App {
         ));
         Ok(ContainerSpec {
             name: name.into(),
-            image,
+            image: launch.image,
             mounts,
             cpus: config.resources.cpus,
             memory: config.resources.memory.clone(),
             network: config.network.clone(),
-            ssh_host: ssh_host.to_owned(),
+            ssh_host: launch.ssh_host,
             environment,
         })
     }
 
     pub fn attach(&self, id: &str) -> Result<()> {
         let mut session = self.state.load(id)?;
-        self.require_running(&session)?;
-        self.touch(&mut session)?;
+        let mount = session.repos[0].mount.clone();
+        self.attach_session(&mut session, &mount)
+    }
+
+    /// Attach from a repository starts Jcode in the matching selected mount,
+    /// rather than always opening the primary repository of a multi-repo VM.
+    pub fn attach_from_repository(&self, input: &Path) -> Result<()> {
+        let Some((mut session, repo)) =
+            self.select_repository_worktree(input, "attach", Some(SessionState::Running))?
+        else {
+            return Ok(());
+        };
+        self.attach_session(&mut session, &repo.mount)
+    }
+
+    fn attach_session(&self, session: &mut Session, mount: &str) -> Result<()> {
+        self.require_running(session)?;
+        self.touch(session)?;
         let ssh_socket = self.paths.session_ssh_dir(&session.id).join("agent.sock");
-        let args = jcode_attach_args(&session.ssh_host, &session.repos[0].mount);
+        let args = jcode_attach_args(&session.ssh_host, mount);
         let status = Command::new("jcode")
             .args(args)
             .env("SSH_AUTH_SOCK", ssh_socket)
@@ -530,11 +567,27 @@ impl App {
 
     pub fn shell(&self, id: &str) -> Result<()> {
         let mut session = self.state.load(id)?;
-        self.require_running(&session)?;
-        self.touch(&mut session)?;
-        let config = self.paths.write_ssh_config(&session)?;
+        let mount = session.repos[0].mount.clone();
+        self.shell_session(&mut session, &mount)
+    }
+
+    /// Open a login shell rooted at the repository selected from the host.
+    pub fn shell_from_repository(&self, input: &Path) -> Result<()> {
+        let Some((mut session, repo)) =
+            self.select_repository_worktree(input, "open a shell in", Some(SessionState::Running))?
+        else {
+            return Ok(());
+        };
+        self.shell_session(&mut session, &repo.mount)
+    }
+
+    fn shell_session(&self, session: &mut Session, mount: &str) -> Result<()> {
+        self.require_running(session)?;
+        self.touch(session)?;
+        let config = self.paths.write_ssh_config(session)?;
+        let command = format!("cd {mount} && exec bash -l");
         let status = Command::new("ssh")
-            .args(["-F", config.to_str().unwrap(), "jbox", "-t", "bash", "-l"])
+            .args(["-F", config.to_str().unwrap(), "jbox", "-t", &command])
             .status()?;
         if !status.success() {
             bail!("ssh exited with {status}");
@@ -598,6 +651,27 @@ impl App {
         }
         println!("jbox session {id} stopped. Worktrees were retained.");
         Ok(())
+    }
+
+    /// Stop the selected machine. Stopping is session-wide, so confirmation
+    /// explicitly calls out that sibling repositories will also disconnect.
+    pub fn stop_from_repository(&self, input: &Path) -> Result<()> {
+        let Some((session, _)) = self.select_repository_worktree(input, "stop", None)? else {
+            return Ok(());
+        };
+        print!(
+            "Stop session {} and disconnect all {} repository workspaces? [y/N]: ",
+            session.id,
+            session.repos.len()
+        );
+        io::stdout().flush()?;
+        let mut confirmed = String::new();
+        io::stdin().read_line(&mut confirmed)?;
+        if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
+            println!("stop cancelled.");
+            return Ok(());
+        }
+        self.stop(&session.id)
     }
 
     /// Accept the latest committed snapshot from every repository in a session
@@ -783,6 +857,220 @@ impl App {
         Ok(())
     }
 
+    /// Interactively inspect one worktree belonging to the repository beneath
+    /// the current directory. This keeps multi-repository sessions focused on
+    /// the repository the user is presently working in.
+    pub fn status_from_repository(&self, input: &Path, diff: bool) -> Result<()> {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!(
+                "`jbox {}` without a session needs an interactive terminal; use `jbox {} <session>` instead",
+                if diff { "diff" } else { "status" },
+                if diff { "diff" } else { "status" }
+            );
+        }
+        let repository = Config::repository_root(input)?;
+        let candidates = self.sessions_for_repository(&repository)?;
+        if candidates.is_empty() {
+            bail!(
+                "no retained jbox worktrees belong to {}",
+                repository.display()
+            );
+        }
+        println!("Jbox worktrees for {}:", repository.display());
+        for (index, (session, repo)) in candidates.iter().enumerate() {
+            let change = match self.git.has_changes_or_unique_commits(repo) {
+                Ok(true) => "changes",
+                Ok(false) => "clean",
+                Err(_) => "unavailable",
+            };
+            println!(
+                "  {}) {}  {:?}  {}  [{}]",
+                index + 1,
+                session.id,
+                session.state,
+                repo.branch,
+                change
+            );
+        }
+        print!(
+            "Select a worktree to {} (blank cancels): ",
+            if diff { "diff" } else { "inspect" }
+        );
+        io::stdout().flush()?;
+        let mut selected = String::new();
+        io::stdin().read_line(&mut selected)?;
+        let selected = selected.trim();
+        if selected.is_empty() {
+            println!("{} cancelled.", if diff { "diff" } else { "status" });
+            return Ok(());
+        }
+        let index: usize = selected
+            .parse()
+            .context("select a worktree by its displayed number")?;
+        if index == 0 || index > candidates.len() {
+            bail!("selection must be between 1 and {}", candidates.len());
+        }
+        let (session, repo) = &candidates[index - 1];
+        self.status_repository_worktree(session, repo, diff)
+    }
+
+    /// Resume a stopped session from its retained worktrees. The worktree
+    /// branch and image are reused. A fresh session SSH key and runtime state
+    /// are created, while dirty retained files are rejected before any reset.
+    pub fn resume(&self, id: &str) -> Result<()> {
+        let mut session = self.state.load(id)?;
+        if session.state == SessionState::Running {
+            bail!("session {id} is already running; use `jbox attach {id}`");
+        }
+        if self.engine.is_running(&session.container_name)? {
+            bail!(
+                "runtime container for {id} is unexpectedly still running; use `jbox attach {id}` or `jbox stop {id}` first"
+            );
+        }
+        let (config, primary) = Config::load(&session.config_path)?;
+        self.validate_resume_config(&session, &config, &primary)?;
+        self.engine.check()?;
+        if config.git.network && config.git.credentials == "jbox" {
+            self.paths.ensure_credentials()?;
+        }
+        let author = config.git.author.resolve()?;
+        for repo in &session.repos {
+            if let Err(error) = self
+                .git
+                .prepare_retained_worktree_for_guest(repo, &author)
+                .with_context(|| format!("could not prepare retained worktree {}", repo.name))
+            {
+                self.restore_retained_metadata(&session.repos);
+                return Err(error);
+            }
+        }
+
+        let ssh = self.paths.session_ssh_dir(&session.id);
+        self.clear_stale_runtime_sockets(&ssh)?;
+        let _ = std::fs::remove_dir_all(&ssh);
+        if let Err(error) = self.paths.create_session_ssh(&ssh) {
+            self.restore_retained_metadata(&session.repos);
+            return Err(error).context("could not create resumed session SSH credentials");
+        }
+        let ssh_agent_pid = match self.paths.start_session_ssh_agent(&ssh) {
+            Ok(pid) => pid,
+            Err(error) => {
+                self.restore_retained_metadata(&session.repos);
+                return Err(error);
+            }
+        };
+        let spec = match self.container_spec(
+            &config,
+            &session.repos,
+            &session.container_name,
+            &ssh,
+            SessionLaunch {
+                image: session.image.clone(),
+                ssh_host: session.ssh_host.clone(),
+                reuse_runtime_state: true,
+            },
+        ) {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.paths.stop_session_ssh_agent(ssh_agent_pid);
+                self.restore_retained_metadata(&session.repos);
+                return Err(error);
+            }
+        };
+        let port = match self.engine.start(&spec) {
+            Ok(port) => port,
+            Err(error) => {
+                self.paths.stop_session_ssh_agent(ssh_agent_pid);
+                self.restore_retained_metadata(&session.repos);
+                return Err(error);
+            }
+        };
+        let known_hosts_tag = match self
+            .paths
+            .trust_session_host(&session.ssh_host, &session.id)
+        {
+            Ok(tag) => tag,
+            Err(error) => {
+                let _ = self.engine.stop(&session.container_name);
+                self.paths.stop_session_ssh_agent(ssh_agent_pid);
+                self.restore_retained_metadata(&session.repos);
+                return Err(error);
+            }
+        };
+        session.state = SessionState::Running;
+        session.ssh_port = port;
+        session.ssh_agent_pid = ssh_agent_pid;
+        session.known_hosts_tag = known_hosts_tag;
+        self.touch(&mut session)?;
+        println!(
+            "jbox session {} resumed on {}:{}",
+            session.id, session.ssh_host, session.ssh_port
+        );
+        println!("Use `jbox attach {}` to reconnect.", session.id);
+        Ok(())
+    }
+
+    /// Select a stopped retained session that contains the current repository.
+    pub fn resume_from_repository(&self, input: &Path) -> Result<()> {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!(
+                "`jbox resume` without a session needs an interactive terminal; use `jbox resume <session>` instead"
+            );
+        }
+        let repository = Config::repository_root(input)?;
+        let candidates = self
+            .sessions_for_repository(&repository)?
+            .into_iter()
+            .filter(|(session, _)| session.state == SessionState::Stopped)
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            bail!(
+                "no stopped retained jbox worktrees belong to {}",
+                repository.display()
+            );
+        }
+        println!("Stopped jbox worktrees for {}:", repository.display());
+        for (index, (session, repo)) in candidates.iter().enumerate() {
+            let change = match self.git.has_changes_or_unique_commits(repo) {
+                Ok(true) => "changes",
+                Ok(false) => "clean",
+                Err(_) => "unavailable",
+            };
+            println!(
+                "  {}) {}  {}  [{}]",
+                index + 1,
+                session.id,
+                repo.branch,
+                change
+            );
+        }
+        print!("Select a session to resume (blank cancels): ");
+        io::stdout().flush()?;
+        let mut selected = String::new();
+        io::stdin().read_line(&mut selected)?;
+        let selected = selected.trim();
+        if selected.is_empty() {
+            println!("resume cancelled.");
+            return Ok(());
+        }
+        let index: usize = selected
+            .parse()
+            .context("select a session by its displayed number")?;
+        if index == 0 || index > candidates.len() {
+            bail!("selection must be between 1 and {}", candidates.len());
+        }
+        let session = &candidates[index - 1].0;
+        print!("Resume session {}? [y/N]: ", session.id);
+        io::stdout().flush()?;
+        let mut confirmed = String::new();
+        io::stdin().read_line(&mut confirmed)?;
+        if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
+            println!("resume cancelled.");
+            return Ok(());
+        }
+        self.resume(&session.id)
+    }
+
     fn sessions_for_repository(&self, repository: &Path) -> Result<Vec<(Session, RepoState)>> {
         Ok(self
             .state
@@ -829,13 +1117,7 @@ impl App {
         let session = self.state.load(id)?;
         println!("{} ({:?})", session.id, session.state);
         for repo in &session.repos {
-            let output = if diff {
-                self.git.diff_stat(repo)?
-            } else {
-                self.git.status(&repo.worktree)?
-            };
-            println!("\n{} [{}]", repo.name, repo.branch);
-            print!("{output}");
+            self.status_repository_worktree(&session, repo, diff)?;
         }
         Ok(())
     }
@@ -877,6 +1159,28 @@ impl App {
         Ok(())
     }
 
+    /// Clean the selected entire session. The existing change/commit refusal
+    /// remains active unless `--force` was explicitly supplied.
+    pub fn clean_from_repository(&self, input: &Path, force: bool) -> Result<()> {
+        let Some((session, _)) = self.select_repository_worktree(input, "clean", None)? else {
+            return Ok(());
+        };
+        print!(
+            "Clean session {} and remove all {} repository worktrees{}? [y/N]: ",
+            session.id,
+            session.repos.len(),
+            if force { " with --force" } else { "" }
+        );
+        io::stdout().flush()?;
+        let mut confirmed = String::new();
+        io::stdin().read_line(&mut confirmed)?;
+        if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
+            println!("clean cancelled.");
+            return Ok(());
+        }
+        self.clean(Some(&session.id), force)
+    }
+
     pub fn expire(&self) -> Result<()> {
         for session in self.state.list()? {
             if session.state == SessionState::Running && session.expired() {
@@ -890,9 +1194,10 @@ impl App {
     fn require_running(&self, session: &Session) -> Result<()> {
         if session.state != SessionState::Running {
             bail!(
-                "session {} is {:?}; start/resume is not implemented yet. Create a new session or inspect its retained worktree.",
+                "session {} is {:?}; use `jbox resume {}` to restart its retained workspace",
                 session.id,
-                session.state
+                session.state,
+                session.id
             );
         }
         if !self.engine.is_running(&session.container_name)? {
@@ -915,6 +1220,150 @@ impl App {
                 .git
                 .remove_worktree(&repo.source, &repo.worktree, false);
         }
+    }
+
+    fn restore_retained_metadata(&self, repos: &[RepoState]) {
+        for repo in repos {
+            let _ = self.git.restore_guest_metadata(repo);
+        }
+    }
+
+    /// Shared repository-scoped selector for lifecycle operations. It always
+    /// lists only worktrees originating from the caller's repository. Session
+    /// lifecycle operations remain session-wide and add their own confirmation.
+    fn select_repository_worktree(
+        &self,
+        input: &Path,
+        action: &str,
+        required_state: Option<SessionState>,
+    ) -> Result<Option<(Session, RepoState)>> {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!(
+                "`jbox {action}` without a session needs an interactive terminal; pass an explicit session ID instead"
+            );
+        }
+        let repository = Config::repository_root(input)?;
+        let candidates = self
+            .sessions_for_repository(&repository)?
+            .into_iter()
+            .filter(|(session, _)| {
+                required_state
+                    .as_ref()
+                    .is_none_or(|state| session.state == *state)
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            let qualifier = match required_state {
+                Some(SessionState::Running) => "running ",
+                Some(SessionState::Stopped) => "stopped ",
+                None => "",
+            };
+            bail!(
+                "no {qualifier}retained jbox worktrees belong to {}",
+                repository.display()
+            );
+        }
+        println!("Jbox worktrees for {}:", repository.display());
+        for (index, (session, repo)) in candidates.iter().enumerate() {
+            let change = match self.git.has_changes_or_unique_commits(repo) {
+                Ok(true) => "changes",
+                Ok(false) => "clean",
+                Err(_) => "unavailable",
+            };
+            println!(
+                "  {}) {}  {:?}  {}  [{}]",
+                index + 1,
+                session.id,
+                session.state,
+                repo.branch,
+                change
+            );
+        }
+        print!("Select a worktree to {action} (blank cancels): ");
+        io::stdout().flush()?;
+        let mut selected = String::new();
+        io::stdin().read_line(&mut selected)?;
+        let selected = selected.trim();
+        if selected.is_empty() {
+            println!("{action} cancelled.");
+            return Ok(None);
+        }
+        let index: usize = selected
+            .parse()
+            .context("select a worktree by its displayed number")?;
+        if index == 0 || index > candidates.len() {
+            bail!("selection must be between 1 and {}", candidates.len());
+        }
+        Ok(Some(candidates[index - 1].clone()))
+    }
+
+    fn clear_stale_runtime_sockets(&self, ssh: &Path) -> Result<()> {
+        let runtime = ssh
+            .parent()
+            .context("session SSH directory lacks a parent")?
+            .join("runtime/jcode");
+        for name in ["jbox.sock", "jbox-debug.sock", "jbox.sock.hash"] {
+            let path = runtime.join(name);
+            if path.exists() {
+                std::fs::remove_file(&path).with_context(|| {
+                    format!(
+                        "could not clear stale Jcode runtime file {}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn status_repository_worktree(
+        &self,
+        session: &Session,
+        repo: &RepoState,
+        diff: bool,
+    ) -> Result<()> {
+        let output = if diff {
+            self.git.diff_stat(repo)?
+        } else {
+            self.git.status(&repo.worktree)?
+        };
+        println!(
+            "\n{} ({:?})\n{} [{}]",
+            session.id, session.state, repo.name, repo.branch
+        );
+        print!("{output}");
+        Ok(())
+    }
+
+    fn validate_resume_config(
+        &self,
+        session: &Session,
+        config: &Config,
+        primary: &Path,
+    ) -> Result<()> {
+        let mut expected = vec![ResolvedRepository {
+            source: primary.to_path_buf(),
+            mount: config.workspace.mount.clone(),
+            name: config.project_name(primary),
+        }];
+        expected.extend(config.resolve_repositories(primary)?);
+        config.validate_repositories(&expected)?;
+        let matches = expected.len() == session.repos.len()
+            && expected
+                .iter()
+                .zip(&session.repos)
+                .all(|(expected, actual)| {
+                    expected.source == actual.source
+                        && expected.mount == actual.mount
+                        && expected.name == actual.name
+                });
+        if !matches {
+            bail!(
+                "cannot resume {}: .jbox.toml repository paths or mounts changed since this session was created; inspect and accept/clean the retained worktrees, then create a new session",
+                session.id
+            );
+        }
+        Ok(())
     }
 
     fn next_ssh_host(&self, session_id: &str) -> Result<String> {
@@ -1156,8 +1605,11 @@ mod tests {
                 &[],
                 "jbox-test",
                 &ssh,
-                "test-image".into(),
-                "127.0.0.2",
+                SessionLaunch {
+                    image: "test-image".into(),
+                    ssh_host: "127.0.0.2".into(),
+                    reuse_runtime_state: false,
+                },
             )
             .unwrap();
 
@@ -1177,6 +1629,31 @@ mod tests {
         assert!(
             spec.environment
                 .contains(&("JBOX_SKILL_1_NAME".into(), "scanpy".into(),))
+        );
+
+        let resumed = test_app(temp.path())
+            .container_spec(
+                &config,
+                &[],
+                "jbox-test",
+                &ssh,
+                SessionLaunch {
+                    image: "test-image".into(),
+                    ssh_host: "127.0.0.2".into(),
+                    reuse_runtime_state: true,
+                },
+            )
+            .unwrap();
+        assert!(
+            resumed
+                .environment
+                .contains(&("JBOX_SKILL_COUNT".into(), "0".into(),))
+        );
+        assert!(
+            !resumed
+                .environment
+                .iter()
+                .any(|(name, _)| name.starts_with("JBOX_SKILL_0_"))
         );
     }
 

@@ -170,6 +170,32 @@ impl Git {
         self.restore_guest_metadata(repo)
     }
 
+    /// Recreate the isolated Git directory for a retained, stopped worktree.
+    /// Refuse dirty files rather than allowing the required hard reset to lose
+    /// uncommitted work. Committed changes already live on the session branch.
+    pub fn prepare_retained_worktree_for_guest(
+        &self,
+        repo: &RepoState,
+        author: &ResolvedGitAuthor,
+    ) -> Result<()> {
+        if !Self::run(&repo.worktree, &["status", "--porcelain"])?.is_empty() {
+            bail!(
+                "cannot resume {}: retained worktree {} has uncommitted changes; commit or stash them before resuming",
+                repo.name,
+                repo.worktree.display()
+            );
+        }
+        let commit = Self::run(&repo.source, &["rev-parse", "--verify", &repo.branch])?;
+        self.isolate_guest_metadata(
+            &repo.source,
+            &repo.worktree,
+            &repo.branch,
+            &commit,
+            &repo.host_gitfile,
+            author,
+        )
+    }
+
     /// Verify that the host checkout is clean and currently on `target`, then
     /// fast-forward it to the imported guest session branch. The caller imports
     /// all session branches before calling this method, avoiding a live guest
@@ -415,6 +441,65 @@ mod tests {
             "guest change"
         );
         assert!(Git.remove_worktree(tmp.path(), &wt, false).is_ok());
+    }
+
+    #[test]
+    fn prepares_clean_retained_worktree_for_a_second_guest_lifetime() {
+        let tmp = tempdir().unwrap();
+        git(tmp.path(), &["init"]);
+        git(tmp.path(), &["config", "user.email", "test@example.com"]);
+        git(tmp.path(), &["config", "user.name", "Test"]);
+        std::fs::write(tmp.path().join("a"), "base").unwrap();
+        git(tmp.path(), &["add", "."]);
+        git(tmp.path(), &["commit", "-m", "base"]);
+        let wt = tmp.path().join("worktree");
+        let made = Git
+            .add_worktree(tmp.path(), &wt, "bright-fox-123", "repo")
+            .unwrap();
+        let host_gitfile = tmp.path().join("host-gitfile");
+        let author = ResolvedGitAuthor {
+            name: Some("Guest".into()),
+            email: Some("guest@example.com".into()),
+        };
+        Git.isolate_guest_metadata(
+            tmp.path(),
+            &wt,
+            &made.branch,
+            &made.commit,
+            &host_gitfile,
+            &author,
+        )
+        .unwrap();
+        std::fs::write(wt.join("a"), "guest change").unwrap();
+        git(&wt, &["add", "a"]);
+        git(&wt, &["commit", "-m", "guest"]);
+        let repo = RepoState {
+            name: "repo".into(),
+            source: tmp.path().into(),
+            worktree: wt.clone(),
+            mount: "/workspace/repo".into(),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile,
+        };
+        Git.restore_and_import_guest_metadata(&repo).unwrap();
+        assert!(wt.join(".git").is_file());
+        Git.prepare_retained_worktree_for_guest(&repo, &author)
+            .unwrap();
+        assert!(wt.join(".git").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(wt.join("a")).unwrap(),
+            "guest change"
+        );
+        std::fs::write(wt.join("uncommitted"), "do not lose me").unwrap();
+        assert!(
+            Git.prepare_retained_worktree_for_guest(&repo, &author)
+                .unwrap_err()
+                .to_string()
+                .contains("uncommitted changes")
+        );
+        Git.restore_and_import_guest_metadata(&repo).unwrap();
+        Git.remove_worktree(tmp.path(), &wt, true).unwrap();
     }
 
     #[test]

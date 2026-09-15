@@ -33,19 +33,24 @@ enum Command {
     },
     Ls,
     Attach {
-        session: String,
+        /// Session to attach. Omit it to select a running workspace for the current repository.
+        session: Option<String>,
     },
     Shell {
-        session: String,
+        /// Session to open. Omit it to select a running workspace for the current repository.
+        session: Option<String>,
     },
     Status {
-        session: String,
+        /// Session to inspect. Omit it to select a worktree for the current repository.
+        session: Option<String>,
     },
     Diff {
-        session: String,
+        /// Session to inspect. Omit it to select a worktree for the current repository.
+        session: Option<String>,
     },
     Stop {
-        session: String,
+        /// Session to stop. Omit it to select a workspace for the current repository.
+        session: Option<String>,
     },
     /// Fast-forward a host branch to a session's committed snapshot without stopping it.
     Accept {
@@ -61,10 +66,18 @@ enum Command {
         #[arg(long)]
         onto: Option<String>,
     },
+    /// Restart a retained stopped session. Omit the session to select one for the current repository.
+    Resume {
+        session: Option<String>,
+    },
     Clean {
+        /// Session to clean. Omit it to select a workspace for the current repository.
         session: Option<String>,
         #[arg(long)]
         force: bool,
+        /// Consider every session, rather than selecting one belonging to the current repository.
+        #[arg(long, conflicts_with = "session")]
+        all: bool,
     },
     Credentials {
         #[command(subcommand)]
@@ -108,11 +121,26 @@ fn main() -> Result<()> {
         }
         Command::Init { path, tools } => app.init(&path, &tools)?,
         Command::Ls => app.list()?,
-        Command::Attach { session } => app.attach(&session)?,
-        Command::Shell { session } => app.shell(&session)?,
-        Command::Status { session } => app.status(&session, false)?,
-        Command::Diff { session } => app.status(&session, true)?,
-        Command::Stop { session } => app.stop(&session)?,
+        Command::Attach { session } => match session {
+            Some(session) => app.attach(&session)?,
+            None => app.attach_from_repository(&std::env::current_dir()?)?,
+        },
+        Command::Shell { session } => match session {
+            Some(session) => app.shell(&session)?,
+            None => app.shell_from_repository(&std::env::current_dir()?)?,
+        },
+        Command::Status { session } => match session {
+            Some(session) => app.status(&session, false)?,
+            None => app.status_from_repository(&std::env::current_dir()?, false)?,
+        },
+        Command::Diff { session } => match session {
+            Some(session) => app.status(&session, true)?,
+            None => app.status_from_repository(&std::env::current_dir()?, true)?,
+        },
+        Command::Stop { session } => match session {
+            Some(session) => app.stop(&session)?,
+            None => app.stop_from_repository(&std::env::current_dir()?)?,
+        },
         Command::Accept { session, into } => match session {
             Some(session) => app.accept(
                 &session,
@@ -125,7 +153,19 @@ fn main() -> Result<()> {
         Command::Rebase { onto } => {
             app.rebase_from_repository(&std::env::current_dir()?, onto.as_deref())?
         }
-        Command::Clean { session, force } => app.clean(session.as_deref(), force)?,
+        Command::Resume { session } => match session {
+            Some(session) => app.resume(&session)?,
+            None => app.resume_from_repository(&std::env::current_dir()?)?,
+        },
+        Command::Clean {
+            session,
+            force,
+            all,
+        } => match (session, all) {
+            (Some(session), _) => app.clean(Some(&session), force)?,
+            (None, true) => app.clean(None, force)?,
+            (None, false) => app.clean_from_repository(&std::env::current_dir()?, force)?,
+        },
         Command::Credentials { command } => match command {
             CredentialCommand::Import { all, yes, replace } => {
                 app.import_credentials(all, yes, replace)?
@@ -155,6 +195,7 @@ fn normalized_args() -> Vec<OsString> {
         "stop",
         "accept",
         "rebase",
+        "resume",
         "clean",
         "credentials",
         "doctor",
