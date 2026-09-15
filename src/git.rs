@@ -1,6 +1,7 @@
 use crate::{config::ResolvedGitAuthor, state::RepoState};
 use anyhow::{Context, Result, bail};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -61,6 +62,72 @@ impl Git {
         Self::run(worktree, &["reset", "--hard", &commit])?;
         let _ = Self::run(worktree, &["submodule", "update", "--init", "--recursive"]);
         Ok(WorktreeCreated { branch, commit })
+    }
+
+    /// Snapshot the source repository's current Beads issue export into the
+    /// generated worktree. `.beads/issues.jsonl` is the portable issue
+    /// representation, unlike the live Dolt database and its locks, sockets,
+    /// credentials, and process state. Jbox intentionally copies this one
+    /// project file rather than mounting or cloning the host Beads database.
+    ///
+    /// This is a deliberate narrow exception to the normal no-uncommitted-host
+    /// files rule: task context needs to follow an agent into its disposable
+    /// workspace. The copy is session-local and is hydrated into a guest-local
+    /// database during guest startup.
+    pub fn snapshot_beads_export(&self, source: &Path, worktree: &Path) -> Result<bool> {
+        let source = source.canonicalize().with_context(|| {
+            format!(
+                "cannot resolve Beads source repository {}",
+                source.display()
+            )
+        })?;
+        let export = source.join(".beads/issues.jsonl");
+        if !export.exists() {
+            return Ok(false);
+        }
+        let export = export
+            .canonicalize()
+            .with_context(|| format!("cannot resolve Beads export {}", export.display()))?;
+        if !export.starts_with(&source) {
+            bail!(
+                "refusing Beads export outside source repository {}",
+                source.display()
+            );
+        }
+        if !fs::metadata(&export)?.is_file() {
+            bail!("Beads export {} is not a regular file", export.display());
+        }
+
+        let beads_dir = worktree.join(".beads");
+        if let Ok(metadata) = fs::symlink_metadata(&beads_dir)
+            && metadata.file_type().is_symlink()
+        {
+            bail!(
+                "refusing to write Beads state through symlink {}",
+                beads_dir.display()
+            );
+        }
+        fs::create_dir_all(&beads_dir)?;
+        fs::set_permissions(&beads_dir, fs::Permissions::from_mode(0o700))?;
+
+        let destination = beads_dir.join("issues.jsonl");
+        if let Ok(metadata) = fs::symlink_metadata(&destination)
+            && metadata.file_type().is_symlink()
+        {
+            bail!(
+                "refusing to write Beads export through symlink {}",
+                destination.display()
+            );
+        }
+        fs::copy(&export, &destination).with_context(|| {
+            format!(
+                "cannot snapshot Beads export from {} to {}",
+                export.display(),
+                destination.display()
+            )
+        })?;
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o600))?;
+        Ok(true)
     }
     pub fn remove_worktree(&self, repo: &Path, worktree: &Path, force: bool) -> Result<()> {
         if !worktree.exists() {
@@ -416,6 +483,60 @@ mod tests {
         assert!(made.branch.starts_with("jbox/"));
         assert_eq!(std::fs::read_to_string(wt.join("a")).unwrap(), "base");
         assert!(Git.remove_worktree(tmp.path(), &wt, false).is_ok());
+    }
+
+    #[test]
+    fn snapshots_current_beads_export_without_copying_live_database_state() {
+        let source = tempdir().unwrap();
+        let worktree = tempdir().unwrap();
+        fs::create_dir_all(source.path().join(".beads/dolt")).unwrap();
+        fs::write(
+            source.path().join(".beads/issues.jsonl"),
+            "{\"id\":\"task-1\"}\n",
+        )
+        .unwrap();
+        fs::write(source.path().join(".beads/dolt/LOCK"), "live host database").unwrap();
+        fs::create_dir_all(worktree.path().join(".beads")).unwrap();
+        fs::write(worktree.path().join(".beads/issues.jsonl"), "stale\n").unwrap();
+
+        assert!(
+            Git.snapshot_beads_export(source.path(), worktree.path())
+                .unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(worktree.path().join(".beads/issues.jsonl")).unwrap(),
+            "{\"id\":\"task-1\"}\n"
+        );
+        assert!(!worktree.path().join(".beads/dolt/LOCK").exists());
+        assert_eq!(
+            fs::metadata(worktree.path().join(".beads/issues.jsonl"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn rejects_beads_export_symlink_escaping_source_repository() {
+        let source = tempdir().unwrap();
+        let worktree = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::create_dir_all(source.path().join(".beads")).unwrap();
+        fs::write(outside.path().join("issues.jsonl"), "not project state").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("issues.jsonl"),
+            source.path().join(".beads/issues.jsonl"),
+        )
+        .unwrap();
+
+        assert!(
+            Git.snapshot_beads_export(source.path(), worktree.path())
+                .unwrap_err()
+                .to_string()
+                .contains("outside source repository")
+        );
     }
 
     #[test]

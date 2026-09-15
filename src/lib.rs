@@ -260,6 +260,17 @@ impl App {
                     return Err(error);
                 }
             };
+            if let Err(error) = self.git.snapshot_beads_export(&repo.source, &worktree) {
+                let _ = self.git.remove_worktree(&repo.source, &worktree, false);
+                self.cleanup_worktrees(&repos);
+                let _ = std::fs::remove_dir_all(&session_dir);
+                return Err(error).with_context(|| {
+                    format!(
+                        "could not snapshot Beads task context for {}",
+                        repo.source.display()
+                    )
+                });
+            }
             println!(
                 "{}: sandbox branch {} starts at {}",
                 repo.name, created.branch, created.commit
@@ -384,6 +395,27 @@ impl App {
         let mut environment = Vec::new();
         for repo in repos {
             mounts.push((repo.worktree.clone(), safe_target(&repo.mount)?, true));
+        }
+        // Each worktree contains a jbox-snapshotted `.beads/issues.jsonl` when
+        // its source repository uses Beads. The guest imports that portable
+        // task context into its own writable Beads database before Jcode
+        // starts, never exposing the host database or its locks/secrets.
+        let beads_workspaces = repos
+            .iter()
+            .filter(|repo| repo.worktree.join(".beads/issues.jsonl").is_file())
+            .collect::<Vec<_>>();
+        if !beads_workspaces.is_empty() {
+            environment.push((
+                "JBOX_BEADS_WORKSPACE_COUNT".into(),
+                beads_workspaces.len().to_string(),
+            ));
+            for (index, repo) in beads_workspaces.into_iter().enumerate() {
+                environment.push((
+                    format!("JBOX_BEADS_WORKSPACE_{index}"),
+                    safe_target(&repo.mount)?.to_string_lossy().into_owned(),
+                ));
+                environment.push((format!("JBOX_BEADS_PREFIX_{index}"), repo.name.clone()));
+            }
         }
         for mount in &config.mounts {
             mounts.push((

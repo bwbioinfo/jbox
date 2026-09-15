@@ -36,6 +36,22 @@ while [ "$index" -lt "${JBOX_SKILL_COUNT:-0}" ]; do
         '
     index=$((index + 1))
 done
+index=0
+while [ "$index" -lt "${JBOX_BEADS_WORKSPACE_COUNT:-0}" ]; do
+    workspace="$(printenv "JBOX_BEADS_WORKSPACE_${index}")"
+    prefix="$(printenv "JBOX_BEADS_PREFIX_${index}")"
+    # Import only the portable JSONL task snapshot staged in the generated
+    # worktree. This initializes a guest-local database without mounting the
+    # host Beads Dolt database, locks, sockets, or credentials.
+    env JBOX_ONE_BEADS_WORKSPACE="$workspace" JBOX_ONE_BEADS_PREFIX="$prefix" su -s /bin/sh jbox -c '
+        set -eu
+        if [ -f "$JBOX_ONE_BEADS_WORKSPACE/.beads/issues.jsonl" ]; then
+            cd "$JBOX_ONE_BEADS_WORKSPACE"
+            bd init --sandbox --stealth --from-jsonl --prefix "$JBOX_ONE_BEADS_PREFIX" --non-interactive --skip-agents --skip-hooks --reinit-local
+        fi
+    '
+    index=$((index + 1))
+done
 su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode && jcode serve --server-name jbox --socket /home/jbox/.local/share/jcode/jbox.sock >/tmp/jcode-serve.log 2>&1 &'
 exec /usr/sbin/sshd -D -e
 "#;
@@ -191,6 +207,18 @@ mod tests {
         assert!(BASE_DOCKERFILE.contains("curl"));
         assert!(BASE_DOCKERFILE.contains("gastownhall/beads/main/scripts/install.sh"));
         assert!(BASE_DOCKERFILE.contains("bd version"));
+    }
+
+    #[test]
+    fn guest_hydrates_beads_exports_before_starting_jcode() {
+        assert!(JBOX_ENTRYPOINT.contains("JBOX_BEADS_WORKSPACE_COUNT"));
+        assert!(JBOX_ENTRYPOINT.contains("bd init --sandbox --stealth --from-jsonl"));
+        assert!(
+            JBOX_ENTRYPOINT
+                .find("bd init --sandbox --stealth --from-jsonl")
+                .unwrap()
+                < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
+        );
     }
 
     #[test]
