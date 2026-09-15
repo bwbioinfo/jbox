@@ -66,9 +66,6 @@ impl App {
     pub fn create(&self, input: &Path, no_attach: bool) -> Result<String> {
         let (config, primary) = Config::load(input)?;
         let session_id = state::new_session_id();
-        let session_dir = self.paths.sessions.join(&session_id);
-        let worktrees = session_dir.join("worktrees");
-        std::fs::create_dir_all(&worktrees)?;
 
         let mut resolved = vec![ResolvedRepository {
             source: primary.clone(),
@@ -83,6 +80,9 @@ impl App {
             self.paths.ensure_credentials()?;
         }
         let image = ImageManager::new(&self.paths).ensure(&config, &primary)?;
+        let session_dir = self.paths.sessions.join(&session_id);
+        let worktrees = session_dir.join("worktrees");
+        std::fs::create_dir_all(&worktrees)?;
 
         let mut repos: Vec<RepoState> = Vec::with_capacity(resolved.len());
         for repo in &resolved {
