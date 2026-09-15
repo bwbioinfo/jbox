@@ -83,6 +83,28 @@ impl JboxPaths {
         fs::set_permissions(&key, fs::Permissions::from_mode(0o600))?;
         Ok(())
     }
+
+    /// Return the one GitHub CLI credential store that jbox can expose to a
+    /// guest. This intentionally excludes all SSH material and the rest of
+    /// the host's GitHub CLI configuration.
+    pub fn github_cli_hosts(&self) -> Result<PathBuf> {
+        let config = BaseDirs::new()
+            .context("could not determine XDG configuration directory")?
+            .config_dir()
+            .to_path_buf();
+        Self::github_cli_hosts_from(&config)
+    }
+
+    fn github_cli_hosts_from(config: &Path) -> Result<PathBuf> {
+        let hosts = config.join("gh/hosts.yml");
+        if !is_safe_credential_file(&hosts)? {
+            bail!(
+                "GitHub CLI credential file is missing, unsafe, or too large: {}. Run `gh auth login` on the host first",
+                hosts.display()
+            );
+        }
+        Ok(hosts)
+    }
     /// The only credential locations that may be exposed to the guest. They
     /// live below jbox-owned state, never beneath the user's normal home.
     pub fn jcode_credential_mounts(&self) -> Result<Vec<(PathBuf, PathBuf)>> {
@@ -487,5 +509,19 @@ mod tests {
         assert_eq!(report.imported.len(), 0);
         assert_eq!(report.retained.len(), 2);
         assert_eq!(fs::read_to_string(destination).unwrap(), "oauth-only");
+    }
+
+    #[test]
+    fn github_cli_forwarding_allows_only_hosts_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let hosts = config.join("gh/hosts.yml");
+        fs::create_dir_all(hosts.parent().unwrap()).unwrap();
+        fs::write(&hosts, "github.com:\n    oauth_token: token\n").unwrap();
+        assert_eq!(JboxPaths::github_cli_hosts_from(&config).unwrap(), hosts);
+
+        fs::remove_file(&hosts).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", &hosts).unwrap();
+        assert!(JboxPaths::github_cli_hosts_from(&config).is_err());
     }
 }

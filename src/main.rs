@@ -23,6 +23,14 @@ enum Command {
         #[arg(long)]
         no_attach: bool,
     },
+    /// Create a project-local jbox configuration and container image template.
+    Init {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Debian package to install in the generated container image. Repeat for more packages.
+        #[arg(long = "tool", value_name = "APT_PACKAGE")]
+        tools: Vec<String>,
+    },
     Ls,
     Attach {
         session: String,
@@ -84,6 +92,7 @@ fn main() -> Result<()> {
                 "Use `jbox attach {id}` to reconnect, or `jbox status {id}` to inspect changes."
             );
         }
+        Command::Init { path, tools } => app.init(&path, &tools)?,
         Command::Ls => app.list()?,
         Command::Attach { session } => app.attach(&session)?,
         Command::Shell { session } => app.shell(&session)?,
@@ -111,6 +120,7 @@ fn normalized_args() -> Vec<OsString> {
     let mut args = std::env::args_os().collect::<Vec<_>>();
     let known = [
         "run",
+        "init",
         "ls",
         "attach",
         "shell",

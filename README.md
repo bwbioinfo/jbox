@@ -73,8 +73,43 @@ unless Docker reports a runtime named `kata`.
 ```bash
 cargo install --path .
 cd ~/src/project
+jbox init --tool ripgrep --tool jq
 jbox .
 ```
+
+`jbox init` creates a `.jbox.toml` for the current Git repository and, when it
+does not already exist, a `.jbox/Dockerfile` that extends jbox's runtime image.
+It never overwrites either file. Pass `--tool` repeatedly to install Debian
+packages in the generated image, for example `jbox init --tool ripgrep --tool
+jq`. For any other customization, edit the generated Dockerfile and add normal
+Dockerfile instructions. Its content is hashed, so the next `jbox .` rebuilds
+the project image automatically when it changes.
+
+Every jbox base image includes the Beads CLI (`bd` and its `beads` alias),
+installed by the upstream checksum-verifying installer. Run `bd init` from a
+guest worktree when the project should use Beads issue tracking.
+
+The generated `[jcode]` settings also import the official jcode skills from the
+`1jehuang/jcode` repository into the disposable guest's `~/.agents/skills`
+directory. Set `jcode.skills.repository` and `jcode.skills.path` to import a
+different Git repository and subdirectory. Imports are session-scoped and occur
+before the guest daemon starts, so they never modify your host credentials or
+checkout. Provider and model selection is inherited from the local host Jcode
+client when omitted. Project settings can override this in a session-scoped
+guest Jcode configuration. The generated template pins OpenAI
+`gpt-5.6-terra`, high reasoning effort, and fast mode off:
+
+```toml
+[jcode]
+default_provider = "openai"
+default_model = "gpt-5.6-terra"
+openai_reasoning_effort = "high"
+openai_service_tier = "off" # Equivalent to Jcode's `/fast default off`.
+```
+
+Remove any of these keys to inherit that individual value from the host Jcode
+client. The generated guest `config.toml` is session-scoped and contains no
+credentials.
 
 `jbox .` creates a session such as `bright-otter-a1b2c3`, prints each worktree branch and base commit, starts the guest, and opens the local jcode TUI. The VM remains alive after the TUI disconnects. Reconnect or inspect it with:
 
@@ -127,10 +162,21 @@ lan = false
 
 [jcode]
 persistent_credentials = true
+# Omit an individual key to inherit that setting from the host Jcode client.
+default_provider = "openai"
+default_model = "gpt-5.6-terra"
+openai_reasoning_effort = "high"
+openai_service_tier = "off"
 
 [git]
 network = true
 credentials = "jbox"
+
+[git.author]
+# Uses host global Git user.name and user.email without mounting ~/.gitconfig.
+inherit_host = true
+# name = "Override Name"
+# email = "override@example.com"
 
 [[mounts]]
 source = "./test-data"
@@ -161,7 +207,19 @@ Implemented invariants:
 - SSH is published to a session-specific `127.0.0.0/8` loopback address. Every session has a fresh local bridge SSH key and dedicated local SSH agent, stored 0600/0700 in its session directory.
 - Current jcode native SSH uses the normal OpenSSH known-hosts database and has no per-connection known-hosts option. jbox therefore appends a tagged, session-specific loopback host key (`# jbox:<session>`) to the host's `~/.ssh/known_hosts`, then removes exactly that tagged entry on `stop` or `clean`. It never mounts the host `.ssh` directory or forwards its SSH agent to the guest.
 - Jcode auth persists only in `$XDG_DATA_HOME/jbox/credentials/jcode`, not the user's normal jcode configuration. The first guest login populates this dedicated state.
-- Git uses a newly generated dedicated key at `$XDG_DATA_HOME/jbox/credentials/git/id_ed25519`, not a copied host key or forwarded agent. Register its `.pub` file with the Git provider before guest `git push` works.
+- Git defaults to a newly generated dedicated SSH key at `$XDG_DATA_HOME/jbox/credentials/git/id_ed25519`, not a copied host key or forwarded agent. Register its `.pub` file with the Git provider before guest `git push` works.
+- Guest worktrees receive only `user.name` and `user.email` from the host global Git configuration. jbox writes those values to the isolated guest Git metadata and never mounts the host `.gitconfig`. `[git.author]` can override either field per project.
+
+### GitHub CLI HTTPS credential mode
+
+Set `git.credentials = "github-cli"` to let a guest authenticate to GitHub over
+HTTPS using an existing host `gh auth login`. jbox mounts only
+`$XDG_CONFIG_HOME/gh/hosts.yml` read-only at the guest's GitHub CLI location and
+uses `gh auth setup-git` to configure Git's HTTPS credential helper. It does not
+mount the rest of the GitHub CLI configuration, any Git credential helper store,
+`~/.ssh`, or an SSH agent. In this mode jbox does not create or mount its
+dedicated Git SSH key. The guest can use the bearer token in `hosts.yml`, so
+enable this only for a Kata guest and repository configuration you trust.
 
 ### Explicit local provider import
 

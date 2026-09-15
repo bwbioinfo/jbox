@@ -144,13 +144,40 @@ impl Default for Network {
 pub struct Jcode {
     #[serde(default = "yes")]
     pub persistent_credentials: bool,
+    #[serde(default)]
+    pub skills: Option<Skills>,
+    #[serde(default)]
+    pub default_provider: Option<String>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub openai_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub openai_service_tier: Option<String>,
 }
 impl Default for Jcode {
     fn default() -> Self {
         Self {
             persistent_credentials: true,
+            skills: None,
+            default_provider: None,
+            default_model: None,
+            openai_reasoning_effort: None,
+            openai_service_tier: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Skills {
+    pub repository: String,
+    #[serde(default = "default_skills_path")]
+    pub path: String,
+}
+
+fn default_skills_path() -> String {
+    "skills".into()
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -159,6 +186,8 @@ pub struct Git {
     pub network: bool,
     #[serde(default = "git_credentials")]
     pub credentials: String,
+    #[serde(default)]
+    pub author: GitAuthor,
 }
 fn git_credentials() -> String {
     "jbox".into()
@@ -168,7 +197,45 @@ impl Default for Git {
         Self {
             network: true,
             credentials: git_credentials(),
+            author: GitAuthor::default(),
         }
+    }
+}
+
+/// The guest's Git commit identity. By default each unset field is read from
+/// the host's global Git configuration at session creation, never mounted into
+/// the guest. Values in `.jbox.toml` take precedence per field.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitAuthor {
+    #[serde(default = "yes")]
+    pub inherit_host: bool,
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+impl Default for GitAuthor {
+    fn default() -> Self {
+        Self {
+            inherit_host: true,
+            name: None,
+            email: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedGitAuthor {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+impl GitAuthor {
+    pub fn resolve(&self) -> Result<ResolvedGitAuthor> {
+        Ok(ResolvedGitAuthor {
+            name: resolve_git_author_field(&self.name, self.inherit_host, "user.name")?,
+            email: resolve_git_author_field(&self.email, self.inherit_host, "user.email")?,
+        })
     }
 }
 #[derive(Debug, Clone, Deserialize)]
@@ -184,18 +251,7 @@ pub struct Mount {
 
 impl Config {
     pub fn load(input: &Path) -> Result<(Self, PathBuf)> {
-        let input = input
-            .canonicalize()
-            .with_context(|| format!("cannot resolve {}", input.display()))?;
-        let dir = if input.is_dir() {
-            input
-        } else {
-            input
-                .parent()
-                .context("configuration has no parent")?
-                .to_path_buf()
-        };
-        let primary = git_root(&dir)?;
+        let primary = Self::repository_root(input)?;
         let config_path = primary.join(".jbox.toml");
         let mut config = if config_path.exists() {
             let text = std::fs::read_to_string(&config_path).context("cannot read .jbox.toml")?;
@@ -234,8 +290,47 @@ impl Config {
         if !config.network.internet && config.git.network {
             bail!("git.network=true requires network.internet=true");
         }
-        if config.git.credentials != "jbox" {
-            bail!("git.credentials must be `jbox` in this MVP");
+        if !matches!(config.git.credentials.as_str(), "jbox" | "github-cli") {
+            bail!("git.credentials must be `jbox` or `github-cli`");
+        }
+        if config.git.credentials == "github-cli" && !config.git.network {
+            bail!("git.credentials=`github-cli` requires git.network=true");
+        }
+        if let Some(skills) = &config.jcode.skills {
+            validate_skills(skills, config.network.internet)?;
+        }
+        for (name, value) in [
+            ("jcode.default_provider", config.jcode.default_provider.as_deref()),
+            ("jcode.default_model", config.jcode.default_model.as_deref()),
+            (
+                "jcode.openai_reasoning_effort",
+                config.jcode.openai_reasoning_effort.as_deref(),
+            ),
+            (
+                "jcode.openai_service_tier",
+                config.jcode.openai_service_tier.as_deref(),
+            ),
+            ("git.author.name", config.git.author.name.as_deref()),
+            ("git.author.email", config.git.author.email.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.trim().is_empty() || value.contains('\0')) {
+                bail!("{name} must be a non-empty string without NUL characters");
+            }
+        }
+        if let Some(effort) = config.jcode.openai_reasoning_effort.as_deref()
+            && !matches!(
+                effort,
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+            )
+        {
+            bail!(
+                "jcode.openai_reasoning_effort must be one of none, minimal, low, medium, high, xhigh, or max"
+            );
+        }
+        if let Some(tier) = config.jcode.openai_service_tier.as_deref()
+            && !matches!(tier, "priority" | "flex" | "off")
+        {
+            bail!("jcode.openai_service_tier must be `priority`, `flex`, or `off`");
         }
         config.path = config_path;
         for mount in &mut config.mounts {
@@ -243,6 +338,24 @@ impl Config {
             mount.source_path = Some(path);
         }
         Ok((config, primary))
+    }
+
+    /// Resolve the Git root that owns a path without requiring a valid jbox
+    /// configuration. This is used by `jbox init`, which must work before a
+    /// `.jbox.toml` exists.
+    pub fn repository_root(input: &Path) -> Result<PathBuf> {
+        let input = input
+            .canonicalize()
+            .with_context(|| format!("cannot resolve {}", input.display()))?;
+        let dir = if input.is_dir() {
+            input
+        } else {
+            input
+                .parent()
+                .context("configuration has no parent")?
+                .to_path_buf()
+        };
+        git_root(&dir)
     }
 
     pub fn resolve_repositories(&self, primary: &Path) -> Result<Vec<ResolvedRepository>> {
@@ -362,6 +475,57 @@ fn validate_guest_path(path: &str) -> Result<()> {
     }
     Ok(())
 }
+fn validate_skills(skills: &Skills, internet: bool) -> Result<()> {
+    if !internet {
+        bail!("jcode.skills requires network.internet=true to clone its repository");
+    }
+    if !(skills.repository.starts_with("https://")
+        || skills.repository.starts_with("ssh://")
+        || skills.repository.starts_with("git@"))
+    {
+        bail!("jcode.skills.repository must use https://, ssh://, or git@ Git transport");
+    }
+    let path = Path::new(&skills.path);
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(component, std::path::Component::ParentDir | std::path::Component::RootDir)
+        })
+    {
+        bail!("jcode.skills.path must be a non-empty relative path without `..`");
+    }
+    Ok(())
+}
+
+fn global_git_config(key: &str) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["config", "--global", "--get", key])
+        .output()
+        .context("could not read host global Git configuration")?;
+    if !output.status.success() {
+        if output.status.code() == Some(1) {
+            return Ok(None);
+        }
+        bail!(
+            "could not read host global Git configuration for {key}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let value = String::from_utf8(output.stdout)?;
+    Ok((!value.trim().is_empty()).then(|| value.trim().to_owned()))
+}
+
+fn resolve_git_author_field(
+    configured: &Option<String>,
+    inherit_host: bool,
+    key: &str,
+) -> Result<Option<String>> {
+    match configured {
+        Some(value) => Ok(Some(value.clone())),
+        None if inherit_host => global_git_config(key),
+        None => Ok(None),
+    }
+}
 fn parse_duration(input: &str) -> Result<i64> {
     let s = input.trim();
     let (n, unit) = s.chars().partition::<String, _>(|c| c.is_ascii_digit());
@@ -394,6 +558,72 @@ mod tests {
         assert!(validate_guest_path("relative").is_err());
         assert!(validate_guest_path("/workspace/../home").is_err());
         assert!(validate_guest_path("/workspace/project").is_ok());
+    }
+
+    #[test]
+    fn validates_skills_repository_and_path() {
+        let skills = Skills {
+            repository: "https://github.com/example/skills.git".into(),
+            path: "skills".into(),
+        };
+        assert!(validate_skills(&skills, true).is_ok());
+        assert!(validate_skills(&skills, false).is_err());
+        assert!(validate_skills(
+            &Skills {
+                repository: "file:///tmp/skills".into(),
+                path: "skills".into(),
+            },
+            true,
+        )
+        .is_err());
+        assert!(validate_skills(
+            &Skills {
+                repository: "https://github.com/example/skills.git".into(),
+                path: "../skills".into(),
+            },
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn github_cli_credentials_require_git_networking() {
+        let temp = tempdir().unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(temp.path())
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(
+            temp.path().join(".jbox.toml"),
+            "version = 1\n[network]\ninternet = false\n[git]\nnetwork = false\ncredentials = 'github-cli'\n",
+        )
+        .unwrap();
+        assert!(Config::load(temp.path()).is_err());
+
+        std::fs::write(
+            temp.path().join(".jbox.toml"),
+            "version = 1\n[git]\nnetwork = true\ncredentials = 'github-cli'\n",
+        )
+        .unwrap();
+        assert!(Config::load(temp.path()).is_ok());
+    }
+
+    #[test]
+    fn explicit_git_author_overrides_do_not_need_host_configuration() {
+        let author = GitAuthor {
+            inherit_host: false,
+            name: Some("Jbox Test".into()),
+            email: Some("test@example.com".into()),
+        };
+        assert_eq!(
+            author.resolve().unwrap(),
+            ResolvedGitAuthor {
+                name: Some("Jbox Test".into()),
+                email: Some("test@example.com".into()),
+            }
+        );
     }
 
     #[test]

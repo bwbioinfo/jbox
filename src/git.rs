@@ -1,4 +1,4 @@
-use crate::state::RepoState;
+use crate::{config::ResolvedGitAuthor, state::RepoState};
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::Path;
@@ -76,6 +76,7 @@ impl Git {
         branch: &str,
         commit: &str,
         backup_gitfile: &Path,
+        author: &ResolvedGitAuthor,
     ) -> Result<()> {
         let gitfile = worktree.join(".git");
         let original = fs::read_to_string(&gitfile)
@@ -120,6 +121,12 @@ impl Git {
             &proxy,
             &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
         )?;
+        if let Some(name) = &author.name {
+            Self::run_git_dir(&proxy, &["config", "user.name", name])?;
+        }
+        if let Some(email) = &author.email {
+            Self::run_git_dir(&proxy, &["config", "user.email", email])?;
+        }
 
         fs::remove_file(&gitfile)?;
         fs::rename(&proxy, &gitfile)?;
@@ -257,11 +264,25 @@ mod tests {
             .add_worktree(tmp.path(), &wt, "bright-fox-123", "repo")
             .unwrap();
         let host_gitfile = tmp.path().join("host-gitfile");
-        Git.isolate_guest_metadata(tmp.path(), &wt, &made.branch, &made.commit, &host_gitfile)
-            .unwrap();
+        let guest_author = ResolvedGitAuthor {
+            name: Some("Guest Author".into()),
+            email: Some("guest@example.com".into()),
+        };
+        Git.isolate_guest_metadata(
+            tmp.path(),
+            &wt,
+            &made.branch,
+            &made.commit,
+            &host_gitfile,
+            &guest_author,
+        )
+        .unwrap();
         assert!(wt.join(".git").is_dir());
-        git(&wt, &["config", "user.email", "test@example.com"]);
-        git(&wt, &["config", "user.name", "Test"]);
+        assert_eq!(Git::run(&wt, &["config", "user.name"]).unwrap(), "Guest Author");
+        assert_eq!(
+            Git::run(&wt, &["config", "user.email"]).unwrap(),
+            "guest@example.com"
+        );
         std::fs::write(wt.join("a"), "guest change").unwrap();
         git(&wt, &["add", "a"]);
         git(&wt, &["commit", "-m", "guest"]);

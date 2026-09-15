@@ -11,6 +11,7 @@ pub struct ContainerSpec {
     pub memory: String,
     pub network: Network,
     pub ssh_host: String,
+    pub environment: Vec<(String, String)>,
 }
 
 /// Narrow OCI engine contract. The Kata runtime stays behind this interface.
@@ -156,6 +157,9 @@ impl Engine for DockerEngine {
                 mount.push_str(",readonly");
             }
             command.args(["--mount", &mount]);
+        }
+        for (key, value) in &spec.environment {
+            command.args(["--env", &format!("{key}={value}")]);
         }
         command
             .arg(&spec.image)

@@ -36,6 +36,10 @@ pub struct Session {
     pub config_path: PathBuf,
     pub image: String,
     pub repos: Vec<RepoState>,
+    #[serde(default)]
+    pub jcode_default_provider: Option<String>,
+    #[serde(default)]
+    pub jcode_default_model: Option<String>,
 }
 impl Session {
     pub fn expired(&self) -> bool {

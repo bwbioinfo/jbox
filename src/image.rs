@@ -7,6 +7,28 @@ use std::process::Command;
 pub struct ImageManager<'a> {
     paths: &'a JboxPaths,
 }
+
+const JBOX_ENTRYPOINT: &str = r#"#!/bin/sh
+set -eu
+mkdir -p /run/sshd
+if [ -n "${JBOX_SKILLS_REPOSITORY:-}" ]; then
+    rm -rf /tmp/jbox-skills
+    mkdir -p /tmp/jbox-skills /home/jbox/.agents/skills
+    chown -R jbox:jbox /tmp/jbox-skills /home/jbox/.agents
+    su -s /bin/sh jbox -c 'HOME=/home/jbox git clone --depth 1 --no-tags "$JBOX_SKILLS_REPOSITORY" /tmp/jbox-skills/repository'
+    su -s /bin/sh jbox -c 'cp -a "/tmp/jbox-skills/repository/${JBOX_SKILLS_PATH}/." /home/jbox/.agents/skills/'
+    rm -rf /tmp/jbox-skills
+fi
+if [ "${JBOX_GITHUB_CLI_CREDENTIALS:-}" = "1" ]; then
+    mkdir -p /home/jbox/.config/gh
+    chown jbox:jbox /home/jbox/.config /home/jbox/.config/gh
+    su -s /bin/sh jbox -c 'HOME=/home/jbox GH_CONFIG_DIR=/home/jbox/.config/gh gh auth setup-git'
+fi
+su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode && jcode serve --server-name jbox --socket /home/jbox/.local/share/jcode/jbox.sock >/tmp/jcode-serve.log 2>&1 &'
+exec /usr/sbin/sshd -D -e
+"#;
+
+const BASE_DOCKERFILE: &str = "FROM debian:bookworm-slim\nARG JBOX_UID=1000\nARG JBOX_GID=1000\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl git gzip openssh-client openssh-server tar && rm -rf /var/lib/apt/lists/*\nRUN mkdir -p -m 0755 /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' > /etc/apt/sources.list.d/github-cli.list && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*\nRUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash && bd version\nRUN groupadd --gid \"$JBOX_GID\" jbox && useradd --uid \"$JBOX_UID\" --gid \"$JBOX_GID\" -m -s /bin/bash jbox && mkdir -p /run/sshd /home/jbox/.jcode /home/jbox/.ssh && chown -R jbox:jbox /home/jbox\nCOPY jcode /usr/local/bin/jcode\nCOPY jcode-linux-x86_64.bin /usr/local/bin/jcode-linux-x86_64.bin\nCOPY jbox-entrypoint /usr/local/bin/jbox-entrypoint\nRUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/local/bin/jbox-entrypoint && printf '%s\\n' 'Port 2222' 'PasswordAuthentication no' 'PermitRootLogin no' 'AllowUsers jbox' 'AuthorizedKeysFile .ssh/authorized_keys' > /etc/ssh/sshd_config.d/jbox.conf\nEXPOSE 2222\n";
 impl<'a> ImageManager<'a> {
     pub fn new(paths: &'a JboxPaths) -> Self {
         Self { paths }
@@ -49,7 +71,7 @@ impl<'a> ImageManager<'a> {
     }
     fn base_image(&self) -> Result<String> {
         let (uid, gid) = current_user_ids()?;
-        let tag = format!("jbox/jcode:local-v4-{uid}-{gid}");
+        let tag = format!("jbox/jcode:local-v9-{uid}-{gid}");
         if self.exists(&tag) {
             return Ok(tag);
         }
@@ -79,11 +101,11 @@ impl<'a> ImageManager<'a> {
         std::fs::copy(&jcode_binary, context.join("jcode-linux-x86_64.bin"))?;
         std::fs::write(
             context.join("Dockerfile"),
-            "FROM debian:bookworm-slim\nARG JBOX_UID=1000\nARG JBOX_GID=1000\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates git openssh-client openssh-server && rm -rf /var/lib/apt/lists/* && groupadd --gid \"$JBOX_GID\" jbox && useradd --uid \"$JBOX_UID\" --gid \"$JBOX_GID\" -m -s /bin/bash jbox && mkdir -p /run/sshd /home/jbox/.ssh && chown -R jbox:jbox /home/jbox\nCOPY jcode /usr/local/bin/jcode\nCOPY jcode-linux-x86_64.bin /usr/local/bin/jcode-linux-x86_64.bin\nCOPY jbox-entrypoint /usr/local/bin/jbox-entrypoint\nRUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/local/bin/jbox-entrypoint && printf '%s\\n' 'Port 2222' 'PasswordAuthentication no' 'PermitRootLogin no' 'AllowUsers jbox' 'AuthorizedKeysFile .ssh/authorized_keys' > /etc/ssh/sshd_config.d/jbox.conf\nEXPOSE 2222\n",
+            BASE_DOCKERFILE,
         )?;
         std::fs::write(
             context.join("jbox-entrypoint"),
-            "#!/bin/sh\nset -eu\nmkdir -p /run/sshd\nsu -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode && jcode serve --server-name jbox --socket /home/jbox/.local/share/jcode/jbox.sock >/tmp/jcode-serve.log 2>&1 &'\nexec /usr/sbin/sshd -D -e\n",
+            JBOX_ENTRYPOINT,
         )?;
         run_build(
             &context,
@@ -92,6 +114,39 @@ impl<'a> ImageManager<'a> {
             &[format!("JBOX_UID={uid}"), format!("JBOX_GID={gid}")],
         )?;
         Ok(tag)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guest_entrypoint_imports_skills_before_starting_jcode() {
+        assert!(JBOX_ENTRYPOINT.contains("JBOX_SKILLS_REPOSITORY"));
+        assert!(JBOX_ENTRYPOINT.contains("/home/jbox/.agents/skills"));
+        assert!(JBOX_ENTRYPOINT.contains("git clone --depth 1 --no-tags"));
+        assert!(JBOX_ENTRYPOINT.find("git clone").unwrap() < JBOX_ENTRYPOINT.find("jcode serve").unwrap());
+    }
+
+    #[test]
+    fn base_image_installs_beads() {
+        assert!(BASE_DOCKERFILE.contains("curl"));
+        assert!(BASE_DOCKERFILE.contains("gastownhall/beads/main/scripts/install.sh"));
+        assert!(BASE_DOCKERFILE.contains("bd version"));
+    }
+
+    #[test]
+    fn base_image_configures_github_cli_for_https_credentials() {
+        assert!(BASE_DOCKERFILE.contains("githubcli-archive-keyring.gpg"));
+        assert!(BASE_DOCKERFILE.contains("install -y --no-install-recommends gh"));
+        assert!(JBOX_ENTRYPOINT.contains("JBOX_GITHUB_CLI_CREDENTIALS"));
+        assert!(JBOX_ENTRYPOINT.contains("gh auth setup-git"));
+    }
+
+    #[test]
+    fn base_image_creates_jcode_config_mount_parent() {
+        assert!(BASE_DOCKERFILE.contains("/home/jbox/.jcode"));
     }
 }
 fn current_user_ids() -> Result<(String, String)> {

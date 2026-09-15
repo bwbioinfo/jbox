@@ -23,7 +23,24 @@ lan = false
 
 [jcode]
 persistent_credentials = true
+# These project defaults override the host Jcode client for jbox sessions.
+# Remove an option to inherit that value from the host Jcode client instead.
+default_provider = "openai"
+default_model = "gpt-5.6-terra"
+openai_reasoning_effort = "high"
+openai_service_tier = "off"
+
+[jcode.skills]
+repository = "https://github.com/1jehuang/jcode.git"
+path = ".jcode/skills"
 
 [git]
 network = true
-credentials = "jbox"
+credentials = "github-cli"
+
+[git.author]
+# Read user.name and user.email from the host global Git config without
+# mounting it into the guest. Set either key here to override that field.
+inherit_host = true
+# name = "Your Name"
+# email = "you@example.com"
