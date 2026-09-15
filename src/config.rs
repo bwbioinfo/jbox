@@ -144,8 +144,8 @@ impl Default for Network {
 pub struct Jcode {
     #[serde(default = "yes")]
     pub persistent_credentials: bool,
-    #[serde(default)]
-    pub skills: Option<Skills>,
+    #[serde(default, deserialize_with = "deserialize_skill_sources")]
+    pub skills: Vec<SkillSource>,
     #[serde(default)]
     pub default_provider: Option<String>,
     #[serde(default)]
@@ -159,7 +159,7 @@ impl Default for Jcode {
     fn default() -> Self {
         Self {
             persistent_credentials: true,
-            skills: None,
+            skills: Vec::new(),
             default_provider: None,
             default_model: None,
             openai_reasoning_effort: None,
@@ -170,14 +170,30 @@ impl Default for Jcode {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Skills {
+pub struct SkillSource {
     pub repository: String,
-    #[serde(default = "default_skills_path")]
-    pub path: String,
+    /// When omitted, install every discoverable skill from the repository.
+    pub skill: Option<String>,
+    pub pin: Option<String>,
+    #[serde(default)]
+    pub allow_hidden_dirs: bool,
 }
 
-fn default_skills_path() -> String {
-    "skills".into()
+fn deserialize_skill_sources<'de, D>(deserializer: D) -> Result<Vec<SkillSource>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Sources {
+        One(SkillSource),
+        Many(Vec<SkillSource>),
+    }
+
+    Ok(match Sources::deserialize(deserializer)? {
+        Sources::One(source) => vec![source],
+        Sources::Many(sources) => sources,
+    })
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -296,11 +312,14 @@ impl Config {
         if config.git.credentials == "github-cli" && !config.git.network {
             bail!("git.credentials=`github-cli` requires git.network=true");
         }
-        if let Some(skills) = &config.jcode.skills {
-            validate_skills(skills, config.network.internet)?;
+        if !config.jcode.skills.is_empty() {
+            validate_skills(&config.jcode.skills, &config.network, &config.git)?;
         }
         for (name, value) in [
-            ("jcode.default_provider", config.jcode.default_provider.as_deref()),
+            (
+                "jcode.default_provider",
+                config.jcode.default_provider.as_deref(),
+            ),
             ("jcode.default_model", config.jcode.default_model.as_deref()),
             (
                 "jcode.openai_reasoning_effort",
@@ -475,26 +494,57 @@ fn validate_guest_path(path: &str) -> Result<()> {
     }
     Ok(())
 }
-fn validate_skills(skills: &Skills, internet: bool) -> Result<()> {
-    if !internet {
-        bail!("jcode.skills requires network.internet=true to clone its repository");
+fn validate_skills(skills: &[SkillSource], network: &Network, git: &Git) -> Result<()> {
+    if !network.internet {
+        bail!("jcode.skills requires network.internet=true for `gh skill install`");
     }
-    if !(skills.repository.starts_with("https://")
-        || skills.repository.starts_with("ssh://")
-        || skills.repository.starts_with("git@"))
-    {
-        bail!("jcode.skills.repository must use https://, ssh://, or git@ Git transport");
+    if !git.network || git.credentials != "github-cli" {
+        bail!(
+            "jcode.skills requires git.network=true and git.credentials=`github-cli` so the guest `gh` command can authenticate"
+        );
     }
-    let path = Path::new(&skills.path);
-    if path.as_os_str().is_empty()
-        || path.is_absolute()
-        || path.components().any(|component| {
-            matches!(component, std::path::Component::ParentDir | std::path::Component::RootDir)
-        })
-    {
-        bail!("jcode.skills.path must be a non-empty relative path without `..`");
+    for source in skills {
+        if !valid_github_repository(&source.repository) {
+            bail!(
+                "jcode.skills.repository must be a GitHub OWNER/REPO identifier: {}",
+                source.repository
+            );
+        }
+        for (field, value) in [
+            ("skill", source.skill.as_deref()),
+            ("pin", source.pin.as_deref()),
+        ] {
+            if let Some(value) = value
+                && (value.trim().is_empty()
+                    || value.starts_with('-')
+                    || value.contains('\0')
+                    || value.contains('\n')
+                    || value.contains('\r'))
+            {
+                bail!(
+                    "jcode.skills.{field} must be a non-empty, non-option argument without line breaks"
+                );
+            }
+        }
     }
     Ok(())
+}
+
+fn valid_github_repository(repository: &str) -> bool {
+    let mut parts = repository.split('/');
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(name) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && !owner.is_empty()
+        && !name.is_empty()
+        && [owner, name].into_iter().all(|part| {
+            part.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
 }
 
 fn global_git_config(key: &str) -> Result<Option<String>> {
@@ -561,40 +611,94 @@ mod tests {
     }
 
     #[test]
-    fn validates_skills_repository_and_path() {
-        let skills = Skills {
-            repository: "https://github.com/example/skills.git".into(),
-            path: "skills".into(),
+    fn validates_multiple_github_skill_sources() {
+        let skills = vec![
+            SkillSource {
+                repository: "bwbioinfo/skills".into(),
+                skill: None,
+                pin: None,
+                allow_hidden_dirs: false,
+            },
+            SkillSource {
+                repository: "K-Dense-AI/scientific-agent-skills".into(),
+                skill: Some("scanpy".into()),
+                pin: Some("v1.2.3".into()),
+                allow_hidden_dirs: true,
+            },
+        ];
+        let network = Network::default();
+        let git = Git {
+            credentials: "github-cli".into(),
+            ..Git::default()
         };
-        assert!(validate_skills(&skills, true).is_ok());
-        assert!(validate_skills(&skills, false).is_err());
-        assert!(validate_skills(
-            &Skills {
-                repository: "file:///tmp/skills".into(),
-                path: "skills".into(),
-            },
-            true,
+        assert!(validate_skills(&skills, &network, &git).is_ok());
+        assert!(
+            validate_skills(
+                &skills,
+                &Network {
+                    internet: false,
+                    ..Network::default()
+                },
+                &git
+            )
+            .is_err()
+        );
+        assert!(
+            validate_skills(
+                &[SkillSource {
+                    repository: "file:///tmp/skills".into(),
+                    skill: None,
+                    pin: None,
+                    allow_hidden_dirs: false,
+                }],
+                &network,
+                &git,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_skills(
+                &[SkillSource {
+                    repository: "bwbioinfo/skills".into(),
+                    skill: Some("--all".into()),
+                    pin: None,
+                    allow_hidden_dirs: false,
+                }],
+                &network,
+                &git,
+            )
+            .is_err()
+        );
+        assert!(validate_skills(&skills, &network, &Git::default()).is_err());
+    }
+
+    #[test]
+    fn parses_single_and_multiple_skills_blocks() {
+        let single: Jcode = toml::from_str(
+            "persistent_credentials = true\n[skills]\nrepository = 'bwbioinfo/skills'\nskill = 'scanpy'\n",
         )
-        .is_err());
-        assert!(validate_skills(
-            &Skills {
-                repository: "https://github.com/example/skills.git".into(),
-                path: "../skills".into(),
-            },
-            true,
+        .unwrap();
+        assert_eq!(single.skills.len(), 1);
+        assert_eq!(single.skills[0].skill.as_deref(), Some("scanpy"));
+
+        let multiple: Jcode = toml::from_str(
+            "persistent_credentials = true\n[[skills]]\nrepository = 'bwbioinfo/skills'\n[[skills]]\nrepository = 'K-Dense-AI/scientific-agent-skills'\nskill = 'scanpy'\n",
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(multiple.skills.len(), 2);
     }
 
     #[test]
     fn github_cli_credentials_require_git_networking() {
         let temp = tempdir().unwrap();
-        assert!(Command::new("git")
-            .arg("init")
-            .arg(temp.path())
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg(temp.path())
+                .status()
+                .unwrap()
+                .success()
+        );
         std::fs::write(
             temp.path().join(".jbox.toml"),
             "version = 1\n[network]\ninternet = false\n[git]\nnetwork = false\ncredentials = 'github-cli'\n",

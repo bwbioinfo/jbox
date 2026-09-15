@@ -172,7 +172,7 @@ mod tests {
     use super::*;
     #[test]
     fn bare_path_becomes_run() {
-        let args = vec![OsString::from("jbox"), OsString::from(".")];
+        let args = [OsString::from("jbox"), OsString::from(".")];
         // Keep the parsing behavior covered without altering the real process args.
         assert_eq!(args[1], ".");
     }

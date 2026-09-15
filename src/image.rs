@@ -1,5 +1,5 @@
 use crate::{config::Config, paths::JboxPaths};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,22 +11,31 @@ pub struct ImageManager<'a> {
 const JBOX_ENTRYPOINT: &str = r#"#!/bin/sh
 set -eu
 mkdir -p /run/sshd
-if [ -n "${JBOX_SKILLS_REPOSITORY:-}" ]; then
-    # The clone is owned by jbox. With CAP_DAC_OVERRIDE intentionally absent,
-    # root must not try to remove its contents during a subsequent bootstrap.
-    su -s /bin/sh jbox -c 'rm -rf /tmp/jbox-skills'
-    mkdir -p /tmp/jbox-skills
-    chown jbox:jbox /tmp/jbox-skills
-    # The guest root process intentionally lacks DAC_OVERRIDE. The isolated
-    # home tmpfs belongs to jbox, so every operation below /home/jbox must run
-    # as that unprivileged user rather than failing during guest bootstrap.
-    su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.agents/skills && HOME=/home/jbox git clone --depth 1 --no-tags "$JBOX_SKILLS_REPOSITORY" /tmp/jbox-skills/repository'
-    su -s /bin/sh jbox -c 'cp -a "/tmp/jbox-skills/repository/${JBOX_SKILLS_PATH}/." /home/jbox/.agents/skills/'
-    su -s /bin/sh jbox -c 'rm -rf /tmp/jbox-skills'
-fi
 if [ "${JBOX_GITHUB_CLI_CREDENTIALS:-}" = "1" ]; then
     su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.config/gh && HOME=/home/jbox GH_CONFIG_DIR=/home/jbox/.config/gh gh auth setup-git'
 fi
+index=0
+while [ "$index" -lt "${JBOX_SKILL_COUNT:-0}" ]; do
+    repository="$(printenv "JBOX_SKILL_${index}_REPOSITORY")"
+    skill="$(printenv "JBOX_SKILL_${index}_NAME")"
+    pin="$(printenv "JBOX_SKILL_${index}_PIN")"
+    hidden="$(printenv "JBOX_SKILL_${index}_ALLOW_HIDDEN")"
+    # `gh skill` has no Jcode target. An explicit directory installs the
+    # standardized skill layout where Jcode discovers it, instead of silently
+    # defaulting to GitHub Copilot. The mounted directory is session-owned.
+    env JBOX_ONE_SKILL_REPOSITORY="$repository" JBOX_ONE_SKILL_NAME="$skill" JBOX_ONE_SKILL_PIN="$pin" JBOX_ONE_SKILL_HIDDEN="$hidden" \
+        su -s /bin/sh jbox -c '
+            set -eu
+            mkdir -p /home/jbox/.agents/skills
+            set -- gh skill install "$JBOX_ONE_SKILL_REPOSITORY"
+            if [ -n "$JBOX_ONE_SKILL_NAME" ]; then set -- "$@" "$JBOX_ONE_SKILL_NAME"; else set -- "$@" --all; fi
+            set -- "$@" --dir /home/jbox/.agents/skills
+            if [ -n "$JBOX_ONE_SKILL_PIN" ]; then set -- "$@" --pin "$JBOX_ONE_SKILL_PIN"; fi
+            if [ "$JBOX_ONE_SKILL_HIDDEN" = "1" ]; then set -- "$@" --allow-hidden-dirs; fi
+            "$@"
+        '
+    index=$((index + 1))
+done
 su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode && jcode serve --server-name jbox --socket /home/jbox/.local/share/jcode/jbox.sock >/tmp/jcode-serve.log 2>&1 &'
 exec /usr/sbin/sshd -D -e
 "#;
@@ -122,41 +131,6 @@ impl<'a> ImageManager<'a> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn guest_entrypoint_imports_skills_before_starting_jcode() {
-        assert!(JBOX_ENTRYPOINT.contains("JBOX_SKILLS_REPOSITORY"));
-        assert!(JBOX_ENTRYPOINT.contains("/home/jbox/.agents/skills"));
-        assert!(JBOX_ENTRYPOINT.contains("git clone --depth 1 --no-tags"));
-        assert!(
-            JBOX_ENTRYPOINT.find("git clone").unwrap()
-                < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
-        );
-    }
-
-    #[test]
-    fn base_image_installs_beads() {
-        assert!(BASE_DOCKERFILE.contains("curl"));
-        assert!(BASE_DOCKERFILE.contains("gastownhall/beads/main/scripts/install.sh"));
-        assert!(BASE_DOCKERFILE.contains("bd version"));
-    }
-
-    #[test]
-    fn base_image_configures_github_cli_for_https_credentials() {
-        assert!(BASE_DOCKERFILE.contains("githubcli-archive-keyring.gpg"));
-        assert!(BASE_DOCKERFILE.contains("install -y --no-install-recommends gh"));
-        assert!(JBOX_ENTRYPOINT.contains("JBOX_GITHUB_CLI_CREDENTIALS"));
-        assert!(JBOX_ENTRYPOINT.contains("gh auth setup-git"));
-    }
-
-    #[test]
-    fn base_image_creates_jcode_config_mount_parent() {
-        assert!(BASE_DOCKERFILE.contains("/home/jbox/.jcode"));
-    }
-}
 fn current_user_ids() -> Result<(String, String)> {
     let id = |flag| -> Result<String> {
         let output = Command::new("id").arg(flag).output()?;
@@ -191,4 +165,44 @@ fn hash_file_with_context(path: &Path, context: &[u8]) -> Result<String> {
     hasher.update(std::fs::read(path)?);
     hasher.update(context);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guest_entrypoint_installs_skills_with_gh_before_starting_jcode() {
+        assert!(JBOX_ENTRYPOINT.contains("JBOX_SKILL_COUNT"));
+        assert!(JBOX_ENTRYPOINT.contains("/home/jbox/.agents/skills"));
+        assert!(JBOX_ENTRYPOINT.contains("gh skill install"));
+        assert!(
+            JBOX_ENTRYPOINT.find("gh auth setup-git").unwrap()
+                < JBOX_ENTRYPOINT.find("gh skill install").unwrap()
+        );
+        assert!(
+            JBOX_ENTRYPOINT.find("gh skill install").unwrap()
+                < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
+        );
+    }
+
+    #[test]
+    fn base_image_installs_beads() {
+        assert!(BASE_DOCKERFILE.contains("curl"));
+        assert!(BASE_DOCKERFILE.contains("gastownhall/beads/main/scripts/install.sh"));
+        assert!(BASE_DOCKERFILE.contains("bd version"));
+    }
+
+    #[test]
+    fn base_image_configures_github_cli_for_https_credentials() {
+        assert!(BASE_DOCKERFILE.contains("githubcli-archive-keyring.gpg"));
+        assert!(BASE_DOCKERFILE.contains("install -y --no-install-recommends gh"));
+        assert!(JBOX_ENTRYPOINT.contains("JBOX_GITHUB_CLI_CREDENTIALS"));
+        assert!(JBOX_ENTRYPOINT.contains("gh auth setup-git"));
+    }
+
+    #[test]
+    fn base_image_creates_jcode_config_mount_parent() {
+        assert!(BASE_DOCKERFILE.contains("/home/jbox/.jcode"));
+    }
 }

@@ -51,13 +51,19 @@ default_model = "gpt-5.6-terra"
 openai_reasoning_effort = "high"
 openai_service_tier = "off"
 
-[jcode.skills]
-repository = "https://github.com/1jehuang/jcode.git"
-path = ".jcode/skills"
+[[jcode.skills]]
+# `gh skill install` runs inside the guest after GitHub CLI authentication.
+# Omit `skill` to install every discoverable skill in this repository.
+repository = "bwbioinfo/skills"
+# skill = "scanpy"
+# pin = "v1.2.3"
+# allow_hidden_dirs = true
 
 [git]
 network = true
-credentials = "jbox"
+# GitHub CLI credentials are required for the default private skills source.
+# Jbox mounts only ~/.config/gh/hosts.yml, read-only, into the guest.
+credentials = "github-cli"
 
 [git.author]
 # Read user.name and user.email from the host global Git config without
@@ -411,7 +417,7 @@ impl App {
             PathBuf::from("/home/jbox/.local/share/jcode"),
             true,
         ));
-        if let Some(skills) = &config.jcode.skills {
+        if !config.jcode.skills.is_empty() {
             let skills_dir = ssh
                 .parent()
                 .context("session SSH directory lacks a parent")?
@@ -424,10 +430,27 @@ impl App {
                 true,
             ));
             environment.push((
-                "JBOX_SKILLS_REPOSITORY".into(),
-                skills.repository.clone(),
+                "JBOX_SKILL_COUNT".into(),
+                config.jcode.skills.len().to_string(),
             ));
-            environment.push(("JBOX_SKILLS_PATH".into(), skills.path.clone()));
+            for (index, source) in config.jcode.skills.iter().enumerate() {
+                environment.push((
+                    format!("JBOX_SKILL_{index}_REPOSITORY"),
+                    source.repository.clone(),
+                ));
+                environment.push((
+                    format!("JBOX_SKILL_{index}_NAME"),
+                    source.skill.clone().unwrap_or_default(),
+                ));
+                environment.push((
+                    format!("JBOX_SKILL_{index}_PIN"),
+                    source.pin.clone().unwrap_or_default(),
+                ));
+                environment.push((
+                    format!("JBOX_SKILL_{index}_ALLOW_HIDDEN"),
+                    if source.allow_hidden_dirs { "1" } else { "0" }.into(),
+                ));
+            }
         }
         if config.git.network && config.git.credentials == "jbox" {
             mounts.push((
@@ -862,7 +885,7 @@ mod tests {
             .success());
         std::fs::write(
             temp.path().join(".jbox.toml"),
-            "version = 1\n[jcode.skills]\nrepository = 'https://github.com/example/skills.git'\npath = 'skills'\n",
+            "version = 1\n[git]\ncredentials = 'github-cli'\n[[jcode.skills]]\nrepository = 'example/skills'\n[[jcode.skills]]\nrepository = 'K-Dense-AI/scientific-agent-skills'\nskill = 'scanpy'\n",
         )
         .unwrap();
         let (config, _) = Config::load(temp.path()).unwrap();
@@ -875,16 +898,18 @@ mod tests {
         assert!(spec.mounts.iter().any(|(_, target, _)| {
             target == Path::new("/home/jbox/.agents/skills")
         }));
-        assert_eq!(
-            spec.environment,
-            vec![
-                (
-                    "JBOX_SKILLS_REPOSITORY".into(),
-                    "https://github.com/example/skills.git".into()
-                ),
-                ("JBOX_SKILLS_PATH".into(), "skills".into()),
-            ]
-        );
+        assert!(spec.environment.contains(&(
+            "JBOX_SKILL_COUNT".into(),
+            "2".into(),
+        )));
+        assert!(spec.environment.contains(&(
+            "JBOX_SKILL_0_REPOSITORY".into(),
+            "example/skills".into(),
+        )));
+        assert!(spec.environment.contains(&(
+            "JBOX_SKILL_1_NAME".into(),
+            "scanpy".into(),
+        )));
     }
 
     #[test]
@@ -916,7 +941,7 @@ mod tests {
     fn guest_jcode_config_applies_project_preference_overrides() {
         let config = config::Jcode {
             persistent_credentials: true,
-            skills: None,
+            skills: Vec::new(),
             default_provider: Some("openai".into()),
             default_model: Some("gpt-5.6-terra".into()),
             openai_reasoning_effort: Some("high".into()),

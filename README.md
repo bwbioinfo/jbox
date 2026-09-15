@@ -89,14 +89,33 @@ Every jbox base image includes the Beads CLI (`bd` and its `beads` alias),
 installed by the upstream checksum-verifying installer. Run `bd init` from a
 guest worktree when the project should use Beads issue tracking.
 
-The generated `[jcode]` settings also import the official jcode skills from the
-`1jehuang/jcode` repository into the disposable guest's `~/.agents/skills`
-directory. Set `jcode.skills.repository` and `jcode.skills.path` to import a
-different Git repository and subdirectory. Imports are session-scoped and occur
-before the guest daemon starts, so they never modify your host credentials or
-checkout. Provider and model selection is inherited from the local host Jcode
-client when omitted. Project settings can override this in a session-scoped
-guest Jcode configuration. The generated template pins OpenAI
+Declare one or more GitHub skill sources with `[[jcode.skills]]`. Jbox runs
+`gh skill install` **inside the guest** before the Jcode daemon starts, placing
+the skills in `~/.agents/skills`, where Jcode discovers them. Sources therefore
+need `network.internet = true`, `git.network = true`, and
+`git.credentials = "github-cli"`. The host GitHub CLI login is mounted only as
+the guest's read-only `hosts.yml`, so private repositories such as
+`bwbioinfo/skills` authenticate without exposing host SSH keys or the rest of
+`~/.config`.
+
+```toml
+[[jcode.skills]]
+# Omit `skill` to install all discovered skills from this private repository.
+repository = "bwbioinfo/skills"
+
+[[jcode.skills]]
+repository = "K-Dense-AI/scientific-agent-skills"
+skill = "scanpy"
+# pin = "v1.2.3"
+# allow_hidden_dirs = true
+```
+
+Jbox uses `--dir /home/jbox/.agents/skills` rather than a named `--agent`,
+because GitHub CLI has no `jcode` agent target. Skill installations and their
+GitHub CLI metadata are session-scoped. They never modify the host checkout or
+host credentials. Provider and model selection is inherited from the local host
+Jcode client when omitted. Project settings can override this in a
+session-scoped guest Jcode configuration. The generated template pins OpenAI
 `gpt-5.6-terra`, high reasoning effort, and fast mode off:
 
 ```toml

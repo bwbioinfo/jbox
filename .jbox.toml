@@ -30,9 +30,15 @@ default_model = "gpt-5.6-terra"
 openai_reasoning_effort = "high"
 openai_service_tier = "off"
 
-[jcode.skills]
-repository = "https://github.com/1jehuang/jcode.git"
-path = ".jcode/skills"
+[[jcode.skills]]
+# Private skills authenticate through the read-only GitHub CLI host config.
+# Omit `skill` to install every discoverable skill in the repository.
+repository = "bwbioinfo/skills"
+
+[[jcode.skills]]
+# A named public skill can be added alongside a complete private skill set.
+repository = "K-Dense-AI/scientific-agent-skills"
+skill = "scanpy"
 
 [git]
 network = true
