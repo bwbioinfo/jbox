@@ -140,10 +140,11 @@ writable = false
 
 Each repository is resolved and canonicalized before `git worktree add -b jbox/<session>/<repo>`. A dirty original checkout is safe: the worktree starts at its `HEAD`, not its uncommitted state. Submodules are initialized in the worktree. The host checkout itself is not mounted.
 
-With no `image.dockerfile`, jbox copies the locally installed `jcode` launcher and distribution binary into a cached local Debian-based image. This bakes jcode, Git, certificates, SSH client/server, Bash, and the jbox guest entrypoint into the image. The image tag includes the local UID/GID so the guest workspace is writable without mounting host account state. A project Dockerfile should begin with the tag printed by `jbox`, for example:
+With no `image.dockerfile`, jbox copies the locally installed `jcode` launcher and distribution binary into a cached local Debian-based image. This bakes jcode, Git, certificates, SSH client/server, Bash, and the jbox guest entrypoint into the image. The image tag includes the local UID/GID so the guest workspace is writable without mounting host account state. For a project Dockerfile, jbox resolves that host-specific base and supplies it as `JBOX_BASE_IMAGE` automatically:
 
 ```dockerfile
-FROM jbox/jcode:local-v4-1001-1001
+ARG JBOX_BASE_IMAGE
+FROM ${JBOX_BASE_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends ripgrep
 ```
 

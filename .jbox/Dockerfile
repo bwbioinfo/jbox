@@ -3,7 +3,8 @@
 # with edition 2024.
 FROM rust:1.98-bookworm AS rust
 
-FROM jbox/jcode:local-v4-1001-1001
+ARG JBOX_BASE_IMAGE
+FROM ${JBOX_BASE_IMAGE}
 
 USER root
 COPY --from=rust /usr/local/cargo /usr/local/cargo

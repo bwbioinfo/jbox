@@ -13,7 +13,10 @@ impl<'a> ImageManager<'a> {
     }
     pub fn ensure(&self, config: &Config, project: &Path) -> Result<String> {
         match &config.image.dockerfile {
-            Some(dockerfile) => self.project_image(project, dockerfile),
+            Some(dockerfile) => {
+                let base = self.base_image()?;
+                self.project_image(project, dockerfile, &base)
+            }
             None => self.base_image(),
         }
     }
@@ -24,7 +27,7 @@ impl<'a> ImageManager<'a> {
             .map(|output| output.status.success())
             .unwrap_or(false)
     }
-    fn project_image(&self, project: &Path, raw: &str) -> Result<String> {
+    fn project_image(&self, project: &Path, raw: &str, base: &str) -> Result<String> {
         let dockerfile = project
             .join(raw)
             .canonicalize()
@@ -32,10 +35,15 @@ impl<'a> ImageManager<'a> {
         if !dockerfile.starts_with(project) {
             bail!("image.dockerfile must be inside the primary repository");
         }
-        let digest = hash_file(&dockerfile)?;
+        let digest = hash_file_with_context(&dockerfile, base.as_bytes())?;
         let tag = format!("jbox/project:{}", &digest[..16]);
         if !self.exists(&tag) {
-            run_build(project, &dockerfile, &tag, &[])?;
+            run_build(
+                project,
+                &dockerfile,
+                &tag,
+                &[format!("JBOX_BASE_IMAGE={base}")],
+            )?;
         }
         Ok(tag)
     }
@@ -115,8 +123,9 @@ fn run_build(context: &Path, dockerfile: &Path, tag: &str, build_args: &[String]
     }
     Ok(())
 }
-fn hash_file(path: &Path) -> Result<String> {
+fn hash_file_with_context(path: &Path, context: &[u8]) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(std::fs::read(path)?);
+    hasher.update(context);
     Ok(format!("{:x}", hasher.finalize()))
 }
