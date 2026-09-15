@@ -1,5 +1,5 @@
 use crate::state::Session;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use directories::BaseDirs;
 use std::fs;
 use std::io::Write;
@@ -520,10 +520,12 @@ mod tests {
             fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert!(!paths
-            .credentials
-            .join("jcode/home/.jcode/config.toml")
-            .exists());
+        assert!(
+            !paths
+                .credentials
+                .join("jcode/home/.jcode/config.toml")
+                .exists()
+        );
 
         fs::write(home.join(".jcode/auth.json"), "new-oauth").unwrap();
         let report = paths.import_local_credentials_from(&home, false).unwrap();
