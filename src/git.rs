@@ -417,8 +417,8 @@ impl Git {
         Ok(())
     }
     pub fn diff_stat(&self, repo: &RepoState) -> Result<String> {
-        let uncommitted = Self::run(&repo.worktree, &["diff", "--stat"])?;
-        let staged = Self::run(&repo.worktree, &["diff", "--cached", "--stat"])?;
+        let uncommitted = self.filtered_diff_stat(repo, false)?;
+        let staged = self.filtered_diff_stat(repo, true)?;
         let range = format!("{}..HEAD", repo.base_commit);
         let commits = Self::run(&repo.worktree, &["log", "--oneline", &range])?;
         Ok(format!(
@@ -538,6 +538,10 @@ impl Git {
         else {
             return false;
         };
+        self.is_unchanged_bootstrap_file(repo, path)
+    }
+
+    fn is_unchanged_bootstrap_file(&self, repo: &RepoState, path: &BeadsBaselineFile) -> bool {
         let Ok(content) = fs::read(repo.worktree.join(&path.path)) else {
             return false;
         };
@@ -547,6 +551,38 @@ impl Git {
                 &["diff", "--cached", "--quiet", "--", &path.path],
             )
             .is_ok()
+    }
+
+    fn ignored_jbox_beads_paths(&self, repo: &RepoState) -> Vec<String> {
+        let mut paths = Vec::new();
+        if self.is_unchanged_beads_snapshot(repo) {
+            paths.push(".beads/issues.jsonl".to_owned());
+        }
+        paths.extend(
+            repo.beads_bootstrap
+                .iter()
+                .filter(|path| self.is_unchanged_bootstrap_file(repo, path))
+                .map(|path| path.path.clone()),
+        );
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    fn filtered_diff_stat(&self, repo: &RepoState, cached: bool) -> Result<String> {
+        let mut args = vec!["diff".to_owned(), "--stat".to_owned()];
+        if cached {
+            args.push("--cached".to_owned());
+        }
+        args.push("--".to_owned());
+        args.push(".".to_owned());
+        args.extend(
+            self.ignored_jbox_beads_paths(repo)
+                .into_iter()
+                .map(|path| format!(":(exclude){path}")),
+        );
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        Self::run(&repo.worktree, &refs)
     }
 
     fn run_git_dir(git_dir: &Path, args: &[&str]) -> Result<String> {
@@ -730,12 +766,14 @@ mod tests {
         assert!(!Git.status(&repo).unwrap().contains("issues.jsonl"));
         assert!(!Git.status(&repo).unwrap().contains("config.yaml"));
         assert!(!Git.status(&repo).unwrap().contains("metadata.json"));
+        assert!(!Git.diff_stat(&repo).unwrap().contains(".beads/"));
         Git.restore_guest_metadata(&repo).unwrap();
         Git.prepare_retained_worktree_for_guest(&repo, &author)
             .unwrap();
         Git.restore_guest_metadata(&repo).unwrap();
 
         fs::write(worktree.join(".beads/config.yaml"), "agent changed it\n").unwrap();
+        git(&worktree, &["add", ".beads/config.yaml"]);
         assert_eq!(
             Git.change_state(&repo).unwrap(),
             WorktreeChangeState::Changes
@@ -744,6 +782,7 @@ mod tests {
         // A changed bootstrap file stays visible, just like a changed task
         // export, so clean/resume cannot discard agent work.
         assert!(Git.status(&repo).unwrap().contains("config.yaml"));
+        assert!(Git.diff_stat(&repo).unwrap().contains("config.yaml"));
         repo.beads_bootstrap.clear();
         fs::write(worktree.join(".beads/issues.jsonl"), "agent edit\n").unwrap();
         Git.remove_worktree(source.path(), &worktree, true).unwrap();
