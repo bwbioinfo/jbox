@@ -1,5 +1,5 @@
 use crate::{config::Config, paths::JboxPaths};
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,16 +13,17 @@ set -eu
 mkdir -p /run/sshd
 if [ -n "${JBOX_SKILLS_REPOSITORY:-}" ]; then
     rm -rf /tmp/jbox-skills
-    mkdir -p /tmp/jbox-skills /home/jbox/.agents/skills
-    chown -R jbox:jbox /tmp/jbox-skills /home/jbox/.agents
-    su -s /bin/sh jbox -c 'HOME=/home/jbox git clone --depth 1 --no-tags "$JBOX_SKILLS_REPOSITORY" /tmp/jbox-skills/repository'
+    mkdir -p /tmp/jbox-skills
+    chown jbox:jbox /tmp/jbox-skills
+    # The guest root process intentionally lacks DAC_OVERRIDE. The isolated
+    # home tmpfs belongs to jbox, so every operation below /home/jbox must run
+    # as that unprivileged user rather than failing during guest bootstrap.
+    su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.agents/skills && HOME=/home/jbox git clone --depth 1 --no-tags "$JBOX_SKILLS_REPOSITORY" /tmp/jbox-skills/repository'
     su -s /bin/sh jbox -c 'cp -a "/tmp/jbox-skills/repository/${JBOX_SKILLS_PATH}/." /home/jbox/.agents/skills/'
     rm -rf /tmp/jbox-skills
 fi
 if [ "${JBOX_GITHUB_CLI_CREDENTIALS:-}" = "1" ]; then
-    mkdir -p /home/jbox/.config/gh
-    chown jbox:jbox /home/jbox/.config /home/jbox/.config/gh
-    su -s /bin/sh jbox -c 'HOME=/home/jbox GH_CONFIG_DIR=/home/jbox/.config/gh gh auth setup-git'
+    su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.config/gh && HOME=/home/jbox GH_CONFIG_DIR=/home/jbox/.config/gh gh auth setup-git'
 fi
 su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode && jcode serve --server-name jbox --socket /home/jbox/.local/share/jcode/jbox.sock >/tmp/jcode-serve.log 2>&1 &'
 exec /usr/sbin/sshd -D -e
@@ -99,14 +100,8 @@ impl<'a> ImageManager<'a> {
             );
         }
         std::fs::copy(&jcode_binary, context.join("jcode-linux-x86_64.bin"))?;
-        std::fs::write(
-            context.join("Dockerfile"),
-            BASE_DOCKERFILE,
-        )?;
-        std::fs::write(
-            context.join("jbox-entrypoint"),
-            JBOX_ENTRYPOINT,
-        )?;
+        std::fs::write(context.join("Dockerfile"), BASE_DOCKERFILE)?;
+        std::fs::write(context.join("jbox-entrypoint"), JBOX_ENTRYPOINT)?;
         run_build(
             &context,
             &context.join("Dockerfile"),
@@ -126,7 +121,10 @@ mod tests {
         assert!(JBOX_ENTRYPOINT.contains("JBOX_SKILLS_REPOSITORY"));
         assert!(JBOX_ENTRYPOINT.contains("/home/jbox/.agents/skills"));
         assert!(JBOX_ENTRYPOINT.contains("git clone --depth 1 --no-tags"));
-        assert!(JBOX_ENTRYPOINT.find("git clone").unwrap() < JBOX_ENTRYPOINT.find("jcode serve").unwrap());
+        assert!(
+            JBOX_ENTRYPOINT.find("git clone").unwrap()
+                < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
+        );
     }
 
     #[test]
