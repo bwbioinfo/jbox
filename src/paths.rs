@@ -333,7 +333,7 @@ impl JboxPaths {
         // Guest bootstrap may hydrate several independent Beads databases
         // before sshd starts. Retain a bounded deadline but allow that useful
         // session-local preparation to complete on a cold Kata guest.
-        const SSH_READY_TIMEOUT_SECONDS: u64 = 90;
+        const SSH_READY_TIMEOUT_SECONDS: u64 = 300;
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(SSH_READY_TIMEOUT_SECONDS);
         let mut key = None;
