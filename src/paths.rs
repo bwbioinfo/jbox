@@ -330,7 +330,12 @@ impl JboxPaths {
         // ssh-keyscan's one-second connection timeout contributes to each
         // attempt. This is only readiness probing of a per-session loopback
         // address, before we publish any session state.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        // Guest bootstrap may hydrate several independent Beads databases
+        // before sshd starts. Retain a bounded deadline but allow that useful
+        // session-local preparation to complete on a cold Kata guest.
+        const SSH_READY_TIMEOUT_SECONDS: u64 = 90;
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SSH_READY_TIMEOUT_SECONDS);
         let mut key = None;
         let mut last_error = None;
         while std::time::Instant::now() < deadline {
@@ -350,9 +355,11 @@ impl JboxPaths {
         }
         let key = key.with_context(|| match last_error {
             Some(error) => {
-                format!("could not obtain SSH host key for jbox guest within 30 seconds: {error}")
+                format!("could not obtain SSH host key for jbox guest within {SSH_READY_TIMEOUT_SECONDS} seconds: {error}")
             }
-            None => "could not obtain SSH host key for jbox guest within 30 seconds".to_owned(),
+            None => format!(
+                "could not obtain SSH host key for jbox guest within {SSH_READY_TIMEOUT_SECONDS} seconds"
+            ),
         })?;
         let tag = format!("# jbox:{session_id}");
         let mut file = fs::OpenOptions::new()

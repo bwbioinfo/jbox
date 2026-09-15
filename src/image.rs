@@ -45,9 +45,11 @@ while [ "$index" -lt "${JBOX_BEADS_WORKSPACE_COUNT:-0}" ]; do
     # host Beads Dolt database, locks, sockets, or credentials.
     env JBOX_ONE_BEADS_WORKSPACE="$workspace" JBOX_ONE_BEADS_PREFIX="$prefix" su -s /bin/sh jbox -c '
         set -eu
-        if [ -f "$JBOX_ONE_BEADS_WORKSPACE/.beads/issues.jsonl" ]; then
+        if [ -f "$JBOX_ONE_BEADS_WORKSPACE/.beads/issues.jsonl" ] \
+            && [ ! -d "$JBOX_ONE_BEADS_WORKSPACE/.beads/embeddeddolt" ] \
+            && [ ! -d "$JBOX_ONE_BEADS_WORKSPACE/.beads/dolt" ]; then
             cd "$JBOX_ONE_BEADS_WORKSPACE"
-            bd init --sandbox --stealth --from-jsonl --prefix "$JBOX_ONE_BEADS_PREFIX" --non-interactive --skip-agents --skip-hooks --reinit-local
+            bd init --sandbox --stealth --from-jsonl --prefix "$JBOX_ONE_BEADS_PREFIX" --non-interactive --skip-agents --skip-hooks
         fi
     '
     index=$((index + 1))
@@ -213,6 +215,9 @@ mod tests {
     fn guest_hydrates_beads_exports_before_starting_jcode() {
         assert!(JBOX_ENTRYPOINT.contains("JBOX_BEADS_WORKSPACE_COUNT"));
         assert!(JBOX_ENTRYPOINT.contains("bd init --sandbox --stealth --from-jsonl"));
+        assert!(JBOX_ENTRYPOINT.contains(".beads/embeddeddolt"));
+        assert!(JBOX_ENTRYPOINT.contains(".beads/dolt"));
+        assert!(!JBOX_ENTRYPOINT.contains("--reinit-local"));
         assert!(
             JBOX_ENTRYPOINT
                 .find("bd init --sandbox --stealth --from-jsonl")

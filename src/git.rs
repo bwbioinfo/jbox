@@ -1,11 +1,14 @@
 use crate::{config::ResolvedGitAuthor, state::RepoState};
 use anyhow::{Context, Result, bail};
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
 pub struct Git;
+const BEADS_EXPORT_LIMIT: u64 = 8 * 1024 * 1024;
 pub struct WorktreeCreated {
     pub branch: String,
     pub commit: String,
@@ -94,8 +97,24 @@ impl Git {
                 source.display()
             );
         }
-        if !fs::metadata(&export)?.is_file() {
+        let export_metadata = fs::metadata(&export)?;
+        if !export_metadata.is_file() {
             bail!("Beads export {} is not a regular file", export.display());
+        }
+        if export_metadata.len() > BEADS_EXPORT_LIMIT {
+            bail!(
+                "Beads export {} exceeds the {} MiB snapshot limit",
+                export.display(),
+                BEADS_EXPORT_LIMIT / (1024 * 1024)
+            );
+        }
+        let content = fs::read(&export)?;
+        if content.len() as u64 > BEADS_EXPORT_LIMIT {
+            bail!(
+                "Beads export {} exceeds the {} MiB snapshot limit",
+                export.display(),
+                BEADS_EXPORT_LIMIT / (1024 * 1024)
+            );
         }
 
         let beads_dir = worktree.join(".beads");
@@ -119,14 +138,23 @@ impl Git {
                 destination.display()
             );
         }
-        fs::copy(&export, &destination).with_context(|| {
+        let temporary = beads_dir.join(".issues.jsonl.jbox-importing");
+        let mut temporary_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("cannot stage Beads export at {}", temporary.display()))?;
+        temporary_file.write_all(&content)?;
+        temporary_file.sync_all()?;
+        drop(temporary_file);
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+        fs::rename(&temporary, &destination).with_context(|| {
             format!(
-                "cannot snapshot Beads export from {} to {}",
+                "cannot atomically snapshot Beads export from {} to {}",
                 export.display(),
                 destination.display()
             )
         })?;
-        fs::set_permissions(&destination, fs::Permissions::from_mode(0o600))?;
         Ok(true)
     }
     pub fn remove_worktree(&self, repo: &Path, worktree: &Path, force: bool) -> Result<()> {
