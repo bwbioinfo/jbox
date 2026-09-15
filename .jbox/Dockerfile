@@ -14,6 +14,10 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
         pkg-config \
+        python-is-python3 \
+        python3 \
+        python3-pip \
+        python3-venv \
     && rm -rf /var/lib/apt/lists/*
 # sshd supplies a conservative PATH for remote commands. Keep small wrappers
 # in /usr/local/bin so shells and jcode tool processes find the Rust toolchain
