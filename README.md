@@ -159,6 +159,15 @@ jbox stop bright-otter-a1b2c3
 jbox clean bright-otter-a1b2c3
 ```
 
+From inside a host repository, `jbox accept` presents only retained sessions
+whose worktree belongs to that repository. It defaults to the currently checked
+out branch, shows session state and whether each worktree has changes, then asks
+for a numbered selection and final confirmation. This accepts only that one
+repository from a multi-repository session, avoiding a failed or accidental
+merge of sibling repositories. Pass a session explicitly with
+`jbox accept <session> --into <branch>` to retain the existing all-repository
+acceptance workflow.
+
 `jbox accept <session> --into <branch>` accepts the latest **committed** snapshot
 from every session repository into the named local host branch without stopping
 the guest. The target branch must already be checked out and clean in every

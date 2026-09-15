@@ -16,6 +16,7 @@ use state::{RepoState, Session, SessionState, StateStore};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{io, io::IsTerminal, io::Write};
 
 pub const JCODE_SOCKET: &str = "/home/jbox/.local/share/jcode/jbox.sock";
 
@@ -624,6 +625,109 @@ impl App {
         Ok(())
     }
 
+    /// Interactively accept exactly the repository selected by the current
+    /// directory. This avoids surprising cross-repository acceptance when a
+    /// multi-repository session is selected from one checkout.
+    pub fn accept_from_repository(&self, input: &Path, target: Option<&str>) -> Result<()> {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!(
+                "`jbox accept` without a session needs an interactive terminal; use `jbox accept <session> --into <branch>` instead"
+            );
+        }
+        let repository = Config::repository_root(input)?;
+        let candidates = self.sessions_for_repository(&repository)?;
+        if candidates.is_empty() {
+            bail!(
+                "no retained jbox worktrees belong to {}",
+                repository.display()
+            );
+        }
+        let target = match target {
+            Some(target) => target.to_owned(),
+            None => self.git.current_branch(&repository)?,
+        };
+        if target.is_empty() {
+            bail!(
+                "{} is detached; check out the branch to accept into or pass --into <branch>",
+                repository.display()
+            );
+        }
+
+        println!("Jbox sessions for {}:", repository.display());
+        for (index, (session, repo)) in candidates.iter().enumerate() {
+            let change = match self.git.has_changes_or_unique_commits(repo) {
+                Ok(true) => "changes",
+                Ok(false) => "clean",
+                Err(_) => "unavailable",
+            };
+            println!(
+                "  {}) {}  {:?}  {}  [{}]",
+                index + 1,
+                session.id,
+                session.state,
+                repo.branch,
+                change
+            );
+        }
+        print!("Select a session to fast-forward `{target}` (blank cancels): ");
+        io::stdout().flush()?;
+        let mut selected = String::new();
+        io::stdin().read_line(&mut selected)?;
+        let selected = selected.trim();
+        if selected.is_empty() {
+            println!("accept cancelled.");
+            return Ok(());
+        }
+        let index: usize = selected
+            .parse()
+            .context("select a session by its displayed number")?;
+        if index == 0 || index > candidates.len() {
+            bail!("selection must be between 1 and {}", candidates.len());
+        }
+        let (session, repo) = &candidates[index - 1];
+        print!(
+            "Fast-forward `{target}` to {} from session {}? [y/N]: ",
+            repo.branch, session.id
+        );
+        io::stdout().flush()?;
+        let mut confirmed = String::new();
+        io::stdin().read_line(&mut confirmed)?;
+        if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
+            println!("accept cancelled.");
+            return Ok(());
+        }
+
+        self.git.import_guest_commits(repo)?;
+        self.git.preflight_accept_snapshot(repo, &target)?;
+        self.git.fast_forward_snapshot(repo, &target)?;
+        println!(
+            "accepted {} snapshot from {} into {}",
+            repo.name, repo.branch, target
+        );
+        let mut session = session.clone();
+        self.touch(&mut session)?;
+        Ok(())
+    }
+
+    fn sessions_for_repository(&self, repository: &Path) -> Result<Vec<(Session, RepoState)>> {
+        Ok(self
+            .state
+            .list()?
+            .into_iter()
+            .flat_map(|session| {
+                let repositories = session
+                    .repos
+                    .iter()
+                    .filter(|repo| repo.source == repository)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                repositories
+                    .into_iter()
+                    .map(move |repo| (session.clone(), repo))
+            })
+            .collect())
+    }
+
     pub fn list(&self) -> Result<()> {
         let sessions = self.state.list()?;
         if sessions.is_empty() {
@@ -844,6 +948,54 @@ mod tests {
             git: Git,
             engine: DockerEngine,
         }
+    }
+
+    fn test_session(id: &str, source: PathBuf) -> Session {
+        let now = Utc::now();
+        Session {
+            version: 1,
+            id: id.into(),
+            state: SessionState::Stopped,
+            container_name: format!("jbox-{id}"),
+            ssh_host: "127.0.0.2".into(),
+            ssh_port: 22,
+            ssh_agent_pid: 0,
+            known_hosts_tag: format!("# jbox:{id}"),
+            created_at: now,
+            last_activity_at: now,
+            ttl_seconds: 86_400,
+            config_path: source.join(".jbox.toml"),
+            image: "test".into(),
+            repos: vec![RepoState {
+                name: "repo".into(),
+                worktree: source.join("worktree"),
+                mount: "/workspace/repo".into(),
+                branch: format!("jbox/{id}/repo"),
+                base_commit: "deadbeef".into(),
+                host_gitfile: source.join("host-gitfile"),
+                source,
+            }],
+            jcode_default_provider: None,
+            jcode_default_model: None,
+        }
+    }
+
+    #[test]
+    fn repository_accept_lists_only_sessions_for_the_current_repository() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let current = temp.path().join("current");
+        let other = temp.path().join("other");
+        app.state
+            .save(&test_session("current-session", current.clone()))
+            .unwrap();
+        app.state
+            .save(&test_session("other-session", other))
+            .unwrap();
+
+        let candidates = app.sessions_for_repository(&current).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0.id, "current-session");
     }
 
     #[test]

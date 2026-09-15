@@ -159,14 +159,7 @@ impl Git {
                 repo.branch
             );
         }
-        Self::run(
-            &repo.source,
-            &[
-                "update-ref",
-                &session_ref,
-                "FETCH_HEAD",
-            ],
-        )?;
+        Self::run(&repo.source, &["update-ref", &session_ref, "FETCH_HEAD"])?;
         Ok(())
     }
 
@@ -261,6 +254,9 @@ impl Git {
     }
     pub fn status(&self, worktree: &Path) -> Result<String> {
         Self::run(worktree, &["status", "--short", "--branch"])
+    }
+    pub fn current_branch(&self, repository: &Path) -> Result<String> {
+        Self::run(repository, &["branch", "--show-current"])
     }
     pub fn diff_stat(&self, repo: &RepoState) -> Result<String> {
         let uncommitted = Self::run(&repo.worktree, &["diff", "--stat"])?;
@@ -366,7 +362,10 @@ mod tests {
         )
         .unwrap();
         assert!(wt.join(".git").is_dir());
-        assert_eq!(Git::run(&wt, &["config", "user.name"]).unwrap(), "Guest Author");
+        assert_eq!(
+            Git::run(&wt, &["config", "user.name"]).unwrap(),
+            "Guest Author"
+        );
         assert_eq!(
             Git::run(&wt, &["config", "user.email"]).unwrap(),
             "guest@example.com"
@@ -444,7 +443,10 @@ mod tests {
         Git.import_guest_commits(&repo).unwrap();
         Git.accept_snapshot(&repo, &target).unwrap();
         assert!(wt.join(".git").is_dir());
-        assert_eq!(std::fs::read_to_string(tmp.path().join("a")).unwrap(), "first accepted snapshot");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("a")).unwrap(),
+            "first accepted snapshot"
+        );
 
         std::fs::write(wt.join("a"), "second accepted snapshot").unwrap();
         git(&wt, &["add", "a"]);
@@ -452,7 +454,10 @@ mod tests {
         Git.import_guest_commits(&repo).unwrap();
         Git.accept_snapshot(&repo, &target).unwrap();
         assert!(wt.join(".git").is_dir());
-        assert_eq!(std::fs::read_to_string(tmp.path().join("a")).unwrap(), "second accepted snapshot");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("a")).unwrap(),
+            "second accepted snapshot"
+        );
 
         Git.restore_and_import_guest_metadata(&repo).unwrap();
         assert!(Git.remove_worktree(tmp.path(), &wt, false).is_ok());

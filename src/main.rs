@@ -49,10 +49,11 @@ enum Command {
     },
     /// Fast-forward a host branch to a session's committed snapshot without stopping it.
     Accept {
-        session: String,
+        /// Session to accept. Omit it to select a session for the current repository.
+        session: Option<String>,
         /// Existing local branch checked out in each host repository.
         #[arg(long)]
-        into: String,
+        into: Option<String>,
     },
     Clean {
         session: Option<String>,
@@ -106,7 +107,15 @@ fn main() -> Result<()> {
         Command::Status { session } => app.status(&session, false)?,
         Command::Diff { session } => app.status(&session, true)?,
         Command::Stop { session } => app.stop(&session)?,
-        Command::Accept { session, into } => app.accept(&session, &into)?,
+        Command::Accept { session, into } => match session {
+            Some(session) => app.accept(
+                &session,
+                into.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("`jbox accept <session>` requires --into <branch>")
+                })?,
+            )?,
+            None => app.accept_from_repository(&std::env::current_dir()?, into.as_deref())?,
+        },
         Command::Clean { session, force } => app.clean(session.as_deref(), force)?,
         Command::Credentials { command } => match command {
             CredentialCommand::Import { all, yes, replace } => {
