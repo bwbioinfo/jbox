@@ -118,6 +118,22 @@ Jcode client when omitted. Project settings can override this in a
 session-scoped guest Jcode configuration. The generated template pins OpenAI
 `gpt-5.6-terra`, high reasoning effort, and fast mode off:
 
+To make a skill a reliable default rather than merely an available choice, add
+session-wide instructions. Jbox renders this as the guest's global
+`~/AGENTS.md`, which Jcode loads after the project `AGENTS.md`; it does not
+write to or alter any Git worktree:
+
+```toml
+[jcode.agent]
+instructions = """
+Use the `work-with-geonic` skill for all work in this workspace.
+Use the `jbox` skill for workspace and isolation tasks.
+Use the `jcode` skill for Jcode configuration and remote sessions.
+"""
+```
+
+These instructions apply to new Jcode conversations in the jbox session.
+
 ```toml
 [jcode]
 default_provider = "openai"

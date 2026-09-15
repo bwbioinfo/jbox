@@ -147,6 +147,8 @@ pub struct Jcode {
     #[serde(default, deserialize_with = "deserialize_skill_sources")]
     pub skills: Vec<SkillSource>,
     #[serde(default)]
+    pub agent: Agent,
+    #[serde(default)]
     pub default_provider: Option<String>,
     #[serde(default)]
     pub default_model: Option<String>,
@@ -160,12 +162,21 @@ impl Default for Jcode {
         Self {
             persistent_credentials: true,
             skills: Vec::new(),
+            agent: Agent::default(),
             default_provider: None,
             default_model: None,
             openai_reasoning_effort: None,
             openai_service_tier: None,
         }
     }
+}
+
+/// Session-wide guidance rendered to the guest's global `~/AGENTS.md`.
+/// Jcode loads this after the project AGENTS.md, without changing a worktree.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Agent {
+    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -314,6 +325,13 @@ impl Config {
         }
         if !config.jcode.skills.is_empty() {
             validate_skills(&config.jcode.skills, &config.network, &config.git)?;
+        }
+        if let Some(instructions) = config.jcode.agent.instructions.as_deref()
+            && (instructions.trim().is_empty()
+                || instructions.contains('\0')
+                || instructions.len() > 65_536)
+        {
+            bail!("jcode.agent.instructions must be non-empty, NUL-free, and at most 65536 bytes");
         }
         for (name, value) in [
             (

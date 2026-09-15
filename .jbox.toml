@@ -40,6 +40,15 @@ repository = "bwbioinfo/skills"
 repository = "K-Dense-AI/scientific-agent-skills"
 skill = "scanpy"
 
+[jcode.agent]
+# This is session-scoped guest guidance. It is mounted as ~/AGENTS.md and
+# never changes this repository's generated Git worktree.
+instructions = """
+Use the `work-with-geonic` skill for all work in this workspace.
+Use the `jbox` skill for workspace, lifecycle, isolation, or credential tasks.
+Use the `jcode` skill for Jcode configuration, remote sessions, and authentication.
+"""
+
 [git]
 network = true
 credentials = "github-cli"

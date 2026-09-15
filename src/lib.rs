@@ -59,6 +59,14 @@ repository = "bwbioinfo/skills"
 # pin = "v1.2.3"
 # allow_hidden_dirs = true
 
+[jcode.agent]
+# Session-wide guidance is mounted as ~/AGENTS.md, not written to the worktree.
+instructions = """
+Use the `work-with-geonic` skill for all work in this workspace.
+Use the `jbox` skill for workspace, lifecycle, isolation, or credential tasks.
+Use the `jcode` skill for Jcode configuration, remote sessions, and authentication.
+"""
+
 [git]
 network = true
 # GitHub CLI credentials are required for the default private skills source.
@@ -185,7 +193,11 @@ impl App {
                 dockerfile.display()
             );
         } else {
-            println!("created {} with: {}", dockerfile.display(), tools.join(", "));
+            println!(
+                "created {} with: {}",
+                dockerfile.display(),
+                tools.join(", ")
+            );
         }
         Ok(())
     }
@@ -417,6 +429,24 @@ impl App {
             PathBuf::from("/home/jbox/.local/share/jcode"),
             true,
         ));
+        if let Some(instructions) = config.jcode.agent.instructions.as_deref() {
+            let agent_instructions = ssh
+                .parent()
+                .context("session SSH directory lacks a parent")?
+                .join("runtime/AGENTS.md");
+            std::fs::write(
+                &agent_instructions,
+                format!("# Jbox session instructions\n\n{instructions}\n"),
+            )?;
+            std::fs::set_permissions(&agent_instructions, std::fs::Permissions::from_mode(0o600))?;
+            // Jcode loads ~/AGENTS.md after the project AGENTS.md. Mounting a
+            // session file here preserves the generated worktree unchanged.
+            mounts.push((
+                agent_instructions,
+                PathBuf::from("/home/jbox/AGENTS.md"),
+                false,
+            ));
+        }
         if !config.jcode.skills.is_empty() {
             let skills_dir = ssh
                 .parent()
@@ -424,11 +454,7 @@ impl App {
                 .join("runtime/skills");
             std::fs::create_dir_all(&skills_dir)?;
             std::fs::set_permissions(&skills_dir, std::fs::Permissions::from_mode(0o700))?;
-            mounts.push((
-                skills_dir,
-                PathBuf::from("/home/jbox/.agents/skills"),
-                true,
-            ));
+            mounts.push((skills_dir, PathBuf::from("/home/jbox/.agents/skills"), true));
             environment.push((
                 "JBOX_SKILL_COUNT".into(),
                 config.jcode.skills.len().to_string(),
@@ -742,9 +768,7 @@ fn valid_apt_package(package: &str) -> bool {
             .last()
             .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
         && package.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'+' | b'.' | b'-')
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'.' | b'-')
         })
 }
 
@@ -762,7 +786,8 @@ fn jcode_attach_args(ssh_host: &str, remote_working_dir: &str) -> Vec<String> {
 }
 
 fn guest_jcode_config(jcode: &config::Jcode) -> String {
-    let mut lines = vec!["# Generated for this jbox session. Do not store credentials here.".into()];
+    let mut lines =
+        vec!["# Generated for this jbox session. Do not store credentials here.".into()];
     lines.push("[provider]".into());
     for (key, value) in [
         ("default_provider", jcode.default_provider.as_deref()),
@@ -824,11 +849,13 @@ mod tests {
     #[test]
     fn init_creates_a_config_and_tooling_image_without_overwriting() {
         let temp = tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", temp.path().to_str().unwrap()])
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("git")
+                .args(["init", temp.path().to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
         let app = test_app(temp.path());
         app.init(temp.path(), &["ripgrep".into(), "jq".into()])
             .unwrap();
@@ -845,11 +872,13 @@ mod tests {
     #[test]
     fn init_rejects_unsafe_package_names_before_writing_files() {
         let temp = tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", temp.path().to_str().unwrap()])
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("git")
+                .args(["init", temp.path().to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
         let app = test_app(temp.path());
         assert!(app.init(temp.path(), &["jq;whoami".into()]).is_err());
         assert!(!temp.path().join(".jbox.toml").exists());
@@ -859,11 +888,13 @@ mod tests {
     #[test]
     fn init_uses_an_existing_dockerfile_without_replacing_it() {
         let temp = tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", temp.path().to_str().unwrap()])
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("git")
+                .args(["init", temp.path().to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
         let dockerfile = temp.path().join(".jbox/Dockerfile");
         std::fs::create_dir_all(dockerfile.parent().unwrap()).unwrap();
         std::fs::write(&dockerfile, "FROM debian:bookworm-slim\n").unwrap();
@@ -878,11 +909,13 @@ mod tests {
     #[test]
     fn skills_repository_becomes_an_isolated_guest_mount() {
         let temp = tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", temp.path().to_str().unwrap()])
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("git")
+                .args(["init", temp.path().to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
         std::fs::write(
             temp.path().join(".jbox.toml"),
             "version = 1\n[git]\ncredentials = 'github-cli'\n[[jcode.skills]]\nrepository = 'example/skills'\n[[jcode.skills]]\nrepository = 'K-Dense-AI/scientific-agent-skills'\nskill = 'scanpy'\n",
@@ -892,24 +925,33 @@ mod tests {
         let ssh = temp.path().join("session/ssh");
         std::fs::create_dir_all(&ssh).unwrap();
         let spec = test_app(temp.path())
-            .container_spec(&config, &[], "jbox-test", &ssh, "test-image".into(), "127.0.0.2")
+            .container_spec(
+                &config,
+                &[],
+                "jbox-test",
+                &ssh,
+                "test-image".into(),
+                "127.0.0.2",
+            )
             .unwrap();
 
-        assert!(spec.mounts.iter().any(|(_, target, _)| {
-            target == Path::new("/home/jbox/.agents/skills")
-        }));
-        assert!(spec.environment.contains(&(
-            "JBOX_SKILL_COUNT".into(),
-            "2".into(),
-        )));
-        assert!(spec.environment.contains(&(
-            "JBOX_SKILL_0_REPOSITORY".into(),
-            "example/skills".into(),
-        )));
-        assert!(spec.environment.contains(&(
-            "JBOX_SKILL_1_NAME".into(),
-            "scanpy".into(),
-        )));
+        assert!(
+            spec.mounts
+                .iter()
+                .any(|(_, target, _)| { target == Path::new("/home/jbox/.agents/skills") })
+        );
+        assert!(
+            spec.environment
+                .contains(&("JBOX_SKILL_COUNT".into(), "2".into(),))
+        );
+        assert!(
+            spec.environment
+                .contains(&("JBOX_SKILL_0_REPOSITORY".into(), "example/skills".into(),))
+        );
+        assert!(
+            spec.environment
+                .contains(&("JBOX_SKILL_1_NAME".into(), "scanpy".into(),))
+        );
     }
 
     #[test]
@@ -942,6 +984,7 @@ mod tests {
         let config = config::Jcode {
             persistent_credentials: true,
             skills: Vec::new(),
+            agent: config::Agent::default(),
             default_provider: Some("openai".into()),
             default_model: Some("gpt-5.6-terra".into()),
             openai_reasoning_effort: Some("high".into()),
@@ -950,11 +993,17 @@ mod tests {
 
         let rendered = guest_jcode_config(&config);
         let parsed: toml::Value = toml::from_str(&rendered).unwrap();
-        assert_eq!(parsed["provider"]["default_model"].as_str(), Some("gpt-5.6-terra"));
+        assert_eq!(
+            parsed["provider"]["default_model"].as_str(),
+            Some("gpt-5.6-terra")
+        );
         assert_eq!(
             parsed["provider"]["openai_reasoning_effort"].as_str(),
             Some("high")
         );
-        assert_eq!(parsed["provider"]["openai_service_tier"].as_str(), Some("off"));
+        assert_eq!(
+            parsed["provider"]["openai_service_tier"].as_str(),
+            Some("off")
+        );
     }
 }
