@@ -105,14 +105,24 @@ impl Engine for DockerEngine {
             "ALL",
             // The entrypoint begins as root so sshd can start, then `su` drops
             // to the unprivileged jbox account before launching jcode. sshd
-            // also chroots its pre-auth privilege-separation process. These
-            // are the only capabilities those operations require.
+            // also chroots its pre-auth privilege-separation process. A PTY
+            // additionally needs CHOWN so sshd can assign /dev/pts ownership
+            // to the unprivileged session account. Debian's sshd also writes
+            // its audit login record and may signal the UID-switched session
+            // during PTY cleanup. These are the only capabilities the
+            // entrypoint and SSH service require.
             "--cap-add",
             "SETGID",
             "--cap-add",
             "SETUID",
             "--cap-add",
             "SYS_CHROOT",
+            "--cap-add",
+            "CHOWN",
+            "--cap-add",
+            "AUDIT_WRITE",
+            "--cap-add",
+            "KILL",
             "--security-opt",
             "no-new-privileges",
             "--read-only",
