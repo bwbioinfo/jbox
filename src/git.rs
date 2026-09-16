@@ -761,7 +761,8 @@ impl Git {
             .lines()
             .filter(|line| {
                 !((snapshot_is_unchanged && line.ends_with(".beads/issues.jsonl"))
-                    || self.is_unchanged_bootstrap_line(repo, line))
+                    || self.is_unchanged_bootstrap_line(repo, line)
+                    || self.is_transient_beads_gate_lock(repo, line))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -795,6 +796,14 @@ impl Git {
             return false;
         };
         self.is_unchanged_bootstrap_file(repo, path)
+    }
+
+    /// `bd` leaves this zero-length coordination lock at the workspace root.
+    /// It is runtime state, not an agent edit, and must not prevent a retained
+    /// jbox worktree from being resumed after its guest stops.
+    fn is_transient_beads_gate_lock(&self, repo: &RepoState, line: &str) -> bool {
+        (repo.beads_snapshot.is_some() || !repo.beads_bootstrap.is_empty())
+            && line.ends_with(".beads.gate.lock")
     }
 
     fn is_unchanged_bootstrap_file(&self, repo: &RepoState, path: &BeadsBaselineFile) -> bool {
@@ -1005,6 +1014,7 @@ mod tests {
         fs::write(worktree.join(".gitignore"), ".beads/embeddeddolt/\n").unwrap();
         let beads_bootstrap = Git.capture_beads_bootstrap(&worktree);
         assert_eq!(beads_bootstrap.len(), 5);
+        fs::write(worktree.join(".beads.gate.lock"), "").unwrap();
         let mut repo = RepoState {
             name: "repo".into(),
             source: source.path().into(),
@@ -1022,6 +1032,7 @@ mod tests {
         assert!(!Git.status(&repo).unwrap().contains("issues.jsonl"));
         assert!(!Git.status(&repo).unwrap().contains("config.yaml"));
         assert!(!Git.status(&repo).unwrap().contains("metadata.json"));
+        assert!(!Git.status(&repo).unwrap().contains(".beads.gate.lock"));
         assert!(!Git.diff_stat(&repo).unwrap().contains(".beads/"));
         Git.restore_guest_metadata(&repo).unwrap();
         Git.prepare_retained_worktree_for_guest(&repo, &author)

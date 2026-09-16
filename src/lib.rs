@@ -605,7 +605,7 @@ impl App {
     }
 
     pub fn attach(&self, id: &str) -> Result<()> {
-        let mut session = self.state.load(id)?;
+        let mut session = self.load_session(id)?;
         let mount = session.repos[0].mount.clone();
         self.attach_session(&mut session, &mount)
     }
@@ -639,7 +639,7 @@ impl App {
     }
 
     pub fn shell(&self, id: &str) -> Result<()> {
-        let mut session = self.state.load(id)?;
+        let mut session = self.load_session(id)?;
         let mount = session.repos[0].mount.clone();
         self.shell_session(&mut session, &mount)
     }
@@ -712,7 +712,7 @@ impl App {
     }
 
     pub fn stop(&self, id: &str) -> Result<()> {
-        let mut session = self.state.load(id)?;
+        let mut session = self.load_session(id)?;
         if session.state == SessionState::Running {
             self.engine.stop(&session.container_name)?;
             self.paths.stop_session_ssh_agent(session.ssh_agent_pid);
@@ -752,7 +752,7 @@ impl App {
     /// into the explicitly selected host branch. Unlike `stop`, this keeps a
     /// running guest and its isolated Git metadata intact for further work.
     pub fn accept(&self, id: &str, target: &str, options: AcceptOptions) -> Result<()> {
-        let mut session = self.state.load(id)?;
+        let mut session = self.load_session(id)?;
         let targets = vec![target.to_owned(); session.repos.len()];
         let repos = session.repos.clone();
         self.accept_snapshots(&mut session, &repos, &targets, options)
@@ -1118,7 +1118,7 @@ impl App {
     /// branch and image are reused. A fresh session SSH key and runtime state
     /// are created, while dirty retained files are rejected before any reset.
     pub fn resume(&self, id: &str) -> Result<()> {
-        let mut session = self.state.load(id)?;
+        let mut session = self.load_session(id)?;
         if session.state == SessionState::Running {
             bail!("session {id} is already running; use `jbox attach {id}`");
         }
@@ -1230,8 +1230,7 @@ impl App {
 
     fn sessions_for_repository(&self, repository: &Path) -> Result<Vec<(Session, RepoState)>> {
         Ok(self
-            .state
-            .list()?
+            .list_sessions()?
             .into_iter()
             .flat_map(|session| {
                 let repositories = session
@@ -1248,7 +1247,7 @@ impl App {
     }
 
     pub fn list(&self) -> Result<()> {
-        let sessions = self.state.list()?;
+        let sessions = self.list_sessions()?;
         if sessions.is_empty() {
             println!("No jbox sessions.");
             return Ok(());
@@ -1271,7 +1270,7 @@ impl App {
     }
 
     pub fn status(&self, id: &str, diff: bool) -> Result<()> {
-        let session = self.state.load(id)?;
+        let session = self.load_session(id)?;
         println!("{} ({:?})", session.id, session.state);
         for repo in &session.repos {
             self.status_repository_worktree(&session, repo, diff)?;
@@ -1281,8 +1280,8 @@ impl App {
 
     pub fn clean(&self, id: Option<&str>, force: bool) -> Result<()> {
         let targets = match id {
-            Some(id) => vec![self.state.load(id)?],
-            None => self.state.list()?,
+            Some(id) => vec![self.load_session(id)?],
+            None => self.list_sessions()?,
         };
         for mut session in targets {
             let changed = session.repos.iter().any(|r| {
@@ -1340,7 +1339,7 @@ impl App {
     }
 
     pub fn expire(&self) -> Result<()> {
-        for session in self.state.list()? {
+        for session in self.list_sessions()? {
             if session.state == SessionState::Running && session.expired() {
                 println!("TTL expired: {}", session.id);
                 self.stop(&session.id)?;
@@ -1369,6 +1368,47 @@ impl App {
     fn touch(&self, session: &mut Session) -> Result<()> {
         session.last_activity_at = Utc::now();
         self.state.save(session)
+    }
+
+    /// A container can exit outside jbox, for example after a Docker daemon
+    /// restart. Reconcile that stale persisted state before exposing a session
+    /// to a command so status is truthful and the retained worktree can be
+    /// resumed normally.
+    fn reconcile_runtime_state(&self, session: &mut Session) -> Result<()> {
+        if session.state != SessionState::Running
+            || self.engine.is_running(&session.container_name)?
+        {
+            return Ok(());
+        }
+        for repo in &session.repos {
+            self.git.restore_and_import_guest_metadata(repo)?;
+        }
+        self.paths.stop_session_ssh_agent(session.ssh_agent_pid);
+        self.paths.untrust_session_host(&session.known_hosts_tag)?;
+        session.state = SessionState::Stopped;
+        self.state.save(session)?;
+        println!(
+            "jbox session {} runtime was no longer running. Marked Stopped; worktrees were retained. Run `jbox resume {}` to restart it.",
+            session.id, session.id
+        );
+        Ok(())
+    }
+
+    fn load_session(&self, id: &str) -> Result<Session> {
+        let mut session = self.state.load(id)?;
+        self.reconcile_runtime_state(&mut session)?;
+        Ok(session)
+    }
+
+    fn list_sessions(&self) -> Result<Vec<Session>> {
+        self.state
+            .list()?
+            .into_iter()
+            .map(|mut session| {
+                self.reconcile_runtime_state(&mut session)?;
+                Ok(session)
+            })
+            .collect()
     }
 
     fn cleanup_worktrees(&self, repos: &[RepoState]) {
