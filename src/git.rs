@@ -420,20 +420,14 @@ impl Git {
     /// metadata mutation during the merge itself.
     pub fn preflight_accept_snapshot(&self, repo: &RepoState, target: &str) -> Result<()> {
         self.preflight_accept_target(repo, target)?;
-        if !Self::run(&repo.source, &["status", "--porcelain"])?.is_empty() {
+        if !self.host_is_clean(repo)? {
             bail!(
                 "cannot accept {}: host repository {} has uncommitted changes; use `jbox accept --stash-host` to preserve them around a fast-forward",
                 repo.name,
                 repo.source.display()
             );
         }
-        let ancestor = Command::new("git")
-            .arg("-C")
-            .arg(&repo.source)
-            .args(["merge-base", "--is-ancestor", target, &repo.branch])
-            .status()
-            .context("could not verify whether the guest snapshot can fast-forward the host")?;
-        if !ancestor.success() {
+        if !self.snapshot_can_fast_forward(repo, target)? {
             bail!(
                 "cannot accept {}: `{target}` has diverged from guest branch `{}`; use `jbox accept --merge` to create an explicit merge, or rebase the retained worktree",
                 repo.name,
@@ -441,6 +435,24 @@ impl Git {
             );
         }
         Ok(())
+    }
+
+    /// Test whether an imported guest branch can advance `target` without a
+    /// merge commit. The caller performs target and cleanliness checks suited
+    /// to its operation before acting on this relationship.
+    pub fn snapshot_can_fast_forward(&self, repo: &RepoState, target: &str) -> Result<bool> {
+        let target = Self::run(&repo.source, &["check-ref-format", "--branch", target])?;
+        Ok(Command::new("git")
+            .arg("-C")
+            .arg(&repo.source)
+            .args(["merge-base", "--is-ancestor", &target, &repo.branch])
+            .status()
+            .context("could not verify whether the guest snapshot can fast-forward the host")?
+            .success())
+    }
+
+    pub fn host_is_clean(&self, repo: &RepoState) -> Result<bool> {
+        Ok(Self::run(&repo.source, &["status", "--porcelain"])?.is_empty())
     }
 
     /// Host branch and cleanliness checks shared by fast-forward and explicit

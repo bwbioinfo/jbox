@@ -850,6 +850,10 @@ impl App {
         else {
             return Ok(());
         };
+        let Some(options) = self.prompt_merge_if_diverged(&session, &repo, &target, options)?
+        else {
+            return Ok(());
+        };
         let action = if options.merge {
             "Merge"
         } else {
@@ -872,6 +876,50 @@ impl App {
             &[target],
             options,
         )
+    }
+
+    /// Repository-scoped acceptance is interactive already. If its clean host
+    /// branch cannot fast-forward, offer the explicit merge right there rather
+    /// than making the user repeat the selection with `--merge`.
+    fn prompt_merge_if_diverged(
+        &self,
+        session: &Session,
+        repo: &RepoState,
+        target: &str,
+        mut options: AcceptOptions,
+    ) -> Result<Option<AcceptOptions>> {
+        if options.merge {
+            return Ok(Some(options));
+        }
+        // Import first so the ancestry question covers every guest commit
+        // created since the prior accept, while leaving the host branch alone.
+        self.git.import_guest_commits(repo)?;
+        self.git.preflight_accept_target(repo, target)?;
+        if (!options.stash_host && !self.git.host_is_clean(repo)?)
+            || self.git.snapshot_can_fast_forward(repo, target)?
+        {
+            return Ok(Some(options));
+        }
+        println!(
+            "Fast-forward cannot accept `{target}` because it has diverged from session branch `{}`.",
+            repo.branch
+        );
+        println!(
+            "A merge creates a host merge commit. If Git reports conflicts, the jbox session remains available and `jbox accept --continue` or `jbox accept --abort` completes recovery."
+        );
+        print!(
+            "Create a merge from {} for session {} now? [y/N]: ",
+            repo.branch, session.id
+        );
+        io::stdout().flush()?;
+        let mut confirmed = String::new();
+        io::stdin().read_line(&mut confirmed)?;
+        if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
+            println!("accept cancelled. No host branch was changed.");
+            return Ok(None);
+        }
+        options.merge = true;
+        Ok(Some(options))
     }
 
     /// Complete a host merge created by an earlier `jbox accept --merge`.

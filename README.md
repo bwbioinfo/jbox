@@ -192,6 +192,15 @@ session explicitly with
 `jbox accept <session> --into <branch>` to retain the existing all-repository
 acceptance workflow.
 
+When an interactive single-repository `jbox accept` finds that its host branch
+and guest branch diverged, it explains that a fast-forward is unavailable and
+offers to create a merge immediately. Confirm the merge offer and the normal
+final confirmation to proceed. If Git reports conflicts, the host merge is
+paused while the jbox session stays available: resolve and stage the files, run
+`jbox accept --continue`, or use `jbox accept --abort` to leave the session
+unchanged. `--merge` remains available when you want to request a merge up
+front, including direct session-ID and `--all` workflows.
+
 `jbox accept --all` adds that all-repository workflow to the repository-scoped
 selection UI. Select a session from any participating host repository, inspect
 the complete branch plan, and confirm once. By default each host repository is
