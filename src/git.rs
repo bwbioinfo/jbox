@@ -509,15 +509,31 @@ impl Git {
                 repo.name
             );
         }
-        Self::run(&repo.source, &["merge", "--no-edit", &repo.branch]).with_context(|| {
-            format!(
-                "merge acceptance for {} needs resolution in {}; resolve conflicts, commit the merge, then continue using the session branch {}",
-                repo.name,
-                repo.source.display(),
-                repo.branch
-            )
-        })?;
-        Ok(())
+        match Self::run(&repo.source, &["merge", "--no-edit", &repo.branch]) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let conflicts =
+                    Self::run(&repo.source, &["diff", "--name-only", "--diff-filter=U"])
+                        .unwrap_or_default();
+                if conflicts.is_empty() {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "merge acceptance for {} failed in {} while merging session branch {}",
+                            repo.name,
+                            repo.source.display(),
+                            repo.branch
+                        )
+                    });
+                }
+                bail!(
+                    "merge acceptance for {} has unresolved files in {}:\n{}\nResolve the files, run `git add <paths>` and `git commit` there, then continue using session branch {}. To abandon this host-side merge without changing the session, run `git merge --abort` there",
+                    repo.name,
+                    repo.source.display(),
+                    conflicts,
+                    repo.branch
+                );
+            }
+        }
     }
 
     pub fn accept_snapshot(&self, repo: &RepoState, target: &str) -> Result<()> {
@@ -1203,6 +1219,48 @@ mod tests {
             std::fs::read_to_string(host.path().join("untracked")).unwrap(),
             "preserve me\n"
         );
+        Git.remove_worktree(host.path(), &worktree, true).unwrap();
+    }
+
+    #[test]
+    fn merge_acceptance_reports_conflicted_host_files_and_recovery() {
+        let host = tempdir().unwrap();
+        git(host.path(), &["init"]);
+        git(host.path(), &["config", "user.email", "host@example.com"]);
+        git(host.path(), &["config", "user.name", "Host"]);
+        let target = Git::run(host.path(), &["branch", "--show-current"]).unwrap();
+        std::fs::write(host.path().join("conflicted"), "base\n").unwrap();
+        git(host.path(), &["add", "."]);
+        git(host.path(), &["commit", "-m", "base"]);
+
+        let session = tempdir().unwrap();
+        let worktree = session.path().join("worktree");
+        let made = Git
+            .add_worktree(host.path(), &worktree, "calm-fox-123", "repo")
+            .unwrap();
+        std::fs::write(worktree.join("conflicted"), "guest\n").unwrap();
+        git(&worktree, &["add", "conflicted"]);
+        git(&worktree, &["commit", "-m", "guest"]);
+        std::fs::write(host.path().join("conflicted"), "host\n").unwrap();
+        git(host.path(), &["add", "conflicted"]);
+        git(host.path(), &["commit", "-m", "host"]);
+
+        let repo = RepoState {
+            name: "repo".into(),
+            source: host.path().into(),
+            worktree: worktree.clone(),
+            mount: "/workspace/repo".into(),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile: session.path().join("host-gitfile"),
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        };
+        let error = Git.merge_snapshot(&repo, &target).unwrap_err().to_string();
+        assert!(error.contains("has unresolved files"), "{error}");
+        assert!(error.contains("conflicted"), "{error}");
+        assert!(error.contains("git merge --abort"), "{error}");
+        git(host.path(), &["merge", "--abort"]);
         Git.remove_worktree(host.path(), &worktree, true).unwrap();
     }
 }
