@@ -55,10 +55,15 @@ enum Command {
     /// Fast-forward a host branch to a session's committed snapshot without stopping it.
     Accept {
         /// Session to accept. Omit it to select a session for the current repository.
+        #[arg(conflicts_with = "all")]
         session: Option<String>,
-        /// Existing local branch checked out in each host repository.
+        /// Existing local branch checked out in each host repository. With --all,
+        /// omit this to use each repository's currently checked-out branch.
         #[arg(long)]
         into: Option<String>,
+        /// Select a session and accept every repository worktree in that session.
+        #[arg(long)]
+        all: bool,
     },
     /// Stop a selected guest if needed and rebase its matching worktree onto a host branch.
     Rebase {
@@ -141,14 +146,20 @@ fn main() -> Result<()> {
             Some(session) => app.stop(&session)?,
             None => app.stop_from_repository(&std::env::current_dir()?)?,
         },
-        Command::Accept { session, into } => match session {
-            Some(session) => app.accept(
+        Command::Accept { session, into, all } => match (session, all) {
+            (Some(session), false) => app.accept(
                 &session,
                 into.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("`jbox accept <session>` requires --into <branch>")
                 })?,
             )?,
-            None => app.accept_from_repository(&std::env::current_dir()?, into.as_deref())?,
+            (None, true) => {
+                app.accept_all_from_repository(&std::env::current_dir()?, into.as_deref())?
+            }
+            (None, false) => {
+                app.accept_from_repository(&std::env::current_dir()?, into.as_deref())?
+            }
+            (Some(_), true) => unreachable!("Clap rejects --all with an explicit session"),
         },
         Command::Rebase { onto } => {
             app.rebase_from_repository(&std::env::current_dir()?, onto.as_deref())?

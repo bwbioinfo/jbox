@@ -740,24 +740,58 @@ impl App {
     /// running guest and its isolated Git metadata intact for further work.
     pub fn accept(&self, id: &str, target: &str) -> Result<()> {
         let mut session = self.state.load(id)?;
-        for repo in &session.repos {
-            self.git.import_guest_commits(repo)?;
+        let targets = vec![target.to_owned(); session.repos.len()];
+        self.accept_all_snapshots(&mut session, &targets)
+    }
+
+    /// Interactively select a session from the current repository, then
+    /// accept every repository in that development machine. With no explicit
+    /// branch each host repository uses its own checked-out branch, which
+    /// supports sessions spanning repositories with different default names.
+    pub fn accept_all_from_repository(&self, input: &Path, target: Option<&str>) -> Result<()> {
+        let Some((mut session, _)) =
+            self.select_repository_worktree(input, "accept all worktrees from", None)?
+        else {
+            return Ok(());
+        };
+        let targets = session
+            .repos
+            .iter()
+            .map(|repo| match target {
+                Some(target) => Ok(target.to_owned()),
+                None => {
+                    let branch = self.git.current_branch(&repo.source)?;
+                    if branch.is_empty() {
+                        bail!(
+                            "cannot accept all: host repository {} is detached; check out a branch or pass --into <branch>",
+                            repo.source.display()
+                        );
+                    }
+                    Ok(branch)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        println!(
+            "Accept every repository from session {} into these host branches:",
+            session.id
+        );
+        for (repo, target) in session.repos.iter().zip(&targets) {
+            println!("  {}: {} -> {target}", repo.name, repo.branch);
         }
-        for repo in &session.repos {
-            self.git.preflight_accept_snapshot(repo, target)?;
+        print!(
+            "Fast-forward all {} worktrees from session {}? [y/N]: ",
+            session.repos.len(),
+            session.id
+        );
+        io::stdout().flush()?;
+        let mut confirmed = String::new();
+        io::stdin().read_line(&mut confirmed)?;
+        if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
+            println!("accept all cancelled.");
+            return Ok(());
         }
-        for repo in &session.repos {
-            self.git.fast_forward_snapshot(repo, target)?;
-            println!(
-                "accepted {} snapshot from {} into {}",
-                repo.name, repo.branch, target
-            );
-        }
-        self.touch(&mut session)?;
-        if session.state == SessionState::Running {
-            println!("jbox session {id} remains running for further work.");
-        }
-        Ok(())
+        self.accept_all_snapshots(&mut session, &targets)
     }
 
     /// Interactively accept exactly the repository selected by the current
@@ -837,6 +871,36 @@ impl App {
         );
         let mut session = session.clone();
         self.touch(&mut session)?;
+        Ok(())
+    }
+
+    fn accept_all_snapshots(&self, session: &mut Session, targets: &[String]) -> Result<()> {
+        if session.repos.len() != targets.len() {
+            bail!("internal error: every session repository needs an acceptance target");
+        }
+        // Import every guest branch, and preflight every host checkout, before
+        // moving any host ref. A divergent sibling therefore leaves every host
+        // repository untouched.
+        for repo in &session.repos {
+            self.git.import_guest_commits(repo)?;
+        }
+        for (repo, target) in session.repos.iter().zip(targets) {
+            self.git.preflight_accept_snapshot(repo, target)?;
+        }
+        for (repo, target) in session.repos.iter().zip(targets) {
+            self.git.fast_forward_snapshot(repo, target)?;
+            println!(
+                "accepted {} snapshot from {} into {}",
+                repo.name, repo.branch, target
+            );
+        }
+        self.touch(session)?;
+        if session.state == SessionState::Running {
+            println!(
+                "jbox session {} remains running for further work.",
+                session.id
+            );
+        }
         Ok(())
     }
 

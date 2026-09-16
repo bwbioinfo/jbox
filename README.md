@@ -159,6 +159,8 @@ jbox resume
 jbox status bright-otter-a1b2c3
 jbox diff bright-otter-a1b2c3
 jbox accept bright-otter-a1b2c3 --into main
+# Select a session and accept every repository it contains.
+jbox accept --all
 jbox stop bright-otter-a1b2c3
 jbox clean bright-otter-a1b2c3
 ```
@@ -177,6 +179,15 @@ repository from a multi-repository session, avoiding a failed or accidental
 merge of sibling repositories. Pass a session explicitly with
 `jbox accept <session> --into <branch>` to retain the existing all-repository
 acceptance workflow.
+
+`jbox accept --all` adds that all-repository workflow to the repository-scoped
+selection UI. Select a session from any participating host repository, inspect
+the complete branch plan, and confirm once. By default each host repository is
+accepted into its own currently checked-out branch, so a session may span
+repositories using different branch names. Pass `--into <branch>` to require
+the same target in every repository. Jbox imports and preflights every snapshot
+before fast-forwarding any host branch, and a running guest remains available
+for further commits and later accepts.
 
 Similarly, `jbox rebase` from a repository selects one of its worktrees and
 rebases it onto the checked-out branch, or a branch given by `--onto`. It asks
