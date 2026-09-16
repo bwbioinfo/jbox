@@ -224,11 +224,6 @@ before creating a new session.
 
 `jbox accept <session> --into <branch>` accepts the latest **committed** snapshot
 from every session repository into the named local host branch without stopping
-the guest. The target branch must already be checked out and clean in every
-host repository, and the acceptance is fast-forward only. Uncommitted guest
-changes remain in the running session and later commits can be accepted again.
-If the target has diverged, jbox refuses without changing it. `jbox stop` is
-still the finalization action that restores normal linked-worktree metadata.
 
 An internal detached watcher checks TTL every minute. TTL uses the most recent create, attach, shell, or accept timestamp. Expiry stops the guest and retains its worktrees. `jbox clean` refuses when a worktree has staged, unstaged, untracked, or post-base commits unless `--force` is explicit.
 

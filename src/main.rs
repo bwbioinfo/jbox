@@ -64,6 +64,15 @@ enum Command {
         /// Select a session and accept every repository worktree in that session.
         #[arg(long)]
         all: bool,
+        /// Commit visible changes in jbox-generated worktrees before accepting them.
+        #[arg(long)]
+        checkpoint: bool,
+        /// Preserve dirty host files in a temporary stash and reapply them afterward.
+        #[arg(long)]
+        stash_host: bool,
+        /// Explicitly create a Git merge when the guest and host branches diverge.
+        #[arg(long)]
+        merge: bool,
     },
     /// Stop a selected guest if needed and rebase its matching worktree onto a host branch.
     Rebase {
@@ -146,21 +155,38 @@ fn main() -> Result<()> {
             Some(session) => app.stop(&session)?,
             None => app.stop_from_repository(&std::env::current_dir()?)?,
         },
-        Command::Accept { session, into, all } => match (session, all) {
-            (Some(session), false) => app.accept(
-                &session,
-                into.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("`jbox accept <session>` requires --into <branch>")
-                })?,
-            )?,
-            (None, true) => {
-                app.accept_all_from_repository(&std::env::current_dir()?, into.as_deref())?
+        Command::Accept {
+            session,
+            into,
+            all,
+            checkpoint,
+            stash_host,
+            merge,
+        } => {
+            let options = jbox::AcceptOptions {
+                checkpoint,
+                stash_host,
+                merge,
+            };
+            match (session, all) {
+                (Some(session), false) => app.accept(
+                    &session,
+                    into.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("`jbox accept <session>` requires --into <branch>")
+                    })?,
+                    options,
+                )?,
+                (None, true) => app.accept_all_from_repository(
+                    &std::env::current_dir()?,
+                    into.as_deref(),
+                    options,
+                )?,
+                (None, false) => {
+                    app.accept_from_repository(&std::env::current_dir()?, into.as_deref(), options)?
+                }
+                (Some(_), true) => unreachable!("Clap rejects --all with an explicit session"),
             }
-            (None, false) => {
-                app.accept_from_repository(&std::env::current_dir()?, into.as_deref())?
-            }
-            (Some(_), true) => unreachable!("Clap rejects --all with an explicit session"),
-        },
+        }
         Command::Rebase { onto } => {
             app.rebase_from_repository(&std::env::current_dir()?, onto.as_deref())?
         }

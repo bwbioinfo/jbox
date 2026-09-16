@@ -272,6 +272,115 @@ impl Git {
         Ok(())
     }
 
+    /// Explicitly checkpoint agent work in a generated worktree before it is
+    /// accepted. This never touches the original host checkout. An unresolved
+    /// merge/rebase cannot be safely committed and receives actionable output
+    /// instead of a lossy force operation.
+    /// Return whether a generated worktree has checkpointable agent changes.
+    /// This is deliberately separate from `checkpoint_session_changes` so a
+    /// multi-repository accept can validate every worktree before committing
+    /// any one of them.
+    pub fn validate_session_checkpoint(&self, repo: &RepoState) -> Result<bool> {
+        let conflicts = Self::run(&repo.worktree, &["diff", "--name-only", "--diff-filter=U"])?;
+        if !conflicts.is_empty() {
+            bail!(
+                "cannot checkpoint {}: generated worktree {} has unresolved conflicts:\n{}\nResolve them there, then run `git add <paths>` and complete or abort the Git operation before accepting",
+                repo.name,
+                repo.worktree.display(),
+                conflicts
+            );
+        }
+        let status = self.status(repo)?;
+        if status.lines().all(|line| line.starts_with("##")) {
+            return Ok(false);
+        }
+        let branch = Self::run(&repo.worktree, &["branch", "--show-current"])?;
+        if branch.is_empty() {
+            bail!(
+                "cannot checkpoint {}: generated worktree {} is detached, usually because a rebase or merge is in progress; resolve it and run `git rebase --continue` or `git merge --continue`",
+                repo.name,
+                repo.worktree.display()
+            );
+        }
+        if branch != repo.branch {
+            bail!(
+                "cannot checkpoint {}: generated worktree is on `{branch}`, expected session branch `{}`",
+                repo.name,
+                repo.branch
+            );
+        }
+        Ok(true)
+    }
+
+    pub fn checkpoint_session_changes(&self, repo: &RepoState, session_id: &str) -> Result<bool> {
+        if !self.validate_session_checkpoint(repo)? {
+            return Ok(false);
+        }
+        Self::run(&repo.worktree, &["add", "--all"])?;
+        // Keep jbox-created Beads bootstrap files out of an agent checkpoint.
+        for path in self.ignored_jbox_beads_paths(repo) {
+            let _ = Self::run(&repo.worktree, &["reset", "--", &path]);
+        }
+        Self::run(
+            &repo.worktree,
+            &[
+                "commit",
+                "-m",
+                &format!("jbox: checkpoint {session_id} before accept"),
+            ],
+        )?;
+        Ok(true)
+    }
+
+    /// Move uncommitted host files out of the way for a fast-forward accept.
+    /// The returned stash object ID remains recoverable if restoration later
+    /// conflicts, rather than silently discarding host work.
+    pub fn stash_host_changes(&self, repo: &RepoState, session_id: &str) -> Result<Option<String>> {
+        if Self::run(&repo.source, &["status", "--porcelain"])?.is_empty() {
+            return Ok(None);
+        }
+        Self::run(
+            &repo.source,
+            &[
+                "stash",
+                "push",
+                "--include-untracked",
+                "-m",
+                &format!("jbox {session_id} before accept"),
+            ],
+        )?;
+        Ok(Some(Self::run(
+            &repo.source,
+            &["rev-parse", "--verify", "refs/stash"],
+        )?))
+    }
+
+    pub fn restore_host_stash(&self, repo: &RepoState, stash: &str) -> Result<()> {
+        Self::run(&repo.source, &["stash", "apply", "--index", stash]).with_context(|| {
+            format!(
+                "accepted {} but could not reapply preserved host work; stash {stash} remains available in {}",
+                repo.name,
+                repo.source.display()
+            )
+        })?;
+        // `git stash drop` accepts a reflog name, not a raw object ID. Find
+        // the still-present entry by the object ID captured before acceptance,
+        // so several repositories may safely hold their own temporary stash.
+        let position = Self::run(&repo.source, &["stash", "list", "--format=%H"])?
+            .lines()
+            .position(|candidate| candidate == stash)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "reapplied preserved host work for {} but could not find temporary stash {stash} to remove; inspect `git stash list` in {}",
+                    repo.name,
+                    repo.source.display()
+                )
+            })?;
+        let reference = format!("stash@{{{position}}}");
+        Self::run(&repo.source, &["stash", "drop", &reference])?;
+        Ok(())
+    }
+
     /// Import commits made using the guest metadata, then restore the normal
     /// linked-worktree git file so the branch remains a standard host branch.
     pub fn restore_and_import_guest_metadata(&self, repo: &RepoState) -> Result<()> {
@@ -310,6 +419,48 @@ impl Git {
     /// all session branches before calling this method, avoiding a live guest
     /// metadata mutation during the merge itself.
     pub fn preflight_accept_snapshot(&self, repo: &RepoState, target: &str) -> Result<()> {
+        self.preflight_accept_target(repo, target)?;
+        if !Self::run(&repo.source, &["status", "--porcelain"])?.is_empty() {
+            bail!(
+                "cannot accept {}: host repository {} has uncommitted changes; use `jbox accept --stash-host` to preserve them around a fast-forward",
+                repo.name,
+                repo.source.display()
+            );
+        }
+        let ancestor = Command::new("git")
+            .arg("-C")
+            .arg(&repo.source)
+            .args(["merge-base", "--is-ancestor", target, &repo.branch])
+            .status()
+            .context("could not verify whether the guest snapshot can fast-forward the host")?;
+        if !ancestor.success() {
+            bail!(
+                "cannot accept {}: `{target}` has diverged from guest branch `{}`; use `jbox accept --merge` to create an explicit merge, or rebase the retained worktree",
+                repo.name,
+                repo.branch
+            );
+        }
+        Ok(())
+    }
+
+    /// Host branch and cleanliness checks shared by fast-forward and explicit
+    /// merge acceptance. This intentionally does not require an ancestry
+    /// relationship, because `--merge` is the explicit opt-in for divergence.
+    pub fn preflight_merge_snapshot(&self, repo: &RepoState, target: &str) -> Result<()> {
+        self.preflight_accept_target(repo, target)?;
+        if !Self::run(&repo.source, &["status", "--porcelain"])?.is_empty() {
+            bail!(
+                "cannot merge accept {}: host repository {} has uncommitted changes; use `jbox accept --stash-host --merge` to preserve them around the merge",
+                repo.name,
+                repo.source.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// Validate the selected host branch without requiring a clean checkout.
+    /// `accept --stash-host` uses this before creating a temporary stash.
+    pub fn preflight_accept_target(&self, repo: &RepoState, target: &str) -> Result<()> {
         let target = Self::run(&repo.source, &["check-ref-format", "--branch", target])?;
         let current = Self::run(&repo.source, &["branch", "--show-current"])?;
         if current.is_empty() {
@@ -326,28 +477,8 @@ impl Git {
                 repo.source.display()
             );
         }
-        if !Self::run(&repo.source, &["status", "--porcelain"])?.is_empty() {
-            bail!(
-                "cannot accept {}: host repository {} has uncommitted changes",
-                repo.name,
-                repo.source.display()
-            );
-        }
         let target_ref = format!("refs/heads/{target}");
         Self::run(&repo.source, &["rev-parse", "--verify", &target_ref])?;
-        let ancestor = Command::new("git")
-            .arg("-C")
-            .arg(&repo.source)
-            .args(["merge-base", "--is-ancestor", &target, &repo.branch])
-            .status()
-            .context("could not verify whether the guest snapshot can fast-forward the host")?;
-        if !ancestor.success() {
-            bail!(
-                "cannot accept {}: `{target}` has diverged from guest branch `{}`; merge or rebase it manually",
-                repo.name,
-                repo.branch
-            );
-        }
         Ok(())
     }
 
@@ -364,6 +495,28 @@ impl Git {
             );
         }
         Self::run(&repo.source, &["merge", "--ff-only", &repo.branch])?;
+        Ok(())
+    }
+
+    /// Merge a guest session branch into the host target only when the caller
+    /// explicitly opted in to non-fast-forward acceptance.
+    pub fn merge_snapshot(&self, repo: &RepoState, target: &str) -> Result<()> {
+        let target = Self::run(&repo.source, &["check-ref-format", "--branch", target])?;
+        let current = Self::run(&repo.source, &["branch", "--show-current"])?;
+        if current != target {
+            bail!(
+                "cannot merge accept {}: host branch changed from `{target}` before it could be merged",
+                repo.name
+            );
+        }
+        Self::run(&repo.source, &["merge", "--no-edit", &repo.branch]).with_context(|| {
+            format!(
+                "merge acceptance for {} needs resolution in {}; resolve conflicts, commit the merge, then continue using the session branch {}",
+                repo.name,
+                repo.source.display(),
+                repo.branch
+            )
+        })?;
         Ok(())
     }
 
@@ -989,5 +1142,67 @@ mod tests {
 
         Git.restore_and_import_guest_metadata(&repo).unwrap();
         assert!(Git.remove_worktree(tmp.path(), &wt, false).is_ok());
+    }
+
+    #[test]
+    fn checkpoints_generated_changes_and_restores_a_host_stash() {
+        let host = tempdir().unwrap();
+        git(host.path(), &["init"]);
+        git(host.path(), &["config", "user.email", "host@example.com"]);
+        git(host.path(), &["config", "user.name", "Host"]);
+        std::fs::write(host.path().join("tracked"), "base\n").unwrap();
+        git(host.path(), &["add", "."]);
+        git(host.path(), &["commit", "-m", "base"]);
+
+        let session = tempdir().unwrap();
+        let worktree = session.path().join("worktree");
+        let made = Git
+            .add_worktree(host.path(), &worktree, "calm-fox-123", "repo")
+            .unwrap();
+        let repo = RepoState {
+            name: "repo".into(),
+            source: host.path().into(),
+            worktree: worktree.clone(),
+            mount: "/workspace/repo".into(),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile: session.path().join("host-gitfile"),
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        };
+
+        std::fs::write(worktree.join("agent-file"), "agent work\n").unwrap();
+        assert!(Git.validate_session_checkpoint(&repo).unwrap());
+        assert!(
+            Git.checkpoint_session_changes(&repo, "calm-fox-123")
+                .unwrap()
+        );
+        assert!(
+            Git::run(&worktree, &["log", "-1", "--format=%s"])
+                .unwrap()
+                .contains("checkpoint calm-fox-123")
+        );
+
+        std::fs::write(host.path().join("tracked"), "host edit\n").unwrap();
+        std::fs::write(host.path().join("untracked"), "preserve me\n").unwrap();
+        let stash = Git
+            .stash_host_changes(&repo, "calm-fox-123")
+            .unwrap()
+            .expect("host work should be stashed");
+        assert!(
+            Git::run(host.path(), &["status", "--porcelain"])
+                .unwrap()
+                .is_empty()
+        );
+        Git.restore_host_stash(&repo, &stash).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(host.path().join("tracked")).unwrap(),
+            "host edit\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(host.path().join("untracked")).unwrap(),
+            "preserve me\n"
+        );
+        Git.remove_worktree(host.path(), &worktree, true).unwrap();
     }
 }

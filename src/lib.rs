@@ -89,6 +89,19 @@ pub struct App {
     engine: DockerEngine,
 }
 
+/// Explicit opt-ins for accepting work that is not a simple clean,
+/// fast-forward snapshot. Every mode is off by default so normal acceptance
+/// remains non-destructive.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AcceptOptions {
+    /// Commit visible generated-worktree changes before accepting them.
+    pub checkpoint: bool,
+    /// Temporarily stash dirty host files and reapply them after acceptance.
+    pub stash_host: bool,
+    /// Merge, rather than fast-forward, a guest snapshot into a diverged host branch.
+    pub merge: bool,
+}
+
 /// Values that differ between a new guest and restarting a retained session.
 /// Grouping them prevents the container construction interface from growing
 /// as restart-specific behavior is added.
@@ -738,17 +751,23 @@ impl App {
     /// Accept the latest committed snapshot from every repository in a session
     /// into the explicitly selected host branch. Unlike `stop`, this keeps a
     /// running guest and its isolated Git metadata intact for further work.
-    pub fn accept(&self, id: &str, target: &str) -> Result<()> {
+    pub fn accept(&self, id: &str, target: &str, options: AcceptOptions) -> Result<()> {
         let mut session = self.state.load(id)?;
         let targets = vec![target.to_owned(); session.repos.len()];
-        self.accept_all_snapshots(&mut session, &targets)
+        let repos = session.repos.clone();
+        self.accept_snapshots(&mut session, &repos, &targets, options)
     }
 
     /// Interactively select a session from the current repository, then
     /// accept every repository in that development machine. With no explicit
     /// branch each host repository uses its own checked-out branch, which
     /// supports sessions spanning repositories with different default names.
-    pub fn accept_all_from_repository(&self, input: &Path, target: Option<&str>) -> Result<()> {
+    pub fn accept_all_from_repository(
+        &self,
+        input: &Path,
+        target: Option<&str>,
+        options: AcceptOptions,
+    ) -> Result<()> {
         let Some((mut session, _)) =
             self.select_repository_worktree(input, "accept all worktrees from", None)?
         else {
@@ -779,8 +798,13 @@ impl App {
         for (repo, target) in session.repos.iter().zip(&targets) {
             println!("  {}: {} -> {target}", repo.name, repo.branch);
         }
+        let action = if options.merge {
+            "Merge"
+        } else {
+            "Fast-forward"
+        };
         print!(
-            "Fast-forward all {} worktrees from session {}? [y/N]: ",
+            "{action} all {} worktrees from session {}? [y/N]: ",
             session.repos.len(),
             session.id
         );
@@ -791,13 +815,19 @@ impl App {
             println!("accept all cancelled.");
             return Ok(());
         }
-        self.accept_all_snapshots(&mut session, &targets)
+        let repos = session.repos.clone();
+        self.accept_snapshots(&mut session, &repos, &targets, options)
     }
 
     /// Interactively accept exactly the repository selected by the current
     /// directory. This avoids surprising cross-repository acceptance when a
     /// multi-repository session is selected from one checkout.
-    pub fn accept_from_repository(&self, input: &Path, target: Option<&str>) -> Result<()> {
+    pub fn accept_from_repository(
+        &self,
+        input: &Path,
+        target: Option<&str>,
+        options: AcceptOptions,
+    ) -> Result<()> {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             bail!(
                 "`jbox accept` without a session needs an interactive terminal; use `jbox accept <session> --into <branch>` instead"
@@ -834,7 +864,12 @@ impl App {
                 change
             );
         }
-        print!("Select a session to fast-forward `{target}` (blank cancels): ");
+        let action = if options.merge {
+            "merge"
+        } else {
+            "fast-forward"
+        };
+        print!("Select a session to {action} `{target}` (blank cancels): ");
         io::stdout().flush()?;
         let mut selected = String::new();
         io::stdin().read_line(&mut selected)?;
@@ -850,8 +885,13 @@ impl App {
             bail!("selection must be between 1 and {}", candidates.len());
         }
         let (session, repo) = &candidates[index - 1];
+        let action = if options.merge {
+            "Merge"
+        } else {
+            "Fast-forward"
+        };
         print!(
-            "Fast-forward `{target}` to {} from session {}? [y/N]: ",
+            "{action} `{target}` to {} from session {}? [y/N]: ",
             repo.branch, session.id
         );
         io::stdout().flush()?;
@@ -862,38 +902,99 @@ impl App {
             return Ok(());
         }
 
-        self.git.import_guest_commits(repo)?;
-        self.git.preflight_accept_snapshot(repo, &target)?;
-        self.git.fast_forward_snapshot(repo, &target)?;
-        println!(
-            "accepted {} snapshot from {} into {}",
-            repo.name, repo.branch, target
-        );
         let mut session = session.clone();
-        self.touch(&mut session)?;
-        Ok(())
+        self.accept_snapshots(&mut session, std::slice::from_ref(repo), &[target], options)
     }
 
-    fn accept_all_snapshots(&self, session: &mut Session, targets: &[String]) -> Result<()> {
-        if session.repos.len() != targets.len() {
-            bail!("internal error: every session repository needs an acceptance target");
+    fn accept_snapshots(
+        &self,
+        session: &mut Session,
+        repos: &[RepoState],
+        targets: &[String],
+        options: AcceptOptions,
+    ) -> Result<()> {
+        if repos.len() != targets.len() {
+            bail!("internal error: every accepted repository needs an acceptance target");
+        }
+
+        // Detect every unresolved conflict before making a checkpoint commit in
+        // any sibling worktree. This prevents a multi-repository command from
+        // producing a partial set of surprise commits.
+        if options.checkpoint {
+            for repo in repos {
+                self.git.validate_session_checkpoint(repo)?;
+            }
+            for repo in repos {
+                if self.git.checkpoint_session_changes(repo, &session.id)? {
+                    println!("checkpointed generated worktree changes for {}", repo.name);
+                }
+            }
         }
         // Import every guest branch, and preflight every host checkout, before
         // moving any host ref. A divergent sibling therefore leaves every host
         // repository untouched.
-        for repo in &session.repos {
+        for repo in repos {
             self.git.import_guest_commits(repo)?;
         }
-        for (repo, target) in session.repos.iter().zip(targets) {
-            self.git.preflight_accept_snapshot(repo, target)?;
+
+        // Validate checked-out target branches before temporarily moving host
+        // files into a stash. The actual clean-check runs after the stash.
+        if options.stash_host {
+            for (repo, target) in repos.iter().zip(targets) {
+                self.git.preflight_accept_target(repo, target)?;
+            }
         }
-        for (repo, target) in session.repos.iter().zip(targets) {
-            self.git.fast_forward_snapshot(repo, target)?;
-            println!(
-                "accepted {} snapshot from {} into {}",
-                repo.name, repo.branch, target
-            );
+
+        let mut stashes = Vec::new();
+        if options.stash_host {
+            for repo in repos {
+                if let Some(stash) = self.git.stash_host_changes(repo, &session.id)? {
+                    println!(
+                        "preserved uncommitted host changes for {} in a temporary stash",
+                        repo.name
+                    );
+                    stashes.push((repo, stash));
+                }
+            }
         }
+
+        let accept_result = (|| -> Result<()> {
+            for (repo, target) in repos.iter().zip(targets) {
+                if options.merge {
+                    self.git.preflight_merge_snapshot(repo, target)?;
+                } else {
+                    self.git.preflight_accept_snapshot(repo, target)?;
+                }
+            }
+            for (repo, target) in repos.iter().zip(targets) {
+                if options.merge {
+                    self.git.merge_snapshot(repo, target)?;
+                } else {
+                    self.git.fast_forward_snapshot(repo, target)?;
+                }
+                let verb = if options.merge { "merged" } else { "accepted" };
+                println!(
+                    "{verb} {} snapshot from {} into {}",
+                    repo.name, repo.branch, target
+                );
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = accept_result {
+            if !stashes.is_empty() {
+                eprintln!(
+                    "host changes remain safely stashed because acceptance did not finish; inspect `git stash list` in each affected host repository before retrying"
+                );
+            }
+            return Err(error);
+        }
+
+        for (repo, stash) in stashes {
+            self.git.restore_host_stash(repo, &stash)?;
+            println!("restored preserved host changes for {}", repo.name);
+        }
+
         self.touch(session)?;
         if session.state == SessionState::Running {
             println!(
