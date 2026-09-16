@@ -828,19 +828,7 @@ impl App {
         target: Option<&str>,
         options: AcceptOptions,
     ) -> Result<()> {
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            bail!(
-                "`jbox accept` without a session needs an interactive terminal; use `jbox accept <session> --into <branch>` instead"
-            );
-        }
         let repository = Config::repository_root(input)?;
-        let candidates = self.sessions_for_repository(&repository)?;
-        if candidates.is_empty() {
-            bail!(
-                "no retained jbox worktrees belong to {}",
-                repository.display()
-            );
-        }
         let target = match target {
             Some(target) => target.to_owned(),
             None => self.git.current_branch(&repository)?,
@@ -851,40 +839,17 @@ impl App {
                 repository.display()
             );
         }
-
-        println!("Jbox sessions for {}:", repository.display());
-        for (index, (session, repo)) in candidates.iter().enumerate() {
-            let change = self.change_label(repo);
-            println!(
-                "  {}) {}  {:?}  {}  [{}]",
-                index + 1,
-                session.id,
-                session.state,
-                repo.branch,
-                change
-            );
-        }
         let action = if options.merge {
             "merge"
         } else {
             "fast-forward"
         };
-        print!("Select a session to {action} `{target}` (blank cancels): ");
-        io::stdout().flush()?;
-        let mut selected = String::new();
-        io::stdin().read_line(&mut selected)?;
-        let selected = selected.trim();
-        if selected.is_empty() {
-            println!("accept cancelled.");
+        let selection_action = format!("{action} `{target}` from");
+        let Some((mut session, repo)) =
+            self.select_repository_worktree(input, &selection_action, None)?
+        else {
             return Ok(());
-        }
-        let index: usize = selected
-            .parse()
-            .context("select a session by its displayed number")?;
-        if index == 0 || index > candidates.len() {
-            bail!("selection must be between 1 and {}", candidates.len());
-        }
-        let (session, repo) = &candidates[index - 1];
+        };
         let action = if options.merge {
             "Merge"
         } else {
@@ -901,9 +866,12 @@ impl App {
             println!("accept cancelled.");
             return Ok(());
         }
-
-        let mut session = session.clone();
-        self.accept_snapshots(&mut session, std::slice::from_ref(repo), &[target], options)
+        self.accept_snapshots(
+            &mut session,
+            std::slice::from_ref(&repo),
+            &[target],
+            options,
+        )
     }
 
     /// Complete a host merge created by an earlier `jbox accept --merge`.
@@ -1095,17 +1063,7 @@ impl App {
     /// live guest is explicitly stopped first so its isolated Git metadata is
     /// imported and restored before the host-side rebase changes the branch.
     pub fn rebase_from_repository(&self, input: &Path, onto: Option<&str>) -> Result<()> {
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            bail!("`jbox rebase` needs an interactive terminal");
-        }
         let repository = Config::repository_root(input)?;
-        let candidates = self.sessions_for_repository(&repository)?;
-        if candidates.is_empty() {
-            bail!(
-                "no retained jbox worktrees belong to {}",
-                repository.display()
-            );
-        }
         let onto = match onto {
             Some(branch) => branch.to_owned(),
             None => self.git.current_branch(&repository)?,
@@ -1113,32 +1071,12 @@ impl App {
         if onto.is_empty() {
             bail!("{} is detached; pass --onto <branch>", repository.display());
         }
-        println!("Jbox worktrees for {}:", repository.display());
-        for (index, (session, repo)) in candidates.iter().enumerate() {
-            println!(
-                "  {}) {}  {:?}  {}",
-                index + 1,
-                session.id,
-                session.state,
-                repo.branch
-            );
-        }
-        print!("Select a worktree to rebase onto `{onto}` (blank cancels): ");
-        io::stdout().flush()?;
-        let mut selected = String::new();
-        io::stdin().read_line(&mut selected)?;
-        let selected = selected.trim();
-        if selected.is_empty() {
-            println!("rebase cancelled.");
+        let selection_action = format!("rebase onto `{onto}`");
+        let Some((session, repo)) =
+            self.select_repository_worktree(input, &selection_action, None)?
+        else {
             return Ok(());
-        }
-        let index: usize = selected
-            .parse()
-            .context("select a worktree by its displayed number")?;
-        if index == 0 || index > candidates.len() {
-            bail!("selection must be between 1 and {}", candidates.len());
-        }
-        let (session, repo) = &candidates[index - 1];
+        };
         print!(
             "Rebase {} from session {} onto `{onto}`? [y/N]: ",
             repo.branch, session.id
@@ -1157,7 +1095,7 @@ impl App {
             );
             self.stop(&session.id)?;
         }
-        self.git.rebase_worktree(repo, &onto)?;
+        self.git.rebase_worktree(&repo, &onto)?;
         println!(
             "rebased {} onto `{onto}`. Run `jbox accept` to fast-forward it.",
             repo.branch
@@ -1169,53 +1107,11 @@ impl App {
     /// the current directory. This keeps multi-repository sessions focused on
     /// the repository the user is presently working in.
     pub fn status_from_repository(&self, input: &Path, diff: bool) -> Result<()> {
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            bail!(
-                "`jbox {}` without a session needs an interactive terminal; use `jbox {} <session>` instead",
-                if diff { "diff" } else { "status" },
-                if diff { "diff" } else { "status" }
-            );
-        }
-        let repository = Config::repository_root(input)?;
-        let candidates = self.sessions_for_repository(&repository)?;
-        if candidates.is_empty() {
-            bail!(
-                "no retained jbox worktrees belong to {}",
-                repository.display()
-            );
-        }
-        println!("Jbox worktrees for {}:", repository.display());
-        for (index, (session, repo)) in candidates.iter().enumerate() {
-            let change = self.change_label(repo);
-            println!(
-                "  {}) {}  {:?}  {}  [{}]",
-                index + 1,
-                session.id,
-                session.state,
-                repo.branch,
-                change
-            );
-        }
-        print!(
-            "Select a worktree to {} (blank cancels): ",
-            if diff { "diff" } else { "inspect" }
-        );
-        io::stdout().flush()?;
-        let mut selected = String::new();
-        io::stdin().read_line(&mut selected)?;
-        let selected = selected.trim();
-        if selected.is_empty() {
-            println!("{} cancelled.", if diff { "diff" } else { "status" });
+        let action = if diff { "diff" } else { "inspect" };
+        let Some((session, repo)) = self.select_repository_worktree(input, action, None)? else {
             return Ok(());
-        }
-        let index: usize = selected
-            .parse()
-            .context("select a worktree by its displayed number")?;
-        if index == 0 || index > candidates.len() {
-            bail!("selection must be between 1 and {}", candidates.len());
-        }
-        let (session, repo) = &candidates[index - 1];
-        self.status_repository_worktree(session, repo, diff)
+        };
+        self.status_repository_worktree(&session, &repo, diff)
     }
 
     /// Resume a stopped session from its retained worktrees. The worktree
@@ -1316,50 +1212,11 @@ impl App {
 
     /// Select a stopped retained session that contains the current repository.
     pub fn resume_from_repository(&self, input: &Path) -> Result<()> {
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            bail!(
-                "`jbox resume` without a session needs an interactive terminal; use `jbox resume <session>` instead"
-            );
-        }
-        let repository = Config::repository_root(input)?;
-        let candidates = self
-            .sessions_for_repository(&repository)?
-            .into_iter()
-            .filter(|(session, _)| session.state == SessionState::Stopped)
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            bail!(
-                "no stopped retained jbox worktrees belong to {}",
-                repository.display()
-            );
-        }
-        println!("Stopped jbox worktrees for {}:", repository.display());
-        for (index, (session, repo)) in candidates.iter().enumerate() {
-            let change = self.change_label(repo);
-            println!(
-                "  {}) {}  {}  [{}]",
-                index + 1,
-                session.id,
-                repo.branch,
-                change
-            );
-        }
-        print!("Select a session to resume (blank cancels): ");
-        io::stdout().flush()?;
-        let mut selected = String::new();
-        io::stdin().read_line(&mut selected)?;
-        let selected = selected.trim();
-        if selected.is_empty() {
-            println!("resume cancelled.");
+        let Some((session, _)) =
+            self.select_repository_worktree(input, "resume", Some(SessionState::Stopped))?
+        else {
             return Ok(());
-        }
-        let index: usize = selected
-            .parse()
-            .context("select a session by its displayed number")?;
-        if index == 0 || index > candidates.len() {
-            bail!("selection must be between 1 and {}", candidates.len());
-        }
-        let session = &candidates[index - 1].0;
+        };
         print!("Resume session {}? [y/N]: ", session.id);
         io::stdout().flush()?;
         let mut confirmed = String::new();
@@ -1529,20 +1386,17 @@ impl App {
         }
     }
 
-    /// Shared repository-scoped selector for lifecycle operations. It always
-    /// lists only worktrees originating from the caller's repository. Session
-    /// lifecycle operations remain session-wide and add their own confirmation.
+    /// Shared repository-scoped selector for lifecycle operations. A single
+    /// matching worktree is selected directly. Multiple matches retain the
+    /// selection UI, so an omitted session never chooses arbitrarily.
+    /// Session lifecycle operations remain session-wide and add their own
+    /// confirmation.
     fn select_repository_worktree(
         &self,
         input: &Path,
         action: &str,
         required_state: Option<SessionState>,
     ) -> Result<Option<(Session, RepoState)>> {
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            bail!(
-                "`jbox {action}` without a session needs an interactive terminal; pass an explicit session ID instead"
-            );
-        }
         let repository = Config::repository_root(input)?;
         let candidates = self
             .sessions_for_repository(&repository)?
@@ -1562,6 +1416,22 @@ impl App {
             bail!(
                 "no {qualifier}retained jbox worktrees belong to {}",
                 repository.display()
+            );
+        }
+        if let [candidate] = candidates.as_slice() {
+            let (session, repo) = candidate;
+            println!(
+                "Using the only matching jbox worktree for {}: {}  {:?}  {}",
+                repository.display(),
+                session.id,
+                session.state,
+                repo.branch
+            );
+            return Ok(Some(candidate.clone()));
+        }
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!(
+                "multiple matching jbox worktrees need an interactive terminal; pass an explicit session ID instead"
             );
         }
         println!("Jbox worktrees for {}:", repository.display());
@@ -1603,9 +1473,6 @@ impl App {
         input: &Path,
         action: &str,
     ) -> Result<Option<(Session, RepoState)>> {
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            bail!("`jbox accept --{action}` needs an interactive terminal");
-        }
         let repository = Config::repository_root(input)?;
         let Some(merge_head) = self.git.host_merge_head(&repository)? else {
             bail!(
@@ -1624,6 +1491,23 @@ impl App {
                 "host merge in {} is paused at {} but no retained jbox session branch contains that commit; use `git status` and `git merge --abort` or finish the host merge manually",
                 repository.display(),
                 merge_head
+            );
+        }
+        if let [candidate] = candidates.as_slice() {
+            let (session, repo) = candidate;
+            println!(
+                "Using the only session matching the paused acceptance in {}: {}  {:?}  {}",
+                repository.display(),
+                session.id,
+                session.state,
+                repo.branch
+            );
+            return Ok(Some(candidate.clone()));
+        }
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!(
+                "`jbox accept --{action}` found {} matching sessions and needs an interactive terminal",
+                candidates.len()
             );
         }
         println!(

@@ -159,7 +159,8 @@ credentials.
 jbox ls
 jbox attach bright-otter-a1b2c3
 jbox shell bright-otter-a1b2c3
-# Omit the session in a repository to choose one matching worktree.
+# Omit the session in a repository. Jbox uses the only matching worktree,
+# or presents a picker when multiple retained worktrees match.
 jbox status
 jbox diff
 jbox resume
@@ -178,12 +179,16 @@ renders a boxed **📦 JBOX GUEST** marker and sets the terminal title to
 session in terminal tabs and window lists. Jcode's native remote header still
 identifies the SSH host; jbox does not alter Jcode's own TUI theme.
 
-From inside a host repository, `jbox accept` presents only retained sessions
-whose worktree belongs to that repository. It defaults to the currently checked
-out branch, shows session state and whether each worktree has changes, then asks
-for a numbered selection and final confirmation. This accepts only that one
-repository from a multi-repository session, avoiding a failed or accidental
-merge of sibling repositories. Pass a session explicitly with
+From inside a host repository, every session-targeting command first finds only
+retained sessions whose worktree belongs to that repository. If exactly one
+matches, jbox states which worktree it selected and proceeds without a picker.
+If several match, it presents the numbered selection UI. This applies to
+`attach`, `shell`, `status`, `diff`, `stop`, `accept`, `accept --all`, `rebase`,
+`resume`, and `clean`. Operations that can change lifecycle or Git state still
+ask for their normal final confirmation. `jbox accept` defaults to the currently
+checked-out branch and accepts only that one repository from a multi-repository
+session, avoiding a failed or accidental merge of sibling repositories. Pass a
+session explicitly with
 `jbox accept <session> --into <branch>` to retain the existing all-repository
 acceptance workflow.
 
@@ -202,16 +207,14 @@ for confirmation and stops a running guest before rebasing so its Git metadata
 is synchronized. Commit or stash guest changes first. Resolve a conflict in the
 reported retained worktree, then run `git rebase --continue` and `jbox accept`.
 
-`jbox attach`, `jbox shell`, `jbox status`, `jbox diff`, `jbox stop`, and
-`jbox clean` without a session ID use a repository-scoped selection UI. Attach
-and shell list running worktrees and begin in the selected guest mount. Status
-and diff inspect only that worktree. Stop and clean remain operations on the
-whole development machine, so their confirmations state how many sibling
-repository worktrees they affect. `jbox clean --all` retains the previous
-all-session maintenance workflow.
+Attach and shell consider running worktrees and begin in the selected guest
+mount. Status and diff inspect only that worktree. Stop and clean remain
+operations on the whole development machine, so their confirmations state how
+many sibling repository worktrees they affect. `jbox clean --all` retains the
+previous all-session maintenance workflow.
 
-`jbox resume` lists stopped retained sessions containing the current repository,
-then starts the selected session with its existing worktrees and image. It
+`jbox resume` considers stopped retained sessions containing the current
+repository, then starts the selected session with its existing worktrees and image. It
 creates fresh per-session SSH credentials, reuses completed session-local
 skills, and never rebuilds the image. To preserve data, resume refuses a
 retained worktree with uncommitted changes because recreating guest-only Git
