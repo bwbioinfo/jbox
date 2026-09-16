@@ -73,6 +73,18 @@ enum Command {
         /// Explicitly create a Git merge when the guest and host branches diverge.
         #[arg(long)]
         merge: bool,
+        /// Commit a reviewed, staged host merge that was paused by `accept --merge`.
+        #[arg(
+            long = "continue",
+            conflicts_with_all = ["session", "into", "all", "checkpoint", "stash_host", "merge", "abort"]
+        )]
+        continue_accept: bool,
+        /// Abort a host merge paused by `accept --merge`, retaining its jbox session.
+        #[arg(
+            long,
+            conflicts_with_all = ["session", "into", "all", "checkpoint", "stash_host", "merge", "continue_accept"]
+        )]
+        abort: bool,
     },
     /// Stop a selected guest if needed and rebase its matching worktree onto a host branch.
     Rebase {
@@ -162,7 +174,17 @@ fn main() -> Result<()> {
             checkpoint,
             stash_host,
             merge,
+            continue_accept,
+            abort,
         } => {
+            if continue_accept {
+                app.continue_accept_from_repository(&std::env::current_dir()?)?;
+                return Ok(());
+            }
+            if abort {
+                app.abort_accept_from_repository(&std::env::current_dir()?)?;
+                return Ok(());
+            }
             let options = jbox::AcceptOptions {
                 checkpoint,
                 stash_host,

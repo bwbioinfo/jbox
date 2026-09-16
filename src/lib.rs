@@ -906,6 +906,92 @@ impl App {
         self.accept_snapshots(&mut session, std::slice::from_ref(repo), &[target], options)
     }
 
+    /// Complete a host merge created by an earlier `jbox accept --merge`.
+    /// The selected jbox session is retained throughout. Git itself remains
+    /// responsible for the user's conflict resolution content.
+    pub fn continue_accept_from_repository(&self, input: &Path) -> Result<()> {
+        let Some((mut session, repo)) =
+            self.select_paused_acceptance_worktree(input, "continue")?
+        else {
+            return Ok(());
+        };
+        let Some(conflicts) = self.git.host_merge_conflicts(&repo)? else {
+            bail!(
+                "no acceptance merge is paused in {}; choose the worktree whose host checkout is merging",
+                repo.source.display()
+            );
+        };
+        if !conflicts.is_empty() {
+            println!(
+                "Acceptance is paused for session {}. Host merge conflicts in {}:\n{}",
+                session.id,
+                repo.source.display(),
+                conflicts
+            );
+            bail!(
+                "resolve and stage those files, then rerun `jbox accept --continue`; use `jbox accept --abort` to abandon the host merge"
+            );
+        }
+        print!(
+            "Commit the staged host merge for session {} and keep its jbox worktree? [y/N]: ",
+            session.id
+        );
+        io::stdout().flush()?;
+        let mut confirmed = String::new();
+        io::stdin().read_line(&mut confirmed)?;
+        if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
+            println!("continue acceptance cancelled. The host merge remains paused.");
+            return Ok(());
+        }
+        self.git.continue_host_merge(&repo)?;
+        println!(
+            "completed acceptance merge for {}. Jbox session {} remains retained.",
+            repo.name, session.id
+        );
+        self.touch(&mut session)
+    }
+
+    /// Abort only the pending host-side merge created by `accept --merge`.
+    /// The generated worktree and its session branch remain available for a
+    /// later rebase, merge, or inspection.
+    pub fn abort_accept_from_repository(&self, input: &Path) -> Result<()> {
+        let Some((mut session, repo)) = self.select_paused_acceptance_worktree(input, "abort")?
+        else {
+            return Ok(());
+        };
+        let Some(conflicts) = self.git.host_merge_conflicts(&repo)? else {
+            bail!(
+                "no acceptance merge is paused in {}; choose the worktree whose host checkout is merging",
+                repo.source.display()
+            );
+        };
+        println!(
+            "Abort the host merge for session {} in {}. The jbox session branch {} stays retained.{}",
+            session.id,
+            repo.source.display(),
+            repo.branch,
+            if conflicts.is_empty() {
+                ""
+            } else {
+                " Unresolved files are present."
+            }
+        );
+        print!("Abort this host merge? [y/N]: ");
+        io::stdout().flush()?;
+        let mut confirmed = String::new();
+        io::stdin().read_line(&mut confirmed)?;
+        if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
+            println!("abort acceptance cancelled. The host merge remains paused.");
+            return Ok(());
+        }
+        self.git.abort_host_merge(&repo)?;
+        println!(
+            "aborted host merge for {}. Jbox session {} and branch {} remain retained.",
+            repo.name, session.id, repo.branch
+        );
+        self.touch(&mut session)
+    }
+
     fn accept_snapshots(
         &self,
         session: &mut Session,
@@ -1502,6 +1588,70 @@ impl App {
         let index: usize = selected
             .parse()
             .context("select a worktree by its displayed number")?;
+        if index == 0 || index > candidates.len() {
+            bail!("selection must be between 1 and {}", candidates.len());
+        }
+        Ok(Some(candidates[index - 1].clone()))
+    }
+
+    /// A paused host merge has one `MERGE_HEAD`: only sessions whose branch
+    /// contains that commit are relevant. Keeping unrelated worktrees out of
+    /// this selector makes the recovery action unambiguous in multi-session
+    /// repositories.
+    fn select_paused_acceptance_worktree(
+        &self,
+        input: &Path,
+        action: &str,
+    ) -> Result<Option<(Session, RepoState)>> {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!("`jbox accept --{action}` needs an interactive terminal");
+        }
+        let repository = Config::repository_root(input)?;
+        let Some(merge_head) = self.git.host_merge_head(&repository)? else {
+            bail!(
+                "no acceptance merge is paused in {}; run `jbox accept --merge` to begin one",
+                repository.display()
+            );
+        };
+        let mut candidates = Vec::new();
+        for (session, repo) in self.sessions_for_repository(&repository)? {
+            if self.git.branch_contains_commit(&repo, &merge_head)? {
+                candidates.push((session, repo));
+            }
+        }
+        if candidates.is_empty() {
+            bail!(
+                "host merge in {} is paused at {} but no retained jbox session branch contains that commit; use `git status` and `git merge --abort` or finish the host merge manually",
+                repository.display(),
+                merge_head
+            );
+        }
+        println!(
+            "Paused jbox acceptance for {} at {}:",
+            repository.display(),
+            &merge_head[..merge_head.len().min(12)]
+        );
+        for (index, (session, repo)) in candidates.iter().enumerate() {
+            println!(
+                "  {}) {}  {:?}  {}",
+                index + 1,
+                session.id,
+                session.state,
+                repo.branch
+            );
+        }
+        print!("Select the originating session to {action} (blank cancels): ");
+        io::stdout().flush()?;
+        let mut selected = String::new();
+        io::stdin().read_line(&mut selected)?;
+        let selected = selected.trim();
+        if selected.is_empty() {
+            println!("{action} acceptance cancelled. The host merge remains paused.");
+            return Ok(None);
+        }
+        let index: usize = selected
+            .parse()
+            .context("select a session by its displayed number")?;
         if index == 0 || index > candidates.len() {
             bail!("selection must be between 1 and {}", candidates.len());
         }

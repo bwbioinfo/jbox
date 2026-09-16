@@ -231,6 +231,39 @@ before creating a new session.
 
 `jbox accept <session> --into <branch>` accepts the latest **committed** snapshot
 from every session repository into the named local host branch without stopping
+the guest. The target branch must already be checked out and clean in every
+host repository, and acceptance is fast-forward only by default. Uncommitted
+guest changes remain in the retained session and later commits can be accepted
+again. A normal refusal never changes the host checkout.
+
+### Accepting dirty work safely
+
+Choose an explicit mode for the type of work that needs preserving:
+
+```bash
+# Commit visible agent changes in the generated jbox worktree, then accept.
+jbox accept <session> --into main --checkpoint
+
+# Preserve tracked and untracked edits in the normal host checkout, accept a
+# fast-forward snapshot, then reapply those edits.
+jbox accept <session> --into main --stash-host
+
+# Explicitly merge a guest snapshot into a diverged host branch.
+jbox accept <session> --into main --merge
+jbox accept <session> --into main --stash-host --merge
+```
+
+`--checkpoint` commits only the generated jbox worktree. It never stages or
+commits files in the normal host checkout. It refuses a detached worktree or
+an unresolved merge/rebase rather than forcing a commit. `--stash-host` uses a
+named, recoverable Git stash and drops it only after a successful reapply.
+
+If `--merge` creates a host conflict, acceptance is **paused**, not discarded:
+jbox lists every unresolved host file and retains the jbox session branch.
+Resolve and stage the files in the host checkout, then run
+`jbox accept --continue` and choose the matching worktree to create the merge
+commit. To abandon only the host-side merge while retaining the jbox worktree,
+run `jbox accept --abort` and choose that worktree. Neither option stops the
 
 An internal detached watcher checks TTL every minute. TTL uses the most recent create, attach, shell, or accept timestamp. Expiry stops the guest and retains its worktrees. `jbox clean` refuses when a worktree has staged, unstaged, untracked, or post-base commits unless `--force` is explicit.
 

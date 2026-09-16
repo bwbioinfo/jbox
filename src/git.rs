@@ -526,14 +526,101 @@ impl Git {
                     });
                 }
                 bail!(
-                    "merge acceptance for {} has unresolved files in {}:\n{}\nResolve the files, run `git add <paths>` and `git commit` there, then continue using session branch {}. To abandon this host-side merge without changing the session, run `git merge --abort` there",
-                    repo.name,
+                    "acceptance is paused: merging session {} into {} created host conflicts in {}:\n{}\nThe jbox session branch is retained. Resolve and stage the files, then run `jbox accept --continue`. To abandon only this host-side merge and keep the jbox session unchanged, run `jbox accept --abort`",
+                    repo.branch,
+                    target,
                     repo.source.display(),
                     conflicts,
-                    repo.branch
                 );
             }
         }
+    }
+
+    /// `Some(paths)` indicates an in-progress host merge. An empty string
+    /// means the merge has no remaining unmerged paths and is ready to commit.
+    pub fn host_merge_conflicts(&self, repo: &RepoState) -> Result<Option<String>> {
+        if self.host_merge_head(&repo.source)?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Self::run(
+            &repo.source,
+            &["diff", "--name-only", "--diff-filter=U"],
+        )?))
+    }
+
+    /// Return the exact guest commit Git is currently trying to merge into a
+    /// host checkout. It lets the accept UI select the originating jbox
+    /// session instead of presenting unrelated retained worktrees.
+    pub fn host_merge_head(&self, repository: &Path) -> Result<Option<String>> {
+        let merge_head = Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(["rev-parse", "--verify", "-q", "MERGE_HEAD"])
+            .output()
+            .context("could not inspect host merge state")?;
+        if !merge_head.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(
+            String::from_utf8(merge_head.stdout)?.trim().to_owned(),
+        ))
+    }
+
+    /// Whether the retained session branch contains the commit which Git is
+    /// currently merging. A guest may have made newer commits after a paused
+    /// host merge, hence ancestry is more robust than exact tip equality.
+    pub fn branch_contains_commit(&self, repo: &RepoState, commit: &str) -> Result<bool> {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&repo.source)
+            .args(["merge-base", "--is-ancestor", commit, &repo.branch])
+            .status()
+            .context("could not match a paused host merge to its jbox session")?;
+        Ok(status.success())
+    }
+
+    /// Complete an in-progress host merge after the user resolved and staged
+    /// its conflicts. This intentionally does not stage files on the user's
+    /// behalf: `jbox accept --continue` is a clear confirmation that the
+    /// caller reviewed their resolution.
+    pub fn continue_host_merge(&self, repo: &RepoState) -> Result<()> {
+        let Some(conflicts) = self.host_merge_conflicts(repo)? else {
+            bail!(
+                "cannot continue acceptance for {}: no host merge is in progress in {}",
+                repo.name,
+                repo.source.display()
+            );
+        };
+        if !conflicts.is_empty() {
+            bail!(
+                "acceptance remains paused for {}. Resolve and stage these host files in {} before `jbox accept --continue`:\n{}\nUse `jbox accept --abort` to abandon only the host merge",
+                repo.name,
+                repo.source.display(),
+                conflicts
+            );
+        }
+        Self::run(&repo.source, &["commit", "--no-edit"]).with_context(|| {
+            format!(
+                "could not complete host merge for {}; stage the reviewed resolution in {} before retrying `jbox accept --continue`",
+                repo.name,
+                repo.source.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Abandon an in-progress host merge without changing the retained jbox
+    /// session branch or worktree.
+    pub fn abort_host_merge(&self, repo: &RepoState) -> Result<()> {
+        if self.host_merge_conflicts(repo)?.is_none() {
+            bail!(
+                "cannot abort acceptance for {}: no host merge is in progress in {}",
+                repo.name,
+                repo.source.display()
+            );
+        }
+        Self::run(&repo.source, &["merge", "--abort"])?;
+        Ok(())
     }
 
     pub fn accept_snapshot(&self, repo: &RepoState, target: &str) -> Result<()> {
@@ -1257,10 +1344,28 @@ mod tests {
             beads_bootstrap: Vec::new(),
         };
         let error = Git.merge_snapshot(&repo, &target).unwrap_err().to_string();
-        assert!(error.contains("has unresolved files"), "{error}");
+        assert!(error.contains("acceptance is paused"), "{error}");
         assert!(error.contains("conflicted"), "{error}");
-        assert!(error.contains("git merge --abort"), "{error}");
-        git(host.path(), &["merge", "--abort"]);
+        assert!(error.contains("jbox accept --continue"), "{error}");
+        assert!(error.contains("jbox accept --abort"), "{error}");
+        Git.abort_host_merge(&repo).unwrap();
+        assert!(Git.host_merge_conflicts(&repo).unwrap().is_none());
+
+        // Recreate the same conflict, then use the integrated continuation
+        // after the user has deliberately resolved and staged the file.
+        assert!(Git.merge_snapshot(&repo, &target).is_err());
+        std::fs::write(host.path().join("conflicted"), "resolved\n").unwrap();
+        git(host.path(), &["add", "conflicted"]);
+        assert_eq!(
+            Git.host_merge_conflicts(&repo).unwrap(),
+            Some(String::new())
+        );
+        Git.continue_host_merge(&repo).unwrap();
+        assert!(Git.host_merge_conflicts(&repo).unwrap().is_none());
+        assert_eq!(
+            std::fs::read_to_string(host.path().join("conflicted")).unwrap(),
+            "resolved\n"
+        );
         Git.remove_worktree(host.path(), &worktree, true).unwrap();
     }
 }
