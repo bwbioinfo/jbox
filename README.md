@@ -4,6 +4,13 @@
 
 > **MVP status:** the Git isolation, state, Docker/Kata lifecycle, jcode SSH bridge, dedicated credentials, multi-repository config, inspection, safe cleanup, and TTL watcher are implemented. The target Arch/Manjaro host was validated with Kata 4 runtime-rs and Docker.
 
+## Versioning
+
+Jbox uses semantic versions in the form `a.b.c`. Additive features increment
+the middle component, for example `0.2.0` to `0.3.0`. Compatible fixes and
+documentation-only releases increment `c`, while breaking compatibility changes
+increment `a`.
+
 ## Implementation plan and result
 
 1. Resolve a versioned project config, canonicalize every path, and create a branch/worktree for every participating repository.
