@@ -168,16 +168,14 @@ impl App {
         Ok(())
     }
 
-    /// Create a project-local configuration and a Dockerfile that extends the
-    /// jbox base image. Existing files are deliberately never replaced.
+    /// Create missing project-local configuration artifacts. Existing files
+    /// are deliberately never replaced.
     pub fn init(&self, input: &Path, tools: &[String]) -> Result<()> {
         let project = Config::repository_root(input)?;
         let config = project.join(".jbox.toml");
-        if config.exists() {
-            bail!(
-                "{} already exists; `jbox init` never overwrites configuration",
-                config.display()
-            );
+        let created_config = !config.exists();
+        if config.exists() && !config.is_file() {
+            bail!("{} exists but is not a file", config.display());
         }
         for tool in tools {
             if !valid_apt_package(tool) {
@@ -186,6 +184,24 @@ impl App {
                 );
             }
         }
+
+        // A Dockerfile only affects a session when the configuration selects
+        // it. Existing configs produced before `jbox init` grew image support
+        // often lack an image table, so extend those files without rewriting
+        // their comments or unrelated choices. An existing `[image]` table is
+        // intentional configuration and must be resolved by its author.
+        let add_default_dockerfile_config = if created_config {
+            false
+        } else {
+            match image_dockerfile_setting(&config)? {
+                ImageDockerfileSetting::MissingImageTable => true,
+                ImageDockerfileSetting::Configured => false,
+                ImageDockerfileSetting::MissingDockerfile => bail!(
+                    "{} has an [image] table without `dockerfile`; set `dockerfile = \".jbox/Dockerfile\"` before running `jbox init`",
+                    config.display()
+                ),
+            }
+        };
 
         let dockerfile = project.join(".jbox/Dockerfile");
         let created_dockerfile = !dockerfile.exists();
@@ -206,8 +222,19 @@ impl App {
             )?;
             std::fs::write(&dockerfile, init_dockerfile(tools))?;
         }
-        std::fs::write(&config, INIT_CONFIG)?;
-        println!("created {}", config.display());
+        if created_config {
+            std::fs::write(&config, INIT_CONFIG)?;
+            println!("created {}", config.display());
+        } else {
+            println!("using existing {}", config.display());
+            if add_default_dockerfile_config {
+                append_default_dockerfile_config(&config)?;
+                println!(
+                    "added [image].dockerfile = \".jbox/Dockerfile\" to {}",
+                    config.display()
+                );
+            }
+        }
         if !created_dockerfile {
             println!("using existing {}", dockerfile.display());
         } else if tools.is_empty() {
@@ -1837,6 +1864,42 @@ impl App {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageDockerfileSetting {
+    MissingImageTable,
+    MissingDockerfile,
+    Configured,
+}
+
+fn image_dockerfile_setting(path: &Path) -> Result<ImageDockerfileSetting> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read existing configuration {}", path.display()))?;
+    let value: toml::Value = toml::from_str(&raw)
+        .with_context(|| format!("cannot parse existing configuration {}", path.display()))?;
+    let Some(image) = value.get("image") else {
+        return Ok(ImageDockerfileSetting::MissingImageTable);
+    };
+    let Some(image) = image.as_table() else {
+        bail!("{} has a non-table `image` value", path.display());
+    };
+    if image.contains_key("dockerfile") {
+        Ok(ImageDockerfileSetting::Configured)
+    } else {
+        Ok(ImageDockerfileSetting::MissingDockerfile)
+    }
+}
+
+fn append_default_dockerfile_config(path: &Path) -> Result<()> {
+    let mut raw = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read existing configuration {}", path.display()))?;
+    if !raw.ends_with('\n') {
+        raw.push('\n');
+    }
+    raw.push_str("\n[image]\ndockerfile = \".jbox/Dockerfile\"\n");
+    std::fs::write(path, raw)
+        .with_context(|| format!("cannot extend configuration {}", path.display()))
+}
+
 fn valid_apt_package(package: &str) -> bool {
     package
         .bytes()
@@ -2041,7 +2104,7 @@ mod tests {
         assert!(dockerfile.contains("FROM ${JBOX_BASE_IMAGE}"));
         assert!(dockerfile.contains("    ripgrep \\"));
         assert!(dockerfile.contains("    jq \\"));
-        assert!(app.init(temp.path(), &[]).is_err());
+        app.init(temp.path(), &[]).unwrap();
     }
 
     #[test]
@@ -2079,6 +2142,41 @@ mod tests {
             std::fs::read_to_string(dockerfile).unwrap(),
             "FROM debian:bookworm-slim\n"
         );
+    }
+
+    #[test]
+    fn init_creates_a_missing_dockerfile_beside_existing_config() {
+        let temp = tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", temp.path().to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let config = temp.path().join(".jbox.toml");
+        let original_config = "version = 1\n[workspace]\nmount = \"/workspace/custom\"\n";
+        std::fs::write(&config, original_config).unwrap();
+
+        test_app(temp.path())
+            .init(temp.path(), &["ripgrep".into()])
+            .unwrap();
+
+        let updated_config = std::fs::read_to_string(&config).unwrap();
+        assert!(updated_config.starts_with(original_config));
+        assert!(updated_config.contains("[image]\ndockerfile = \".jbox/Dockerfile\""));
+        assert_eq!(
+            Config::load(temp.path())
+                .unwrap()
+                .0
+                .image
+                .dockerfile
+                .as_deref(),
+            Some(".jbox/Dockerfile")
+        );
+        let dockerfile = std::fs::read_to_string(temp.path().join(".jbox/Dockerfile")).unwrap();
+        assert!(dockerfile.contains("FROM ${JBOX_BASE_IMAGE}"));
+        assert!(dockerfile.contains("ripgrep"));
     }
 
     #[test]
