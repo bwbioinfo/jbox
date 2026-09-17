@@ -1632,10 +1632,36 @@ done | LC_ALL=C sort -r | head -n 20
             .collect())
     }
 
-    pub fn list(&self) -> Result<()> {
-        let sessions = self.list_sessions()?;
+    /// List every Jbox session, including sessions outside the current project.
+    /// This is deliberately explicit at the CLI layer through `jbox ls --all`.
+    pub fn list_all(&self) -> Result<()> {
+        self.print_sessions("No jbox sessions.", self.list_sessions()?)
+    }
+
+    /// List complete development machines that contain the repository selected
+    /// by the caller. A multi-repository session appears once and keeps its
+    /// full repository list, so the output describes the whole project rather
+    /// than only its currently selected checkout.
+    pub fn list_from_repository(&self, input: &Path) -> Result<()> {
+        let repository = Config::repository_root(input)?;
+        let sessions = self.list_sessions_for_repository(&repository)?;
+        self.print_sessions(
+            &format!("No jbox sessions for {}.", repository.display()),
+            sessions,
+        )
+    }
+
+    fn list_sessions_for_repository(&self, repository: &Path) -> Result<Vec<Session>> {
+        Ok(self
+            .list_sessions()?
+            .into_iter()
+            .filter(|session| session.repos.iter().any(|repo| repo.source == repository))
+            .collect())
+    }
+
+    fn print_sessions(&self, empty_message: &str, sessions: Vec<Session>) -> Result<()> {
         if sessions.is_empty() {
-            println!("No jbox sessions.");
+            println!("{empty_message}");
             return Ok(());
         }
         println!("ID\tSTATE\tLAST ACTIVITY\tREPOSITORIES");
@@ -2295,6 +2321,39 @@ mod tests {
         let candidates = app.sessions_for_repository(&current).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0.id, "current-session");
+    }
+
+    #[test]
+    fn repository_list_shows_complete_matching_sessions_only() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let current = temp.path().join("current");
+        let other = temp.path().join("other");
+        let mut project = test_session("project-session", current.clone());
+        project.repos.push(RepoState {
+            name: "sibling".into(),
+            source: other.clone(),
+            worktree: temp.path().join("sibling-worktree"),
+            mount: "/workspace/sibling".into(),
+            branch: "jbox/project-session/sibling".into(),
+            base_commit: "deadbeef".into(),
+            host_gitfile: temp.path().join("sibling-gitfile"),
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        });
+        app.state.save(&project).unwrap();
+        app.state
+            .save(&test_session(
+                "unrelated-session",
+                temp.path().join("unrelated"),
+            ))
+            .unwrap();
+
+        let listed = app.list_sessions_for_repository(&current).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "project-session");
+        assert_eq!(listed[0].repos.len(), 2);
+        assert_eq!(app.list_sessions().unwrap().len(), 2);
     }
 
     #[test]

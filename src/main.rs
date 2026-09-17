@@ -31,7 +31,11 @@ enum Command {
         #[arg(long = "tool", value_name = "APT_PACKAGE")]
         tools: Vec<String>,
     },
-    Ls,
+    Ls {
+        /// List every jbox session across all repositories.
+        #[arg(long)]
+        all: bool,
+    },
     Attach {
         /// Session to attach. Omit it to select a running workspace for the current repository.
         session: Option<String>,
@@ -151,7 +155,13 @@ fn main() -> Result<()> {
             );
         }
         Command::Init { path, tools } => app.init(&path, &tools)?,
-        Command::Ls => app.list()?,
+        Command::Ls { all } => {
+            if all {
+                app.list_all()?
+            } else {
+                app.list_from_repository(&std::env::current_dir()?)?
+            }
+        }
         Command::Attach { session } => match session {
             Some(session) => app.attach(&session)?,
             None => app.attach_from_repository(&std::env::current_dir()?)?,

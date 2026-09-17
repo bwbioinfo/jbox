@@ -156,7 +156,8 @@ credentials.
 `jbox .` creates a session such as `bright-otter-a1b2c3`, prints each worktree branch and base commit, starts the guest, and opens the local jcode TUI. The VM remains alive after the TUI disconnects. Reconnect or inspect it with:
 
 ```bash
-jbox ls
+jbox ls # only sessions containing the current repository
+jbox ls --all # every session across all repositories
 jbox attach bright-otter-a1b2c3
 jbox shell bright-otter-a1b2c3
 # Omit the session in a repository. Jbox uses the only matching worktree,
@@ -184,8 +185,9 @@ retained sessions whose worktree belongs to that repository. If exactly one
 matches, jbox states which worktree it selected and proceeds without a picker.
 If several match, it presents the numbered selection UI. This applies to
 `attach`, `shell`, `status`, `diff`, `stop`, `accept`, `accept --all`, `rebase`,
-`resume`, and `clean`. Operations that can change lifecycle or Git state still
-ask for their normal final confirmation. `jbox accept` defaults to the currently
+`resume`, `clean`, and `ls`. `jbox ls --all` is the explicit global inventory.
+Operations that can change lifecycle or Git state still ask for their normal
+final confirmation. `jbox accept` defaults to the currently
 checked-out branch and accepts only that one repository from a multi-repository
 session, avoiding a failed or accidental merge of sibling repositories. Pass a
 session explicitly with
