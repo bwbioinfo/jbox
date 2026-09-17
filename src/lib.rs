@@ -852,18 +852,26 @@ done | LC_ALL=C sort -r | head -n 20
 
     pub fn stop(&self, id: &str) -> Result<()> {
         let mut session = self.load_session(id)?;
-        if session.state == SessionState::Running {
-            self.engine.stop(&session.container_name)?;
-            self.paths.stop_session_ssh_agent(session.ssh_agent_pid);
-            self.paths.untrust_session_host(&session.known_hosts_tag)?;
-            for repo in &session.repos {
-                self.git.restore_and_import_guest_metadata(repo)?;
-            }
-            session.state = SessionState::Stopped;
-            self.state.save(&session)?;
-        }
+        self.stop_running_session(&mut session)?;
         println!("jbox session {id} stopped. Worktrees were retained.");
         Ok(())
+    }
+
+    /// Stop the guest and return only after every guest-visible Git metadata
+    /// directory has been restored to its retained worktree. Lifecycle callers
+    /// decide whether this is a final stop or a short maintenance interruption.
+    fn stop_running_session(&self, session: &mut Session) -> Result<()> {
+        if session.state != SessionState::Running {
+            return Ok(());
+        }
+        self.engine.stop(&session.container_name)?;
+        self.paths.stop_session_ssh_agent(session.ssh_agent_pid);
+        self.paths.untrust_session_host(&session.known_hosts_tag)?;
+        for repo in &session.repos {
+            self.git.restore_and_import_guest_metadata(repo)?;
+        }
+        session.state = SessionState::Stopped;
+        self.state.save(session)
     }
 
     /// Stop the selected machine. Stopping is session-wide, so confirmation
@@ -1249,9 +1257,11 @@ done | LC_ALL=C sort -r | head -n 20
     /// Rebase every worktree in the selected development machine. A live guest
     /// is stopped only after every participating repository has passed a
     /// non-mutating preflight, so an avoidable sibling failure cannot disconnect
-    /// the entire machine.
+    /// the entire machine. Once all rebases succeed, a guest stopped by this
+    /// command is restarted automatically so already-attached Jcode clients do
+    /// not remain in a reconnect loop.
     pub fn rebase_from_repository(&self, input: &Path, onto: Option<&str>) -> Result<()> {
-        let Some((session, _)) = self.select_repository_worktree(input, "rebase", None)? else {
+        let Some((mut session, _)) = self.select_repository_worktree(input, "rebase", None)? else {
             return Ok(());
         };
 
@@ -1285,9 +1295,15 @@ done | LC_ALL=C sort -r | head -n 20
         for (repo, target) in session.repos.iter().zip(&targets) {
             println!("  {}: {} -> {target}", repo.name, repo.branch);
         }
+        if session.state == SessionState::Running {
+            println!(
+                "The shared guest will go offline briefly while Git metadata is synchronized. Attached Jcode clients may show reconnecting, then reconnect automatically after jbox restarts the guest."
+            );
+        }
         print!(
-            "Stop the shared guest if needed and rebase all {} worktrees? [y/N]: ",
-            session.repos.len()
+            "Rebase all {} worktrees in session {}? [y/N]: ",
+            session.repos.len(),
+            session.id
         );
         io::stdout().flush()?;
         let mut confirmed = String::new();
@@ -1296,21 +1312,38 @@ done | LC_ALL=C sort -r | head -n 20
             println!("rebase cancelled.");
             return Ok(());
         }
-        if session.state == SessionState::Running {
+        let restart_guest = session.state == SessionState::Running;
+        if restart_guest {
             println!(
-                "stopping {} to safely synchronize its Git metadata...",
+                "temporarily stopping {} to safely synchronize its Git metadata...",
                 session.id
             );
-            self.stop(&session.id)?;
+            self.stop_running_session(&mut session)?;
         }
         for (repo, target) in session.repos.iter().zip(&targets) {
             self.git.rebase_worktree(repo, target).with_context(|| {
                 format!(
-                    "session {} is stopped. Rebase progress before {} is retained; resolve this worktree with `jbox resolve {}` or locally, then rerun `jbox rebase` to continue remaining repositories",
-                    session.id, repo.name, session.id
+                    "session {} remains stopped because rebase needs attention in {}. Rebase progress before it is retained; resolve this worktree with `jbox resolve {}` or locally, then rerun `jbox rebase`. When all worktrees are resolved, run `jbox resume {}` to restore attached Jcode clients",
+                    session.id, repo.name, session.id, session.id
                 )
             })?;
             println!("rebased {} onto `{target}`", repo.name);
+        }
+        if restart_guest {
+            println!(
+                "All worktrees rebased. Restarting {} so attached Jcode clients can reconnect...",
+                session.id
+            );
+            self.resume(&session.id).with_context(|| {
+                format!(
+                    "rebases completed, but jbox could not restart {}. Run `jbox resume {}` after resolving the reported startup problem",
+                    session.id, session.id
+                )
+            })?;
+            println!(
+                "{} is running again. Existing Jcode clients should reconnect to their saved conversation shortly.",
+                session.id
+            );
         }
         println!(
             "rebased all {} worktrees in session {}. Inspect and accept each snapshot when ready.",

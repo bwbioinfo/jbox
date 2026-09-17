@@ -214,7 +214,11 @@ Similarly, `jbox rebase` selects a session through the current repository, then
 preflights **every** retained worktree before stopping its shared guest. With no
 `--onto`, each worktree rebases onto the branch currently checked out in its own
 host repository. `--onto <branch>` applies one explicit branch to every
-repository. Jbox prints the complete plan and asks once. It never stops a guest
+repository. Jbox prints the complete plan and asks once. When the guest is
+running, rebase states clearly that it takes the shared guest offline only
+briefly, then automatically restarts it after every rebase succeeds. Attached
+Jcode clients may display reconnecting during that maintenance window and then
+resume their saved conversation. It never stops a guest
 when a sibling has uncommitted work, unresolved conflicts, a detached host
 checkout, or an invalid target branch. Git can still discover a content conflict
 while rebasing one repository after the guest is stopped. In that case completed
