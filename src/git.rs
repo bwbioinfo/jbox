@@ -174,6 +174,32 @@ impl Git {
         Self::run(repo, &args)?;
         Ok(())
     }
+
+    /// Beads creates this empty root-level coordination lock while a guest is
+    /// operating. It is neither source nor task data. Remove it only when it
+    /// is exactly the expected ordinary empty file, never when a user has
+    /// replaced it with a symlink, directory, or content-bearing file.
+    pub fn remove_transient_beads_gate_lock(&self, repo: &RepoState) -> Result<bool> {
+        if repo.beads_snapshot.is_none() && repo.beads_bootstrap.is_empty() {
+            return Ok(false);
+        }
+        let path = repo.worktree.join(".beads.gate.lock");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("cannot inspect transient Beads lock {}", path.display())
+                });
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != 0 {
+            return Ok(false);
+        }
+        fs::remove_file(&path)
+            .with_context(|| format!("cannot remove transient Beads lock {}", path.display()))?;
+        Ok(true)
+    }
     /// Replace a linked worktree's host-facing `.git` file with a self-contained
     /// metadata copy for the guest. The original link is retained outside the
     /// mount and restored when the session stops. This keeps the host `.git`
@@ -840,6 +866,14 @@ impl Git {
     fn is_transient_beads_gate_lock(&self, repo: &RepoState, line: &str) -> bool {
         (repo.beads_snapshot.is_some() || !repo.beads_bootstrap.is_empty())
             && line.ends_with(".beads.gate.lock")
+            && self.transient_beads_gate_lock_is_safe(repo)
+    }
+
+    fn transient_beads_gate_lock_is_safe(&self, repo: &RepoState) -> bool {
+        let path = repo.worktree.join(".beads.gate.lock");
+        fs::symlink_metadata(path).is_ok_and(|metadata| {
+            !metadata.file_type().is_symlink() && metadata.is_file() && metadata.len() == 0
+        })
     }
 
     fn is_unchanged_bootstrap_file(&self, repo: &RepoState, path: &BeadsBaselineFile) -> bool {
@@ -1073,6 +1107,20 @@ mod tests {
         assert!(!Git.status(&repo).unwrap().contains("metadata.json"));
         assert!(!Git.status(&repo).unwrap().contains(".beads.gate.lock"));
         assert!(!Git.diff_stat(&repo).unwrap().contains(".beads/"));
+        assert!(Git.remove_transient_beads_gate_lock(&repo).unwrap());
+        assert!(!worktree.join(".beads.gate.lock").exists());
+
+        // An identically named content-bearing file is not Jbox runtime state.
+        // It remains visible and the cleanup helper must leave it alone.
+        fs::write(worktree.join(".beads.gate.lock"), "agent data\n").unwrap();
+        assert_eq!(
+            Git.change_state(&repo).unwrap(),
+            WorktreeChangeState::Changes
+        );
+        assert!(!Git.remove_transient_beads_gate_lock(&repo).unwrap());
+        assert!(worktree.join(".beads.gate.lock").is_file());
+        fs::remove_file(worktree.join(".beads.gate.lock")).unwrap();
+        assert_eq!(Git.change_state(&repo).unwrap(), WorktreeChangeState::Clean);
         Git.restore_guest_metadata(&repo).unwrap();
         Git.prepare_retained_worktree_for_guest(&repo, &author)
             .unwrap();

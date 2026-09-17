@@ -1692,6 +1692,9 @@ done | LC_ALL=C sort -r | head -n 20
                 session.state = SessionState::Stopped;
             }
             for repo in &session.repos {
+                if self.git.remove_transient_beads_gate_lock(repo)? {
+                    println!("removed transient Beads lock from {}", repo.name);
+                }
                 self.git
                     .remove_worktree(&repo.source, &repo.worktree, force)?;
             }
