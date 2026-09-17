@@ -1274,15 +1274,28 @@ impl App {
         Ok(())
     }
 
-    /// Interactively inspect one worktree belonging to the repository beneath
-    /// the current directory. This keeps multi-repository sessions focused on
-    /// the repository the user is presently working in.
+    /// Inspect one worktree belonging to the repository beneath the current
+    /// directory. A status remains repository-scoped, while a diff enumerates
+    /// the complete development machine so coordinated changes are visible
+    /// before accepting or testing the project on the host.
     pub fn status_from_repository(&self, input: &Path, diff: bool) -> Result<()> {
         let action = if diff { "diff" } else { "inspect" };
         let Some((session, repo)) = self.select_repository_worktree(input, action, None)? else {
             return Ok(());
         };
-        self.status_repository_worktree(&session, &repo, diff)
+        if diff {
+            println!(
+                "Jbox project session {} has {} repository worktree(s). Showing all diffs.",
+                session.id,
+                session.repos.len()
+            );
+            for repo in &session.repos {
+                self.status_repository_worktree(&session, repo, true)?;
+            }
+            Ok(())
+        } else {
+            self.status_repository_worktree(&session, &repo, false)
+        }
     }
 
     /// Resume a stopped session from its retained worktrees. If the retained

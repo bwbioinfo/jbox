@@ -162,7 +162,7 @@ jbox shell bright-otter-a1b2c3
 # Omit the session in a repository. Jbox uses the only matching worktree,
 # or presents a picker when multiple retained worktrees match.
 jbox status
-jbox diff
+jbox diff # shows diffs for every repository in the selected Jbox project session
 jbox resume # restarts a stopped guest, or attaches when its selected guest is already running
 jbox status bright-otter-a1b2c3
 jbox diff bright-otter-a1b2c3
