@@ -1134,27 +1134,48 @@ impl App {
         Ok(())
     }
 
-    /// Rebase a single selected session worktree from its host repository. A
-    /// live guest is explicitly stopped first so its isolated Git metadata is
-    /// imported and restored before the host-side rebase changes the branch.
+    /// Rebase every worktree in the selected development machine. A live guest
+    /// is stopped only after every participating repository has passed a
+    /// non-mutating preflight, so an avoidable sibling failure cannot disconnect
+    /// the entire machine.
     pub fn rebase_from_repository(&self, input: &Path, onto: Option<&str>) -> Result<()> {
-        let repository = Config::repository_root(input)?;
-        let onto = match onto {
-            Some(branch) => branch.to_owned(),
-            None => self.git.current_branch(&repository)?,
-        };
-        if onto.is_empty() {
-            bail!("{} is detached; pass --onto <branch>", repository.display());
-        }
-        let selection_action = format!("rebase onto `{onto}`");
-        let Some((session, repo)) =
-            self.select_repository_worktree(input, &selection_action, None)?
-        else {
+        let Some((session, _)) = self.select_repository_worktree(input, "rebase", None)? else {
             return Ok(());
         };
+
+        let targets = session
+            .repos
+            .iter()
+            .map(|repo| match onto {
+                Some(branch) => Ok(branch.to_owned()),
+                None => {
+                    let branch = self.git.current_branch(&repo.source)?;
+                    if branch.is_empty() {
+                        bail!(
+                            "cannot rebase session {}: host repository {} is detached; check out a branch there or pass --onto <branch>",
+                            session.id,
+                            repo.source.display()
+                        );
+                    }
+                    Ok(branch)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // This must precede guest shutdown. It checks every retained worktree
+        // and every requested host target without creating a checkpoint, staging
+        // nested repository state, or modifying any branch.
+        for (repo, target) in session.repos.iter().zip(&targets) {
+            self.git.preflight_rebase_worktree(repo, target)?;
+        }
+
+        println!("Rebase every repository in session {}:", session.id);
+        for (repo, target) in session.repos.iter().zip(&targets) {
+            println!("  {}: {} -> {target}", repo.name, repo.branch);
+        }
         print!(
-            "Rebase {} from session {} onto `{onto}`? [y/N]: ",
-            repo.branch, session.id
+            "Stop the shared guest if needed and rebase all {} worktrees? [y/N]: ",
+            session.repos.len()
         );
         io::stdout().flush()?;
         let mut confirmed = String::new();
@@ -1170,10 +1191,19 @@ impl App {
             );
             self.stop(&session.id)?;
         }
-        self.git.rebase_worktree(&repo, &onto)?;
+        for (repo, target) in session.repos.iter().zip(&targets) {
+            self.git.rebase_worktree(repo, target).with_context(|| {
+                format!(
+                    "session {} is stopped. Rebase progress before {} is retained; resolve this worktree with `jbox resolve {}` or locally, then rerun `jbox rebase` to continue remaining repositories",
+                    session.id, repo.name, session.id
+                )
+            })?;
+            println!("rebased {} onto `{target}`", repo.name);
+        }
         println!(
-            "rebased {} onto `{onto}`. Run `jbox accept` to fast-forward it.",
-            repo.branch
+            "rebased all {} worktrees in session {}. Inspect and accept each snapshot when ready.",
+            session.repos.len(),
+            session.id
         );
         Ok(())
     }

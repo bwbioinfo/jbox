@@ -86,9 +86,9 @@ enum Command {
         )]
         abort: bool,
     },
-    /// Stop a selected guest if needed and rebase its matching worktree onto a host branch.
+    /// Preflight, stop, and rebase every worktree in the selected session onto host branches.
     Rebase {
-        /// Branch to rebase onto. Defaults to the current host branch.
+        /// Branch to rebase every session worktree onto. Defaults to each host repository's current branch.
         #[arg(long)]
         onto: Option<String>,
     },

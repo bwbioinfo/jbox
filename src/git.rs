@@ -680,6 +680,20 @@ impl Git {
         Self::run(repository, &["branch", "--show-current"])
     }
     pub fn rebase_worktree(&self, repo: &RepoState, onto: &str) -> Result<()> {
+        self.preflight_rebase_worktree(repo, onto)?;
+        Self::run(&repo.worktree, &["rebase", onto]).with_context(|| {
+            format!(
+                "rebase stopped for {}; resolve conflicts in {}, then run `git rebase --continue` there",
+                repo.name,
+                repo.worktree.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Validate a worktree can enter a rebase without mutating it. Session-wide
+    /// callers run this for every repository before stopping a shared guest.
+    pub fn preflight_rebase_worktree(&self, repo: &RepoState, onto: &str) -> Result<()> {
         if self.has_uncommitted_changes(repo)? {
             bail!(
                 "cannot rebase {}: worktree {} has uncommitted changes; commit or stash them first",
@@ -692,13 +706,6 @@ impl Git {
             &repo.source,
             &["rev-parse", "--verify", &format!("refs/heads/{onto}")],
         )?;
-        Self::run(&repo.worktree, &["rebase", &onto]).with_context(|| {
-            format!(
-                "rebase stopped for {}; resolve conflicts in {}, then run `git rebase --continue` there",
-                repo.name,
-                repo.worktree.display()
-            )
-        })?;
         Ok(())
     }
     pub fn diff_stat(&self, repo: &RepoState) -> Result<String> {

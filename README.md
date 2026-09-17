@@ -210,11 +210,17 @@ the same target in every repository. Jbox imports and preflights every snapshot
 before fast-forwarding any host branch, and a running guest remains available
 for further commits and later accepts.
 
-Similarly, `jbox rebase` from a repository selects one of its worktrees and
-rebases it onto the checked-out branch, or a branch given by `--onto`. It asks
-for confirmation and stops a running guest before rebasing so its Git metadata
-is synchronized. Commit or stash guest changes first. Resolve a conflict in the
-reported retained worktree, then run `git rebase --continue` and `jbox accept`.
+Similarly, `jbox rebase` selects a session through the current repository, then
+preflights **every** retained worktree before stopping its shared guest. With no
+`--onto`, each worktree rebases onto the branch currently checked out in its own
+host repository. `--onto <branch>` applies one explicit branch to every
+repository. Jbox prints the complete plan and asks once. It never stops a guest
+when a sibling has uncommitted work, unresolved conflicts, a detached host
+checkout, or an invalid target branch. Git can still discover a content conflict
+while rebasing one repository after the guest is stopped. In that case completed
+earlier rebases and the stopped session are retained: resolve with `jbox resolve`,
+run `git rebase --continue`, then rerun `jbox rebase` to continue the remaining
+repositories.
 
 Attach and shell consider running worktrees and begin in the selected guest
 mount. Status and diff inspect only that worktree. Stop and clean remain
