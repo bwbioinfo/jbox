@@ -253,10 +253,7 @@ impl JboxPaths {
     /// is session-scoped. Restrict IDs before forwarding one to the local Jcode
     /// command line on a later attach.
     pub fn last_jcode_session_id(&self, id: &str) -> Option<String> {
-        let file = self
-            .sessions
-            .join(id)
-            .join("ssh/runtime/jcode/last-session-id");
+        let file = self.sessions.join(id).join("runtime/jcode/last-session-id");
         let value = fs::read_to_string(file).ok()?;
         let value = value.trim();
         (1..=256)
