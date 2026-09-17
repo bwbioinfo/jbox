@@ -15,7 +15,7 @@ use paths::{JboxPaths, safe_target};
 use state::{RepoState, Session, SessionState, StateStore};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::{io, io::IsTerminal, io::Write};
 
 pub const JCODE_SOCKET: &str = "/home/jbox/.local/share/jcode/jbox.sock";
@@ -663,7 +663,10 @@ impl App {
         self.touch(session)?;
         render_jbox_session_chrome(&session.id, mount)?;
         let ssh_socket = self.paths.session_ssh_dir(&session.id).join("agent.sock");
-        let last_session = self.paths.last_jcode_session_id(&session.id);
+        let last_session = match self.paths.last_jcode_session_id(&session.id) {
+            Some(session_id) => Some(session_id),
+            None => self.recover_legacy_jcode_session_id(session)?,
+        };
         if let Some(session_id) = &last_session {
             println!("Resuming Jcode conversation {session_id}.");
         }
@@ -677,6 +680,101 @@ impl App {
             bail!("local jcode exited with {status}");
         }
         Ok(())
+    }
+
+    /// Sessions created before the session-start hook existed do not have a
+    /// host marker. Ask the already-isolated guest for saved conversations
+    /// that contain an assistant response, then persist the chosen validated
+    /// ID. A single candidate migrates automatically. Multiple candidates are
+    /// never guessed because legacy sessions may have accumulated accidental
+    /// empty attaches before continuity tracking was introduced.
+    fn recover_legacy_jcode_session_id(&self, session: &Session) -> Result<Option<String>> {
+        let config = self.paths.write_ssh_config(session)?;
+        let mut child = Command::new("ssh")
+            .args(["-F", config.to_str().unwrap(), "jbox", "sh", "-s"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("could not query the guest's legacy Jcode session metadata")?;
+        let script = r#"
+set -eu
+for file in "$HOME"/.jcode/sessions/session_*.json; do
+    [ -f "$file" ] || continue
+    id=${file##*/}
+    id=${id%.json}
+    updated=$(sed -n 's/.*"updated_at":"\([^"]*\)".*/\1/p' "$file" | head -n 1)
+    [ -n "$updated" ] || continue
+    assistants=$(grep -o '"role":"assistant"' "$file" | wc -l | tr -d ' ')
+    [ "$assistants" -gt 0 ] || continue
+    printf '%s\t%s\n' "$updated" "$id"
+done | LC_ALL=C sort -r | head -n 20
+"#;
+        child
+            .stdin
+            .as_mut()
+            .context("legacy Jcode session query did not open stdin")?
+            .write_all(script.as_bytes())?;
+        let output = child
+            .wait_with_output()
+            .context("could not read legacy Jcode session query")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "could not recover a Jcode conversation for legacy session {}: {}",
+                session.id,
+                stderr.trim()
+            );
+        }
+        let recovered_output = String::from_utf8(output.stdout)
+            .context("legacy Jcode session query returned non-UTF-8 output")?;
+        let sessions = recovered_output
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter(|(_, id)| JboxPaths::valid_jcode_session_id(id))
+            .collect::<Vec<_>>();
+        let Some((_, session_id)) = sessions.first() else {
+            return Ok(None);
+        };
+        let session_id = if sessions.len() == 1 {
+            *session_id
+        } else {
+            if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+                bail!(
+                    "jbox session {} predates automatic Jcode continuity and has {} saved conversations; run `jbox attach {}` in an interactive terminal to select one",
+                    session.id,
+                    sessions.len(),
+                    session.id
+                );
+            }
+            println!(
+                "Jbox session {} predates automatic Jcode continuity. Select the conversation to keep resuming:",
+                session.id
+            );
+            for (index, (updated, id)) in sessions.iter().enumerate() {
+                println!("  {}) {}  ({updated})", index + 1, id);
+            }
+            print!("Select a Jcode conversation (blank cancels): ");
+            io::stdout().flush()?;
+            let mut selected = String::new();
+            io::stdin().read_line(&mut selected)?;
+            let selected = selected.trim();
+            if selected.is_empty() {
+                bail!("attach cancelled. No Jcode conversation was selected.");
+            }
+            let index: usize = selected
+                .parse()
+                .context("select a Jcode conversation by its displayed number")?;
+            if index == 0 || index > sessions.len() {
+                bail!("selection must be between 1 and {}", sessions.len());
+            }
+            sessions[index - 1].1
+        };
+        self.paths
+            .save_last_jcode_session_id(&session.id, session_id)
+            .context("could not save recovered legacy Jcode conversation ID")?;
+        println!("Recovered Jcode conversation {session_id} from legacy session state.");
+        Ok(Some((*session_id).to_owned()))
     }
 
     pub fn shell(&self, id: &str) -> Result<()> {

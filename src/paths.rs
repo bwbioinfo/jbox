@@ -256,14 +256,29 @@ impl JboxPaths {
         let file = self.sessions.join(id).join("runtime/jcode/last-session-id");
         let value = fs::read_to_string(file).ok()?;
         let value = value.trim();
-        (1..=256)
-            .contains(&value.len())
-            .then_some(value)
-            .filter(|id| {
-                id.bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-            })
-            .map(str::to_owned)
+        Self::valid_jcode_session_id(value).then_some(value.to_owned())
+    }
+
+    /// Persist a host-discovered legacy session ID in the same narrowly scoped
+    /// runtime directory used by the guest hook. The write is atomic so a later
+    /// attach never consumes a partial marker.
+    pub fn save_last_jcode_session_id(&self, id: &str, session_id: &str) -> Result<()> {
+        if !Self::valid_jcode_session_id(session_id) {
+            bail!("refusing invalid Jcode session ID recovered for jbox session {id}");
+        }
+        let directory = self.sessions.join(id).join("runtime/jcode");
+        fs::create_dir_all(&directory)?;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+        let marker = directory.join("last-session-id");
+        let temporary = directory.join(format!(".last-session-id-{}.jbox", uuid::Uuid::new_v4()));
+        fs::write(&temporary, format!("{session_id}\n"))?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+        fs::rename(temporary, marker)?;
+        Ok(())
+    }
+
+    pub fn valid_jcode_session_id(value: &str) -> bool {
+        valid_jcode_session_id(value)
     }
     pub fn create_session_ssh(&self, dir: &Path) -> Result<()> {
         fs::create_dir_all(dir)?;
@@ -434,6 +449,13 @@ impl JboxPaths {
     }
 }
 
+fn valid_jcode_session_id(value: &str) -> bool {
+    (1..=256).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 fn is_safe_credential_file(path: &Path) -> Result<bool> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -563,5 +585,36 @@ mod tests {
         fs::remove_file(&hosts).unwrap();
         std::os::unix::fs::symlink("/etc/passwd", &hosts).unwrap();
         assert!(JboxPaths::github_cli_hosts_from(&config).is_err());
+    }
+
+    #[test]
+    fn recovered_jcode_session_markers_are_validated_and_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = JboxPaths {
+            data: tmp.path().join("data"),
+            cache: tmp.path().join("cache"),
+            sessions: tmp.path().join("data/sessions"),
+            credentials: tmp.path().join("data/credentials"),
+        };
+
+        paths
+            .save_last_jcode_session_id("calm-otter", "session_fox_123")
+            .unwrap();
+        assert_eq!(
+            paths.last_jcode_session_id("calm-otter").as_deref(),
+            Some("session_fox_123")
+        );
+        let marker = paths
+            .sessions
+            .join("calm-otter/runtime/jcode/last-session-id");
+        assert_eq!(
+            fs::metadata(marker).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            paths
+                .save_last_jcode_session_id("calm-otter", "session;unsafe")
+                .is_err()
+        );
     }
 }
