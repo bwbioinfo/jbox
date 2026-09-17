@@ -5,6 +5,23 @@ use rand::prelude::IndexedRandom;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+const ADJECTIVES: &[&str] = &[
+    "agile", "amber", "brisk", "bright", "calm", "clever", "cobalt", "cosmic", "crisp", "daring",
+    "dawn", "eager", "ember", "fierce", "gentle", "golden", "grand", "harbor", "hidden", "indigo",
+    "jade", "keen", "kind", "lively", "lunar", "mellow", "misty", "nimble", "nova", "oaken",
+    "peaceful", "plucky", "proud", "quick", "quiet", "rapid", "ruby", "sage", "silver", "solar",
+    "steady", "swift", "tidy", "vivid", "warm", "wild", "wise", "zesty",
+];
+
+const ANIMALS: &[&str] = &[
+    "alpaca", "badger", "beaver", "bison", "caribou", "cat", "crane", "dolphin", "falcon",
+    "ferret", "fox", "gecko", "hare", "hawk", "hedgehog", "heron", "ibis", "jaguar", "kite",
+    "koala", "lemur", "leopard", "lizard", "lynx", "marten", "mink", "otter", "owl", "panda",
+    "penguin", "puma", "quail", "raccoon", "raven", "seal", "shark", "sloth", "sparrow", "stoat",
+    "swan", "tiger", "toucan", "turtle", "viper", "walrus", "weasel", "wolf", "wombat", "yak",
+    "zebra",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SessionState {
     Running,
@@ -113,13 +130,45 @@ impl StateStore {
 
 pub fn new_session_id() -> String {
     let mut rng = rand::rng();
-    let adjectives = ["bright", "calm", "clever", "swift", "quiet", "bold"];
-    let animals = ["fox", "otter", "raven", "lynx", "badger", "kite"];
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     format!(
         "{}-{}-{}",
-        adjectives.choose(&mut rng).unwrap(),
-        animals.choose(&mut rng).unwrap(),
+        ADJECTIVES.choose(&mut rng).unwrap(),
+        ANIMALS.choose(&mut rng).unwrap(),
         &suffix[..6]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ADJECTIVES, ANIMALS, new_session_id};
+
+    #[test]
+    fn session_name_vocabulary_is_large_and_slug_safe() {
+        assert!(ADJECTIVES.len() >= 48);
+        assert!(ANIMALS.len() >= 48);
+        assert!(
+            ADJECTIVES
+                .iter()
+                .chain(ANIMALS)
+                .all(|word| word.chars().all(|character| character.is_ascii_lowercase()))
+        );
+    }
+
+    #[test]
+    fn generated_session_ids_use_the_word_lists_and_short_hex_suffixes() {
+        for _ in 0..32 {
+            let id = new_session_id();
+            let parts = id.split('-').collect::<Vec<_>>();
+            assert_eq!(parts.len(), 3, "unexpected session id: {id}");
+            assert!(ADJECTIVES.contains(&parts[0]), "unexpected adjective: {id}");
+            assert!(ANIMALS.contains(&parts[1]), "unexpected animal: {id}");
+            assert_eq!(parts[2].len(), 6, "unexpected suffix: {id}");
+            assert!(
+                parts[2]
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+            );
+        }
+    }
 }
