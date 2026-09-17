@@ -701,13 +701,7 @@ impl Git {
     pub fn status(&self, repo: &RepoState) -> Result<String> {
         let status = Self::run(
             &repo.worktree,
-            &[
-                "status",
-                "--short",
-                "--branch",
-                "--ignored",
-                "--untracked-files=all",
-            ],
+            &["status", "--short", "--branch", "--untracked-files=all"],
         )?;
         Ok(self.without_jbox_beads_snapshot(repo, &status))
     }
@@ -786,12 +780,24 @@ impl Git {
         Ok(self.change_state(repo)? == WorktreeChangeState::Changes)
     }
 
-    /// Git refuses to remove a worktree with even ignored files. Jbox may use
-    /// Git's `--force` only when the entire non-clean status consists of known,
-    /// guest-generated Beads runtime state. Arbitrary ignored caches remain
-    /// changes and require the user's explicit `jbox clean --force` decision.
+    /// Git refuses to remove a worktree with ignored files even though those
+    /// files are deliberately outside its tracked project state. The caller
+    /// already checked that no tracked or untracked work would be lost, so use
+    /// Git's force flag solely to dispose of ignored caches and guest runtime
+    /// artifacts.
     pub fn requires_safe_worktree_force(&self, repo: &RepoState) -> Result<bool> {
-        let status = Self::run(
+        let project_status = Self::run(
+            &repo.worktree,
+            &["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        if !self
+            .without_jbox_beads_snapshot(repo, &project_status)
+            .trim()
+            .is_empty()
+        {
+            return Ok(false);
+        }
+        let all_status = Self::run(
             &repo.worktree,
             &[
                 "status",
@@ -800,11 +806,7 @@ impl Git {
                 "--untracked-files=all",
             ],
         )?;
-        Ok(!status.trim().is_empty()
-            && self
-                .without_jbox_beads_snapshot(repo, &status)
-                .trim()
-                .is_empty())
+        Ok(!all_status.trim().is_empty())
     }
 
     /// Capture only the small, known set of project files that `bd init`
@@ -839,12 +841,7 @@ impl Git {
     fn has_uncommitted_changes(&self, repo: &RepoState) -> Result<bool> {
         let status = Self::run(
             &repo.worktree,
-            &[
-                "status",
-                "--porcelain",
-                "--ignored",
-                "--untracked-files=all",
-            ],
+            &["status", "--porcelain", "--untracked-files=all"],
         )?;
         Ok(!self
             .without_jbox_beads_snapshot(repo, &status)
@@ -1198,17 +1195,15 @@ mod tests {
         fs::remove_file(worktree.join(".beads.gate.lock")).unwrap();
         assert_eq!(Git.change_state(&repo).unwrap(), WorktreeChangeState::Clean);
 
-        // An ordinary ignored cache is not Jbox or Beads runtime state. It
-        // remains visible and prevents a non-force cleanup.
+        // Ignored cache artifacts are not project work. They stay out of
+        // status and do not prevent cleanup, but Git needs --force to remove
+        // the otherwise clean worktree.
         fs::write(worktree.join(".git/info/exclude"), "private-cache/\n").unwrap();
         fs::create_dir(worktree.join("private-cache")).unwrap();
         fs::write(worktree.join("private-cache/value"), "user cache").unwrap();
-        assert_eq!(
-            Git.change_state(&repo).unwrap(),
-            WorktreeChangeState::Changes
-        );
-        assert!(Git.status(&repo).unwrap().contains("private-cache"));
-        assert!(!Git.requires_safe_worktree_force(&repo).unwrap());
+        assert_eq!(Git.change_state(&repo).unwrap(), WorktreeChangeState::Clean);
+        assert!(!Git.status(&repo).unwrap().contains("private-cache"));
+        assert!(Git.requires_safe_worktree_force(&repo).unwrap());
         fs::remove_dir_all(worktree.join("private-cache")).unwrap();
         assert_eq!(Git.change_state(&repo).unwrap(), WorktreeChangeState::Clean);
         Git.restore_guest_metadata(&repo).unwrap();
