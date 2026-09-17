@@ -55,7 +55,20 @@ while [ "$index" -lt "${JBOX_BEADS_WORKSPACE_COUNT:-0}" ]; do
             && [ ! -d "$JBOX_ONE_BEADS_WORKSPACE/.beads/embeddeddolt" ] \
             && [ ! -d "$JBOX_ONE_BEADS_WORKSPACE/.beads/dolt" ]; then
             cd "$JBOX_ONE_BEADS_WORKSPACE"
+            # `bd init --stealth` removes a root .gitignore containing only
+            # Beads rules because it moves those rules to global Git config.
+            # A generated Jbox worktree may legitimately track that file, so
+            # preserve tracked project content through guest setup.
+            tracked_gitignore=
+            if git ls-files --error-unmatch .gitignore >/dev/null 2>&1; then
+                tracked_gitignore="$(mktemp)"
+                trap "rm -f \"\$tracked_gitignore\"" EXIT
+                cp .gitignore "$tracked_gitignore"
+            fi
             bd init --sandbox --stealth --from-jsonl --prefix "$JBOX_ONE_BEADS_PREFIX" --non-interactive --skip-agents --skip-hooks
+            if [ -n "$tracked_gitignore" ]; then
+                cat "$tracked_gitignore" > .gitignore
+            fi
         fi
     '
     index=$((index + 1))
@@ -221,6 +234,8 @@ mod tests {
     fn guest_hydrates_beads_exports_before_starting_jcode() {
         assert!(JBOX_ENTRYPOINT.contains("JBOX_BEADS_WORKSPACE_COUNT"));
         assert!(JBOX_ENTRYPOINT.contains("bd init --sandbox --stealth --from-jsonl"));
+        assert!(JBOX_ENTRYPOINT.contains("git ls-files --error-unmatch .gitignore"));
+        assert!(JBOX_ENTRYPOINT.contains("cat \"$tracked_gitignore\" > .gitignore"));
         assert!(JBOX_ENTRYPOINT.contains("BEADS_DOLT_SERVER_MODE=embedded"));
         assert!(BASE_DOCKERFILE.contains("ENV BEADS_DOLT_SERVER_MODE=embedded"));
         assert!(JBOX_ENTRYPOINT.contains(".beads/embeddeddolt"));
