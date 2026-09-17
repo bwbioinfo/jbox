@@ -165,6 +165,15 @@ impl Git {
         if !worktree.exists() {
             return Ok(());
         }
+        // Some checkout filters turn Git's normal linked-worktree `.git` file
+        // into a symlink. Git rejects that representation when removing the
+        // worktree, so normalize Jbox's generated link first.
+        let gitfile = worktree.join(".git");
+        if fs::symlink_metadata(&gitfile).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            let link = Self::linked_worktree_git_link(&gitfile)?;
+            fs::remove_file(&gitfile)?;
+            fs::write(&gitfile, link)?;
+        }
         let mut args = vec!["worktree", "remove"];
         if force {
             args.push("--force");
@@ -202,8 +211,11 @@ impl Git {
     }
     /// Replace a linked worktree's host-facing `.git` file with a self-contained
     /// metadata copy for the guest. The original link is retained outside the
-    /// mount and restored when the session stops. This keeps the host `.git`
-    /// directory out of the microVM while allowing normal Git operations.
+    /// mount and restored when the session stops. Some checkout filters replace
+    /// Git's usual `.git` link file with a symlink to the same linked-worktree
+    /// directory, so normalize that representation before saving it. This keeps
+    /// the host `.git` directory out of the microVM while allowing normal Git
+    /// operations.
     pub fn isolate_guest_metadata(
         &self,
         repo: &Path,
@@ -214,11 +226,19 @@ impl Git {
         author: &ResolvedGitAuthor,
     ) -> Result<()> {
         let gitfile = worktree.join(".git");
-        let original = fs::read_to_string(&gitfile)
-            .with_context(|| format!("cannot read linked git file at {}", gitfile.display()))?;
+        let original = if fs::symlink_metadata(&gitfile)
+            .with_context(|| format!("cannot inspect linked git path at {}", gitfile.display()))?
+            .file_type()
+            .is_symlink()
+        {
+            Self::linked_worktree_git_link(&gitfile)?
+        } else {
+            fs::read_to_string(&gitfile)
+                .with_context(|| format!("cannot read linked git file at {}", gitfile.display()))?
+        };
         if !original.starts_with("gitdir: ") {
             bail!(
-                "expected {} to be a linked worktree git file",
+                "expected {} to be a linked worktree git file or symlink",
                 gitfile.display()
             );
         }
@@ -267,6 +287,21 @@ impl Git {
         fs::rename(&proxy, &gitfile)?;
         Self::run(worktree, &["reset", "--hard", commit])?;
         Ok(())
+    }
+
+    /// Convert a linked-worktree `.git` symlink into Git's canonical gitfile
+    /// content. The normalized link is safe to persist outside a guest mount.
+    fn linked_worktree_git_link(gitfile: &Path) -> Result<String> {
+        let gitdir = fs::canonicalize(gitfile).with_context(|| {
+            format!("cannot resolve linked git symlink at {}", gitfile.display())
+        })?;
+        if !gitdir.is_dir() {
+            bail!(
+                "expected linked git symlink {} to resolve to a directory",
+                gitfile.display()
+            );
+        }
+        Ok(format!("gitdir: {}\n", gitdir.display()))
     }
 
     /// Import the guest's latest committed snapshot while leaving its isolated
@@ -1288,6 +1323,92 @@ mod tests {
             "guest change"
         );
         assert!(Git.remove_worktree(tmp.path(), &wt, false).is_ok());
+    }
+
+    #[test]
+    fn isolates_worktree_with_symlinked_git_link() {
+        let tmp = tempdir().unwrap();
+        git(tmp.path(), &["init"]);
+        git(tmp.path(), &["config", "user.email", "test@example.com"]);
+        git(tmp.path(), &["config", "user.name", "Test"]);
+        std::fs::write(tmp.path().join("a"), "base").unwrap();
+        git(tmp.path(), &["add", "."]);
+        git(tmp.path(), &["commit", "-m", "base"]);
+        let wt = tmp.path().join("worktree");
+        let made = Git
+            .add_worktree(tmp.path(), &wt, "bright-fox-123", "repo")
+            .unwrap();
+        let gitfile = wt.join(".git");
+        let gitdir = std::fs::read_to_string(&gitfile)
+            .unwrap()
+            .strip_prefix("gitdir: ")
+            .unwrap()
+            .trim()
+            .to_owned();
+        std::fs::remove_file(&gitfile).unwrap();
+        std::os::unix::fs::symlink(gitdir, &gitfile).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&gitfile)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        let host_gitfile = tmp.path().join("host-gitfile");
+        let author = ResolvedGitAuthor {
+            name: Some("Guest".into()),
+            email: Some("guest@example.com".into()),
+        };
+        Git.isolate_guest_metadata(
+            tmp.path(),
+            &wt,
+            &made.branch,
+            &made.commit,
+            &host_gitfile,
+            &author,
+        )
+        .unwrap();
+        assert!(gitfile.is_dir());
+
+        let repo = RepoState {
+            name: "repo".into(),
+            source: tmp.path().into(),
+            worktree: wt.clone(),
+            mount: "/workspace/repo".into(),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile,
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        };
+        Git.restore_guest_metadata(&repo).unwrap();
+        assert!(gitfile.is_file());
+        assert!(
+            !std::fs::symlink_metadata(&gitfile)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::read_to_string(&gitfile)
+                .unwrap()
+                .starts_with("gitdir: ")
+        );
+        assert!(
+            Git::run(&wt, &["status", "--porcelain"])
+                .unwrap()
+                .is_empty()
+        );
+        let restored_gitdir = std::fs::read_to_string(&gitfile)
+            .unwrap()
+            .strip_prefix("gitdir: ")
+            .unwrap()
+            .trim()
+            .to_owned();
+        std::fs::remove_file(&gitfile).unwrap();
+        std::os::unix::fs::symlink(restored_gitdir, &gitfile).unwrap();
+        Git.remove_worktree(tmp.path(), &wt, false).unwrap();
+        assert!(!wt.exists());
     }
 
     #[test]
