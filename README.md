@@ -227,8 +227,10 @@ repository, then starts the selected session with its existing worktrees and ima
 creates fresh per-session SSH credentials, reuses completed session-local
 skills, and never rebuilds the image. To preserve data, resume refuses a
 retained worktree with uncommitted changes because recreating guest-only Git
-metadata requires a hard reset. Commit or stash those files in the retained
-worktree first, then resume. `jbox resume <session>` is available for a direct
+metadata requires a hard reset. In an interactive terminal, jbox lists those
+worktrees and offers to checkpoint their changes onto only their session
+branches before resuming. Declining leaves all files and branches unchanged, so
+you may instead commit or stash manually. `jbox resume <session>` is available for a direct
 selection. If Docker or Kata stops a guest outside jbox, the next jbox command
 detects the stale runtime, imports its committed guest history, marks the
 session stopped, and makes it resumable. Transient Beads coordination locks do

@@ -1164,7 +1164,8 @@ impl App {
 
     /// Resume a stopped session from its retained worktrees. The worktree
     /// branch and image are reused. A fresh session SSH key and runtime state
-    /// are created, while dirty retained files are rejected before any reset.
+    /// are created. A visible dirty worktree gets an explicit checkpoint offer
+    /// before recreating its isolated guest Git metadata.
     pub fn resume(&self, id: &str) -> Result<()> {
         let mut session = self.load_session(id)?;
         if session.state == SessionState::Running {
@@ -1182,6 +1183,7 @@ impl App {
             self.paths.ensure_credentials()?;
         }
         let author = config.git.author.resolve()?;
+        self.checkpoint_dirty_worktrees_before_resume(&session)?;
         for repo in &session.repos {
             if let Err(error) = self
                 .git
@@ -1255,6 +1257,62 @@ impl App {
             session.id, session.ssh_host, session.ssh_port
         );
         println!("Use `jbox attach {}` to reconnect.", session.id);
+        Ok(())
+    }
+
+    /// Recreating isolated guest Git metadata includes a hard reset. Never do
+    /// that over agent files. Ordinary changes can instead be checkpointed on
+    /// the retained session branches with an explicit confirmation. Validate
+    /// every candidate first, so an unresolved sibling operation cannot leave
+    /// a partial set of new commits.
+    fn checkpoint_dirty_worktrees_before_resume(&self, session: &Session) -> Result<()> {
+        let mut changed = Vec::new();
+        for repo in &session.repos {
+            if self.git.validate_session_checkpoint(repo)? {
+                changed.push(repo);
+            }
+        }
+        if changed.is_empty() {
+            return Ok(());
+        }
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!(
+                "cannot resume {}: {} retained worktree(s) have uncommitted changes; run `jbox resume {}` in an interactive terminal to checkpoint them, or commit/stash them manually",
+                session.id,
+                changed.len(),
+                session.id
+            );
+        }
+        println!(
+            "Session {} has uncommitted changes in retained worktrees:",
+            session.id
+        );
+        for repo in &changed {
+            println!("  - {} ({})", repo.name, repo.worktree.display());
+        }
+        println!(
+            "Resuming recreates guest Git metadata. Jbox can preserve these files by committing them only to their session branch."
+        );
+        print!(
+            "Checkpoint these changes, then resume session {}? [y/N]: ",
+            session.id
+        );
+        io::stdout().flush()?;
+        let mut confirmed = String::new();
+        io::stdin().read_line(&mut confirmed)?;
+        if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
+            bail!(
+                "resume cancelled. No worktree files or branches were changed; commit or stash the retained changes before retrying"
+            );
+        }
+        for repo in changed {
+            if self
+                .git
+                .checkpoint_session_changes_for_resume(repo, &session.id)?
+            {
+                println!("checkpointed retained changes for {}", repo.name);
+            }
+        }
         Ok(())
     }
 

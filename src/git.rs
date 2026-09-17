@@ -313,6 +313,23 @@ impl Git {
     }
 
     pub fn checkpoint_session_changes(&self, repo: &RepoState, session_id: &str) -> Result<bool> {
+        self.checkpoint_session_changes_for(repo, session_id, "accept")
+    }
+
+    pub fn checkpoint_session_changes_for_resume(
+        &self,
+        repo: &RepoState,
+        session_id: &str,
+    ) -> Result<bool> {
+        self.checkpoint_session_changes_for(repo, session_id, "resume")
+    }
+
+    fn checkpoint_session_changes_for(
+        &self,
+        repo: &RepoState,
+        session_id: &str,
+        operation: &str,
+    ) -> Result<bool> {
         if !self.validate_session_checkpoint(repo)? {
             return Ok(false);
         }
@@ -326,7 +343,7 @@ impl Git {
             &[
                 "commit",
                 "-m",
-                &format!("jbox: checkpoint {session_id} before accept"),
+                &format!("jbox: checkpoint {session_id} before {operation}"),
             ],
         )?;
         Ok(true)
@@ -841,6 +858,9 @@ impl Git {
                 .filter(|path| self.is_unchanged_bootstrap_file(repo, path))
                 .map(|path| path.path.clone()),
         );
+        if repo.beads_snapshot.is_some() || !repo.beads_bootstrap.is_empty() {
+            paths.push(".beads.gate.lock".to_owned());
+        }
         paths.sort();
         paths.dedup();
         paths
