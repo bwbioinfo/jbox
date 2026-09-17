@@ -12,7 +12,13 @@ const JBOX_ENTRYPOINT: &str = r#"#!/bin/sh
 set -eu
 mkdir -p /run/sshd
 if [ "${JBOX_GITHUB_CLI_CREDENTIALS:-}" = "1" ]; then
-    su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.config/gh && HOME=/home/jbox GH_CONFIG_DIR=/home/jbox/.config/gh gh auth setup-git'
+    # `gh auth setup-git` only installs a credential helper. It must never
+    # prevent SSH or Jcode from starting when GitHub CLI blocks on a broken or
+    # interactive credential store. The mounted hosts.yml remains available to
+    # `gh`, and the user receives a warning for Git HTTPS troubleshooting.
+    if ! su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.config/gh && HOME=/home/jbox GH_CONFIG_DIR=/home/jbox/.config/gh timeout 15 gh auth setup-git </dev/null'; then
+        echo "jbox: GitHub CLI credential-helper setup failed or timed out; gh authentication remains available" >&2
+    fi
 fi
 index=0
 while [ "$index" -lt "${JBOX_SKILL_COUNT:-0}" ]; do
@@ -234,6 +240,7 @@ mod tests {
         assert!(BASE_DOCKERFILE.contains("install -y --no-install-recommends gh"));
         assert!(JBOX_ENTRYPOINT.contains("JBOX_GITHUB_CLI_CREDENTIALS"));
         assert!(JBOX_ENTRYPOINT.contains("gh auth setup-git"));
+        assert!(JBOX_ENTRYPOINT.contains("timeout 15 gh auth setup-git </dev/null"));
     }
 
     #[test]

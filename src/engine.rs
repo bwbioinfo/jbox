@@ -102,6 +102,12 @@ impl Engine for DockerEngine {
             &spec.name,
             "--runtime",
             "kata",
+            // Project Dockerfiles commonly finish with `USER jbox`. The
+            // guest entrypoint must nevertheless begin as root to create
+            // runtime directories and start sshd before dropping Jcode and
+            // all interactive sessions to the unprivileged account.
+            "--user",
+            "root",
             "--cap-drop",
             "ALL",
             // The entrypoint begins as root so sshd can start, then `su` drops
