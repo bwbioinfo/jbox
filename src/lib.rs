@@ -1721,8 +1721,12 @@ done | LC_ALL=C sort -r | head -n 20
                 if self.git.remove_transient_beads_gate_lock(repo)? {
                     println!("removed transient Beads lock from {}", repo.name);
                 }
-                self.git
-                    .remove_worktree(&repo.source, &repo.worktree, force)?;
+                let force_generated_runtime = self.git.requires_safe_worktree_force(repo)?;
+                self.git.remove_worktree(
+                    &repo.source,
+                    &repo.worktree,
+                    force || force_generated_runtime,
+                )?;
             }
             self.state.remove(&session.id)?;
             let _ = std::fs::remove_dir_all(self.paths.sessions.join(&session.id));

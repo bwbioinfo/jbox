@@ -699,7 +699,16 @@ impl Git {
         Ok(())
     }
     pub fn status(&self, repo: &RepoState) -> Result<String> {
-        let status = Self::run(&repo.worktree, &["status", "--short", "--branch"])?;
+        let status = Self::run(
+            &repo.worktree,
+            &[
+                "status",
+                "--short",
+                "--branch",
+                "--ignored",
+                "--untracked-files=all",
+            ],
+        )?;
         Ok(self.without_jbox_beads_snapshot(repo, &status))
     }
     pub fn current_branch(&self, repository: &Path) -> Result<String> {
@@ -777,6 +786,27 @@ impl Git {
         Ok(self.change_state(repo)? == WorktreeChangeState::Changes)
     }
 
+    /// Git refuses to remove a worktree with even ignored files. Jbox may use
+    /// Git's `--force` only when the entire non-clean status consists of known,
+    /// guest-generated Beads runtime state. Arbitrary ignored caches remain
+    /// changes and require the user's explicit `jbox clean --force` decision.
+    pub fn requires_safe_worktree_force(&self, repo: &RepoState) -> Result<bool> {
+        let status = Self::run(
+            &repo.worktree,
+            &[
+                "status",
+                "--porcelain",
+                "--ignored",
+                "--untracked-files=all",
+            ],
+        )?;
+        Ok(!status.trim().is_empty()
+            && self
+                .without_jbox_beads_snapshot(repo, &status)
+                .trim()
+                .is_empty())
+    }
+
     /// Capture only the small, known set of project files that `bd init`
     /// rewrites. This runs on the host after the guest has become ready and
     /// before jbox returns control to a client or agent.
@@ -807,7 +837,15 @@ impl Git {
     /// An unchanged snapshot is jbox-created task context. It must not block
     /// cleanup or resume, while every agent edit remains ordinary user work.
     fn has_uncommitted_changes(&self, repo: &RepoState) -> Result<bool> {
-        let status = Self::run(&repo.worktree, &["status", "--porcelain"])?;
+        let status = Self::run(
+            &repo.worktree,
+            &[
+                "status",
+                "--porcelain",
+                "--ignored",
+                "--untracked-files=all",
+            ],
+        )?;
         Ok(!self
             .without_jbox_beads_snapshot(repo, &status)
             .trim()
@@ -824,7 +862,8 @@ impl Git {
             .filter(|line| {
                 !((snapshot_is_unchanged && line.ends_with(".beads/issues.jsonl"))
                     || self.is_unchanged_bootstrap_line(repo, line)
-                    || self.is_transient_beads_gate_lock(repo, line))
+                    || self.is_transient_beads_gate_lock(repo, line)
+                    || self.is_safe_beads_runtime_line(repo, line))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -874,6 +913,38 @@ impl Git {
         fs::symlink_metadata(path).is_ok_and(|metadata| {
             !metadata.file_type().is_symlink() && metadata.is_file() && metadata.len() == 0
         })
+    }
+
+    /// Beads' embedded-Dolt data and coordination files are guest-local
+    /// derivations of the portable issues JSONL. Keep the allowlist exact: an
+    /// arbitrary ignored directory must remain visible as work that blocks a
+    /// non-force cleanup.
+    fn is_safe_beads_runtime_line(&self, repo: &RepoState, line: &str) -> bool {
+        if repo.beads_snapshot.is_none() && repo.beads_bootstrap.is_empty() {
+            return false;
+        }
+        let Some(path) = line.strip_prefix("!! ") else {
+            return false;
+        };
+        let (path, directory) = match path {
+            ".beads/.local_version"
+            | ".beads/dolt.gate.lock"
+            | ".beads/embeddeddolt.gate.lock"
+            | ".beads/last-touched" => (path, false),
+            path if path.starts_with(".beads/backup/") => (".beads/backup", true),
+            path if path.starts_with(".beads/dolt/") => (".beads/dolt", true),
+            path if path.starts_with(".beads/embeddeddolt/") => (".beads/embeddeddolt", true),
+            _ => return false,
+        };
+        let Ok(metadata) = fs::symlink_metadata(repo.worktree.join(path)) else {
+            return false;
+        };
+        !metadata.file_type().is_symlink()
+            && if directory {
+                metadata.is_dir()
+            } else {
+                metadata.is_file()
+            }
     }
 
     fn is_unchanged_bootstrap_file(&self, repo: &RepoState, path: &BeadsBaselineFile) -> bool {
@@ -1088,6 +1159,8 @@ mod tests {
         let beads_bootstrap = Git.capture_beads_bootstrap(&worktree);
         assert_eq!(beads_bootstrap.len(), 5);
         fs::write(worktree.join(".beads.gate.lock"), "").unwrap();
+        fs::create_dir_all(worktree.join(".beads/embeddeddolt")).unwrap();
+        fs::write(worktree.join(".beads/embeddeddolt/runtime"), "derived").unwrap();
         let mut repo = RepoState {
             name: "repo".into(),
             source: source.path().into(),
@@ -1106,7 +1179,9 @@ mod tests {
         assert!(!Git.status(&repo).unwrap().contains("config.yaml"));
         assert!(!Git.status(&repo).unwrap().contains("metadata.json"));
         assert!(!Git.status(&repo).unwrap().contains(".beads.gate.lock"));
+        assert!(!Git.status(&repo).unwrap().contains("embeddeddolt"));
         assert!(!Git.diff_stat(&repo).unwrap().contains(".beads/"));
+        assert!(Git.requires_safe_worktree_force(&repo).unwrap());
         assert!(Git.remove_transient_beads_gate_lock(&repo).unwrap());
         assert!(!worktree.join(".beads.gate.lock").exists());
 
@@ -1118,8 +1193,23 @@ mod tests {
             WorktreeChangeState::Changes
         );
         assert!(!Git.remove_transient_beads_gate_lock(&repo).unwrap());
+        assert!(!Git.requires_safe_worktree_force(&repo).unwrap());
         assert!(worktree.join(".beads.gate.lock").is_file());
         fs::remove_file(worktree.join(".beads.gate.lock")).unwrap();
+        assert_eq!(Git.change_state(&repo).unwrap(), WorktreeChangeState::Clean);
+
+        // An ordinary ignored cache is not Jbox or Beads runtime state. It
+        // remains visible and prevents a non-force cleanup.
+        fs::write(worktree.join(".git/info/exclude"), "private-cache/\n").unwrap();
+        fs::create_dir(worktree.join("private-cache")).unwrap();
+        fs::write(worktree.join("private-cache/value"), "user cache").unwrap();
+        assert_eq!(
+            Git.change_state(&repo).unwrap(),
+            WorktreeChangeState::Changes
+        );
+        assert!(Git.status(&repo).unwrap().contains("private-cache"));
+        assert!(!Git.requires_safe_worktree_force(&repo).unwrap());
+        fs::remove_dir_all(worktree.join("private-cache")).unwrap();
         assert_eq!(Git.change_state(&repo).unwrap(), WorktreeChangeState::Clean);
         Git.restore_guest_metadata(&repo).unwrap();
         Git.prepare_retained_worktree_for_guest(&repo, &author)
