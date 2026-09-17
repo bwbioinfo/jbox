@@ -248,6 +248,26 @@ impl JboxPaths {
     pub fn session_ssh_dir(&self, id: &str) -> PathBuf {
         self.sessions.join(id).join("ssh")
     }
+
+    /// Guest-provided state is treated as untrusted even though this directory
+    /// is session-scoped. Restrict IDs before forwarding one to the local Jcode
+    /// command line on a later attach.
+    pub fn last_jcode_session_id(&self, id: &str) -> Option<String> {
+        let file = self
+            .sessions
+            .join(id)
+            .join("ssh/runtime/jcode/last-session-id");
+        let value = fs::read_to_string(file).ok()?;
+        let value = value.trim();
+        (1..=256)
+            .contains(&value.len())
+            .then_some(value)
+            .filter(|id| {
+                id.bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            })
+            .map(str::to_owned)
+    }
     pub fn create_session_ssh(&self, dir: &Path) -> Result<()> {
         fs::create_dir_all(dir)?;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;

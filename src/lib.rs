@@ -536,9 +536,19 @@ impl App {
         std::fs::create_dir_all(&runtime)?;
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))?;
         mounts.push((
-            runtime,
+            runtime.clone(),
             PathBuf::from("/home/jbox/.local/share/jcode"),
             true,
+        ));
+        let jcode_session_hook = runtime.join("record-session");
+        std::fs::write(
+            &jcode_session_hook,
+            "#!/bin/sh\nset -eu\numask 077\ncase \"${JCODE_HOOK_SESSION_ID:-}\" in\n  ''|*[!A-Za-z0-9_-]*) exit 0 ;;\nesac\nout=/home/jbox/.local/share/jcode/last-session-id\ntmp=\"${out}.tmp.$$\"\nprintf '%s\\n' \"$JCODE_HOOK_SESSION_ID\" > \"$tmp\"\nmv \"$tmp\" \"$out\"\n",
+        )?;
+        std::fs::set_permissions(&jcode_session_hook, std::fs::Permissions::from_mode(0o700))?;
+        environment.push((
+            "JCODE_HOOK_SESSION_START".into(),
+            "/home/jbox/.local/share/jcode/record-session".into(),
         ));
         if let Some(instructions) = config.jcode.agent.instructions.as_deref() {
             let agent_instructions = ssh
@@ -653,7 +663,11 @@ impl App {
         self.touch(session)?;
         render_jbox_session_chrome(&session.id, mount)?;
         let ssh_socket = self.paths.session_ssh_dir(&session.id).join("agent.sock");
-        let args = jcode_attach_args(&session.ssh_host, mount);
+        let last_session = self.paths.last_jcode_session_id(&session.id);
+        if let Some(session_id) = &last_session {
+            println!("Resuming Jcode conversation {session_id}.");
+        }
+        let args = jcode_attach_args(&session.ssh_host, mount, last_session.as_deref());
         let status = Command::new("jcode")
             .args(args)
             .env("SSH_AUTH_SOCK", ssh_socket)
@@ -1944,8 +1958,12 @@ fn valid_apt_package(package: &str) -> bool {
         })
 }
 
-fn jcode_attach_args(ssh_host: &str, remote_working_dir: &str) -> Vec<String> {
-    vec![
+fn jcode_attach_args(
+    ssh_host: &str,
+    remote_working_dir: &str,
+    resume_session: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
         "--ssh".into(),
         format!("jbox@{ssh_host}"),
         "--ssh-binary".into(),
@@ -1954,7 +1972,12 @@ fn jcode_attach_args(ssh_host: &str, remote_working_dir: &str) -> Vec<String> {
         JCODE_SOCKET.into(),
         "--remote-working-dir".into(),
         remote_working_dir.into(),
-    ]
+    ];
+    if let Some(session) = resume_session {
+        args.push("--resume".into());
+        args.push(session.into());
+    }
+    args
 }
 
 /// Make an isolated guest unmistakable before its Jcode TUI takes over the
@@ -2288,7 +2311,7 @@ mod tests {
     #[test]
     fn attach_arguments_do_not_override_remote_server_configuration() {
         assert_eq!(
-            jcode_attach_args("127.0.0.2", "/workspace/project"),
+            jcode_attach_args("127.0.0.2", "/workspace/project", None),
             vec![
                 "--ssh",
                 "jbox@127.0.0.2",
@@ -2304,10 +2327,17 @@ mod tests {
 
     #[test]
     fn attach_arguments_never_supply_local_selection_overrides() {
-        let args = jcode_attach_args("127.0.0.2", "/workspace/project");
+        let args = jcode_attach_args("127.0.0.2", "/workspace/project", None);
 
         assert!(!args.iter().any(|arg| arg == "--provider"));
         assert!(!args.iter().any(|arg| arg == "--model"));
+    }
+
+    #[test]
+    fn attach_arguments_resume_a_recorded_remote_session() {
+        let args = jcode_attach_args("127.0.0.2", "/workspace/project", Some("session_fox_123"));
+
+        assert!(args.ends_with(&["--resume".into(), "session_fox_123".into()]));
     }
 
     #[test]
