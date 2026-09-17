@@ -259,6 +259,15 @@ impl JboxPaths {
         Self::valid_jcode_session_id(value).then_some(value.to_owned())
     }
 
+    /// A current Jbox session has the session-start hook installed before its
+    /// first attach. Its missing `last-session-id` therefore means "start a
+    /// new conversation", not "recover a legacy conversation".
+    pub fn has_jcode_session_hook(&self, id: &str) -> bool {
+        let file = self.sessions.join(id).join("runtime/jcode/record-session");
+        fs::symlink_metadata(file)
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    }
+
     /// Persist a host-discovered legacy session ID in the same narrowly scoped
     /// runtime directory used by the guest hook. The write is atomic so a later
     /// attach never consumes a partial marker.
@@ -616,5 +625,14 @@ mod tests {
                 .save_last_jcode_session_id("calm-otter", "session;unsafe")
                 .is_err()
         );
+        assert!(!paths.has_jcode_session_hook("calm-otter"));
+        let hook = paths
+            .sessions
+            .join("calm-otter/runtime/jcode/record-session");
+        fs::write(&hook, "#!/bin/sh\n").unwrap();
+        assert!(paths.has_jcode_session_hook("calm-otter"));
+        fs::remove_file(&hook).unwrap();
+        std::os::unix::fs::symlink("elsewhere", &hook).unwrap();
+        assert!(!paths.has_jcode_session_hook("calm-otter"));
     }
 }

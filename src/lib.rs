@@ -665,6 +665,11 @@ impl App {
         let ssh_socket = self.paths.session_ssh_dir(&session.id).join("agent.sock");
         let last_session = match self.paths.last_jcode_session_id(&session.id) {
             Some(session_id) => Some(session_id),
+            // The hook is created while building every current session. A
+            // missing marker at first attach is expected, and must start a
+            // new conversation rather than scanning shared credential state
+            // for unrelated historical sessions.
+            None if self.paths.has_jcode_session_hook(&session.id) => None,
             None => self.recover_legacy_jcode_session_id(session)?,
         };
         if let Some(session_id) = &last_session {
