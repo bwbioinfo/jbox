@@ -163,7 +163,7 @@ jbox shell bright-otter-a1b2c3
 # or presents a picker when multiple retained worktrees match.
 jbox status
 jbox diff
-jbox resume
+jbox resume # restarts a stopped guest, or attaches when its selected guest is already running
 jbox status bright-otter-a1b2c3
 jbox diff bright-otter-a1b2c3
 jbox accept bright-otter-a1b2c3 --into main

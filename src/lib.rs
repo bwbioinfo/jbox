@@ -1285,14 +1285,18 @@ impl App {
         self.status_repository_worktree(&session, &repo, diff)
     }
 
-    /// Resume a stopped session from its retained worktrees. The worktree
-    /// branch and image are reused. A fresh session SSH key and runtime state
-    /// are created. A visible dirty worktree gets an explicit checkpoint offer
-    /// before recreating its isolated guest Git metadata.
+    /// Resume a stopped session from its retained worktrees. If the retained
+    /// session is already live, reconnect to its Jcode conversation instead.
+    /// The worktree branch and image are reused. A fresh session SSH key and
+    /// runtime state are created only for a stopped guest. A visible dirty
+    /// worktree gets an explicit checkpoint offer before recreating its
+    /// isolated guest Git metadata.
     pub fn resume(&self, id: &str) -> Result<()> {
         let mut session = self.load_session(id)?;
         if session.state == SessionState::Running {
-            bail!("session {id} is already running; use `jbox attach {id}`");
+            let mount = session.repos[0].mount.clone();
+            println!("jbox session {id} is already running. Attaching to it.");
+            return self.attach_session(&mut session, &mount);
         }
         if self.engine.is_running(&session.container_name)? {
             bail!(
@@ -1439,13 +1443,22 @@ impl App {
         Ok(())
     }
 
-    /// Select a stopped retained session that contains the current repository.
+    /// Select a retained session that contains the current repository. A
+    /// stopped guest is restarted, while a running one is attached directly.
+    /// This makes `jbox resume` useful as an idempotent reconnect command.
     pub fn resume_from_repository(&self, input: &Path) -> Result<()> {
-        let Some((session, _)) =
-            self.select_repository_worktree(input, "resume", Some(SessionState::Stopped))?
+        let Some((mut session, repo)) =
+            self.select_repository_worktree(input, "resume or attach to", None)?
         else {
             return Ok(());
         };
+        if session.state == SessionState::Running {
+            println!(
+                "jbox session {} is already running. Attaching to {}.",
+                session.id, repo.mount
+            );
+            return self.attach_session(&mut session, &repo.mount);
+        }
         print!("Resume session {}? [y/N]: ", session.id);
         io::stdout().flush()?;
         let mut confirmed = String::new();

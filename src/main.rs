@@ -97,7 +97,7 @@ enum Command {
         /// Session whose worktree to open. Omit it to select from the current repository.
         session: Option<String>,
     },
-    /// Restart a retained stopped session. Omit the session to select one for the current repository.
+    /// Restart a retained stopped session, or attach when it is already running. Omit the session to select one for the current repository.
     Resume {
         session: Option<String>,
     },
