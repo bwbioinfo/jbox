@@ -235,6 +235,13 @@ selection. If Docker or Kata stops a guest outside jbox, the next jbox command
 detects the stale runtime, imports its committed guest history, marks the
 session stopped, and makes it resumable. Transient Beads coordination locks do
 not count as user changes.
+
+If a retained worktree has a paused rebase or merge, jbox never checkpoints
+conflict markers. From the affected host repository run `jbox resolve` and
+select its worktree. This opens a **local host shell** in the generated
+worktree, without starting a guest or mounting another path. Resolve and stage
+the files, run `git rebase --continue` or `git merge --continue`, exit, then
+run `jbox resume`.
 restart from any directory.
 
 When a session branch has been fast-forwarded or otherwise merged into another

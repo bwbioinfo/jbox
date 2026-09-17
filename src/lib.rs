@@ -1151,6 +1151,58 @@ impl App {
         Ok(())
     }
 
+    /// Open a host-local shell in the matching retained worktree. This is an
+    /// intentional escape hatch for resolving a paused rebase or merge before
+    /// a guest can safely be resumed. It never starts a container or changes
+    /// the worktree itself.
+    pub fn resolve(&self, id: &str, input: &Path) -> Result<()> {
+        let session = self.load_session(id)?;
+        let repository = Config::repository_root(input)?;
+        let repo = session
+            .repos
+            .iter()
+            .find(|repo| repo.source == repository)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "session {id} has no worktree for {}; run `jbox resolve` from a participating repository",
+                    repository.display()
+                )
+            })?;
+        self.resolve_worktree(&session, repo)
+    }
+
+    pub fn resolve_from_repository(&self, input: &Path) -> Result<()> {
+        let Some((session, repo)) = self.select_repository_worktree(input, "resolve", None)? else {
+            return Ok(());
+        };
+        self.resolve_worktree(&session, &repo)
+    }
+
+    fn resolve_worktree(&self, session: &Session, repo: &RepoState) -> Result<()> {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!("`jbox resolve` needs an interactive terminal");
+        }
+        println!(
+            "Opening a local host shell in retained worktree {} for session {}.",
+            repo.worktree.display(),
+            session.id
+        );
+        println!(
+            "No guest is started and jbox changes no files. Resolve the Git operation, run `git rebase --continue` or `git merge --continue`, then exit and run `jbox resume`."
+        );
+        let status = Command::new("bash")
+            .args(["--noprofile", "--norc"])
+            .current_dir(&repo.worktree)
+            .env("JBOX_RETAINED_SESSION", &session.id)
+            .env("JBOX_RETAINED_WORKTREE", &repo.worktree)
+            .status()
+            .context("could not open a local shell in the retained worktree")?;
+        if !status.success() {
+            bail!("retained worktree shell exited with {status}");
+        }
+        Ok(())
+    }
+
     /// Interactively inspect one worktree belonging to the repository beneath
     /// the current directory. This keeps multi-repository sessions focused on
     /// the repository the user is presently working in.

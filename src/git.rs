@@ -284,7 +284,7 @@ impl Git {
         let conflicts = Self::run(&repo.worktree, &["diff", "--name-only", "--diff-filter=U"])?;
         if !conflicts.is_empty() {
             bail!(
-                "cannot checkpoint {}: generated worktree {} has unresolved conflicts:\n{}\nResolve them there, then run `git add <paths>` and complete or abort the Git operation before accepting",
+                "cannot checkpoint {}: generated worktree {} has unresolved conflicts:\n{}\nResolve them there, then run `git add <paths>` and complete or abort the Git operation before accepting or resuming. From the host repository, `jbox resolve` opens a local shell in the retained worktree.",
                 repo.name,
                 repo.worktree.display(),
                 conflicts

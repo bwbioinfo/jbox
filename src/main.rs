@@ -92,6 +92,11 @@ enum Command {
         #[arg(long)]
         onto: Option<String>,
     },
+    /// Open a local shell in a retained worktree to resolve a Git operation before resuming.
+    Resolve {
+        /// Session whose worktree to open. Omit it to select from the current repository.
+        session: Option<String>,
+    },
     /// Restart a retained stopped session. Omit the session to select one for the current repository.
     Resume {
         session: Option<String>,
@@ -212,6 +217,10 @@ fn main() -> Result<()> {
         Command::Rebase { onto } => {
             app.rebase_from_repository(&std::env::current_dir()?, onto.as_deref())?
         }
+        Command::Resolve { session } => match session {
+            Some(session) => app.resolve(&session, &std::env::current_dir()?)?,
+            None => app.resolve_from_repository(&std::env::current_dir()?)?,
+        },
         Command::Resume { session } => match session {
             Some(session) => app.resume(&session)?,
             None => app.resume_from_repository(&std::env::current_dir()?)?,
@@ -254,6 +263,7 @@ fn normalized_args() -> Vec<OsString> {
         "stop",
         "accept",
         "rebase",
+        "resolve",
         "resume",
         "clean",
         "credentials",
