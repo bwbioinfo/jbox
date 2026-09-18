@@ -59,6 +59,14 @@ enum Command {
         /// Session to stop. Omit it to select a workspace for the current repository.
         session: Option<String>,
     },
+    /// Temporarily apply a session's uncommitted changes to the current host repository, or undo that overlay.
+    Overlay {
+        /// Session that owns the generated worktree.
+        session: String,
+        /// Remove the previously applied overlay without touching unrelated test output.
+        #[arg(long)]
+        undo: bool,
+    },
     /// Fast-forward a host branch to a session's committed snapshot without stopping it.
     Accept {
         /// Session to accept. Omit it to select a session for the current repository.
@@ -189,6 +197,9 @@ fn main() -> Result<()> {
             Some(session) => app.stop(&session)?,
             None => app.stop_from_repository(&std::env::current_dir()?)?,
         },
+        Command::Overlay { session, undo } => {
+            app.overlay(&session, &std::env::current_dir()?, undo)?
+        }
         Command::Accept {
             session,
             into,
@@ -278,6 +289,7 @@ fn normalized_args() -> Vec<OsString> {
         "status",
         "diff",
         "stop",
+        "overlay",
         "accept",
         "rebase",
         "resolve",

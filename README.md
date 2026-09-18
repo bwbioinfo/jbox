@@ -367,6 +367,16 @@ Each repository is resolved and canonicalized before `git worktree add -b jbox/<
 
 To deliberately bring current work in, use `jbox run --include-host-changes`. Jbox builds a private Git patch using a temporary index, then applies it only to its generated worktree. It includes staged, unstaged, and nonignored untracked files without writing to the host checkout. The guest sees the combined snapshot as ordinary **unstaged** work, so its original staged/unstaged split is normalized. Ignored files and changes inside nested submodules are not transferred. Because the host remains dirty, use `jbox accept --stash-host` when accepting a guest checkpoint that touches the same paths, or commit/stash the host work yourself first. Use an explicit `[[mounts]]` entry for large generated or ignored artifacts that should be available in a guest.
 
+To test **uncommitted guest changes** with host-native tooling, run this from the participating original checkout:
+
+```bash
+jbox overlay <session>
+# run native tests against the temporary host overlay
+jbox overlay <session> --undo
+```
+
+`overlay` refuses a dirty or advanced host checkout, saves a private reversible patch under the retained session, and applies the guest changes as unstaged host files. `--undo` reverses only that patch, preserving unrelated test output. If the same overlaid files were edited while testing, undo refuses rather than overwrite them. Resolve those edits first, then retry. Jbox will not clean a session while its overlay remains active.
+
 With no `image.dockerfile`, jbox copies the locally installed `jcode` launcher and distribution binary into a cached local Debian-based image. This bakes jcode, Git, certificates, SSH client/server, Bash, and the jbox guest entrypoint into the image. The image tag includes the local UID/GID so the guest workspace is writable without mounting host account state. For a project Dockerfile, jbox resolves that host-specific base and supplies it as `JBOX_BASE_IMAGE` automatically:
 
 ```dockerfile

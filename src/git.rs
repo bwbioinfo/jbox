@@ -78,6 +78,25 @@ impl Git {
     /// deletions. The guest receives the result as unstaged changes, so a
     /// source's staged/unstaged split is intentionally normalized.
     pub fn snapshot_host_changes(&self, source: &Path, destination: &Path) -> Result<bool> {
+        self.snapshot_changes(source, destination, &[])
+    }
+
+    /// Snapshot real changes from a generated worktree for a temporary host
+    /// overlay. Jbox-created Beads bootstrap state is deliberately excluded.
+    pub fn snapshot_session_changes(&self, repo: &RepoState, destination: &Path) -> Result<bool> {
+        self.snapshot_changes(
+            &repo.worktree,
+            destination,
+            &self.ignored_jbox_beads_paths(repo),
+        )
+    }
+
+    fn snapshot_changes(
+        &self,
+        source: &Path,
+        destination: &Path,
+        excluded_paths: &[String],
+    ) -> Result<bool> {
         self.reject_conflicted_source(source)?;
         let parent = destination
             .parent()
@@ -101,6 +120,11 @@ impl Git {
         let snapshot = (|| {
             Self::run_with_index(source, &temporary_index, &["read-tree", "HEAD"])?;
             Self::run_with_index(source, &temporary_index, &["add", "--all"])?;
+            if !excluded_paths.is_empty() {
+                let mut reset = vec!["reset", "--"];
+                reset.extend(excluded_paths.iter().map(String::as_str));
+                Self::run_with_index(source, &temporary_index, &reset)?;
+            }
             Self::run_with_index(
                 source,
                 &temporary_index,
@@ -137,12 +161,30 @@ impl Git {
     /// metadata isolation has reset the generated worktree to its base commit.
     /// The patch is never applied to the source repository.
     pub fn apply_host_changes(&self, worktree: &Path, snapshot: &Path) -> Result<()> {
+        self.apply_patch(worktree, snapshot, false)?;
+        fs::remove_file(snapshot).with_context(|| {
+            format!(
+                "applied host-change snapshot but could not remove private copy {}",
+                snapshot.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Apply a stored binary patch. Reverse application is safe for a host
+    /// overlay because Git refuses to overwrite a path edited after overlay.
+    pub fn apply_patch(&self, worktree: &Path, snapshot: &Path, reverse: bool) -> Result<()> {
         let patch = fs::read(snapshot)
             .with_context(|| format!("cannot read host-change snapshot {}", snapshot.display()))?;
+        let mut args = vec!["apply", "--binary", "--whitespace=nowarn"];
+        if reverse {
+            args.push("--reverse");
+        }
+        args.push("-");
         let mut child = Command::new("git")
             .arg("-C")
             .arg(worktree)
-            .args(["apply", "--binary", "--whitespace=nowarn", "-"])
+            .args(args)
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -162,13 +204,11 @@ impl Git {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        fs::remove_file(snapshot).with_context(|| {
-            format!(
-                "applied host-change snapshot but could not remove private copy {}",
-                snapshot.display()
-            )
-        })?;
         Ok(())
+    }
+
+    pub fn head(&self, repo: &Path) -> Result<String> {
+        Self::run(repo, &["rev-parse", "HEAD"])
     }
 
     fn reject_conflicted_source(&self, source: &Path) -> Result<()> {
@@ -1340,6 +1380,62 @@ mod tests {
         assert!(error.to_string().contains("unresolved conflicts"));
         assert!(!scratch.path().join("host.patch").exists());
         git(source.path(), &["merge", "--abort"]);
+    }
+
+    #[test]
+    fn reverses_guest_overlay_without_deleting_unrelated_host_test_output() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("source");
+        let guest = root.path().join("guest");
+        let scratch = tempdir().unwrap();
+        fs::create_dir(&source).unwrap();
+        git(&source, &["init"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Test"]);
+        fs::write(source.join("tracked"), "base\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "base"]);
+        let made = Git
+            .add_worktree(&source, &guest, "bright-fox-123", "repo")
+            .unwrap();
+        fs::write(guest.join("tracked"), "guest edit\n").unwrap();
+        fs::write(guest.join("guest-only"), "guest file\n").unwrap();
+        let repo = RepoState {
+            name: "repo".into(),
+            source: source.clone(),
+            worktree: guest.clone(),
+            mount: "/workspace/repo".into(),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile: scratch.path().join("host-gitfile"),
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        };
+        let patch = scratch.path().join("overlay.patch");
+        assert!(Git.snapshot_session_changes(&repo, &patch).unwrap());
+        Git.apply_patch(&source, &patch, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(source.join("tracked")).unwrap(),
+            "guest edit\n"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("guest-only")).unwrap(),
+            "guest file\n"
+        );
+
+        fs::write(source.join("native-test-output"), "keep this\n").unwrap();
+        Git.apply_patch(&source, &patch, true).unwrap();
+        assert_eq!(
+            fs::read_to_string(source.join("tracked")).unwrap(),
+            "base\n"
+        );
+        assert!(!source.join("guest-only").exists());
+        assert_eq!(
+            fs::read_to_string(source.join("native-test-output")).unwrap(),
+            "keep this\n"
+        );
+        fs::remove_file(source.join("native-test-output")).unwrap();
+        Git.remove_worktree(&source, &guest, true).unwrap();
     }
 
     #[test]

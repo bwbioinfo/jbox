@@ -958,6 +958,102 @@ done | LC_ALL=C sort -r | head -n 20
         self.stop(&session.id)
     }
 
+    /// Overlay one participating guest worktree's uncommitted changes on the
+    /// matching original checkout for native testing. The patch remains
+    /// private to the retained session until `overlay --undo` reverses it.
+    pub fn overlay(&self, id: &str, input: &Path, undo: bool) -> Result<()> {
+        let session = self.load_session(id)?;
+        let source = Config::repository_root(input)?;
+        let repo = session
+            .repos
+            .iter()
+            .find(|repo| repo.source == source)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "session {id} has no worktree for {}; run `jbox overlay` from a participating host repository",
+                    source.display()
+                )
+            })?;
+        let patch = self
+            .paths
+            .sessions
+            .join(id)
+            .join("runtime/host-overlays")
+            .join(format!("{}.patch", repo.name));
+
+        let host_head = self.git.head(&repo.source)?;
+        if host_head != repo.base_commit {
+            bail!(
+                "cannot {} overlay for {}: host {} is at {}, but session {} started at {}. Check out the original base before overlaying or undoing so Jbox cannot apply a patch to different history",
+                if undo { "undo" } else { "apply" },
+                repo.name,
+                repo.source.display(),
+                host_head,
+                id,
+                repo.base_commit
+            );
+        }
+        if undo {
+            if !patch.is_file() {
+                bail!(
+                    "session {id} has no active host overlay for {}; run `jbox overlay {id}` first",
+                    repo.name
+                );
+            }
+            self.git.apply_patch(&repo.source, &patch, true).with_context(|| {
+                format!(
+                    "cannot safely undo host overlay for {}. Host files touched by the overlay changed after it was applied; keep the patch at {} and inspect `git diff` before retrying",
+                    repo.name,
+                    patch.display()
+                )
+            })?;
+            std::fs::remove_file(&patch)?;
+            println!(
+                "removed session {} overlay from host repository {}",
+                id,
+                repo.source.display()
+            );
+            return Ok(());
+        }
+
+        if patch.exists() {
+            bail!(
+                "session {id} already has an active host overlay for {}; run `jbox overlay {id} --undo` before applying it again",
+                repo.name
+            );
+        }
+        if !self.git.host_is_clean(repo)? {
+            bail!(
+                "cannot apply session {} overlay: host repository {} has uncommitted changes. Commit, stash, or restore them first so `jbox overlay {} --undo` has an unambiguous recovery path",
+                id,
+                repo.source.display(),
+                id
+            );
+        }
+        if !self.git.snapshot_session_changes(repo, &patch)? {
+            bail!(
+                "session {id} has no uncommitted changes in {}; use `jbox accept --checkpoint` for committed guest history",
+                repo.name
+            );
+        }
+        if let Err(error) = self.git.apply_patch(&repo.source, &patch, false) {
+            let _ = std::fs::remove_file(&patch);
+            return Err(error).with_context(|| {
+                format!(
+                    "could not apply session {id} overlay to host repository {}",
+                    repo.source.display()
+                )
+            });
+        }
+        println!(
+            "applied uncommitted changes from session {} to host {}. Run native tests now, then `jbox overlay {} --undo` to remove only this overlay.",
+            id,
+            repo.source.display(),
+            id
+        );
+        Ok(())
+    }
+
     /// Accept the latest committed snapshot from every repository in a session
     /// into the explicitly selected host branch. Unlike `stop`, this keeps a
     /// running guest and its isolated Git metadata intact for further work.
@@ -1759,6 +1855,17 @@ done | LC_ALL=C sort -r | head -n 20
             None => self.list_sessions()?,
         };
         for mut session in targets {
+            if session
+                .repos
+                .iter()
+                .any(|repo| self.host_overlay_path(&session.id, repo).is_file())
+            {
+                bail!(
+                    "cannot clean {} while it has an active host overlay. Run `jbox overlay {} --undo` from each overlaid host repository first",
+                    session.id,
+                    session.id
+                );
+            }
             let changed = session.repos.iter().any(|r| {
                 self.git
                     .has_uncommitted_or_unmerged_changes(r)
@@ -1900,6 +2007,14 @@ done | LC_ALL=C sort -r | head -n 20
                 .git
                 .remove_worktree(&repo.source, &repo.worktree, false);
         }
+    }
+
+    fn host_overlay_path(&self, session_id: &str, repo: &RepoState) -> PathBuf {
+        self.paths
+            .sessions
+            .join(session_id)
+            .join("runtime/host-overlays")
+            .join(format!("{}.patch", repo.name))
     }
 
     fn restore_retained_metadata(&self, repos: &[RepoState]) {
