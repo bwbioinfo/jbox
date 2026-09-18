@@ -252,7 +252,10 @@ impl App {
         Ok(())
     }
 
-    pub fn create(&self, input: &Path, no_attach: bool) -> Result<String> {
+    /// Create a session from `HEAD`, optionally layering a session-local copy
+    /// of the host's visible working tree on top. The source checkout is never
+    /// changed by either path.
+    pub fn create(&self, input: &Path, include_host_changes: bool) -> Result<String> {
         let (config, primary) = Config::load(input)?;
         let git_author = config.git.author.resolve()?;
         if git_author.name.is_none() || git_author.email.is_none() {
@@ -280,8 +283,35 @@ impl App {
         let worktrees = session_dir.join("worktrees");
         std::fs::create_dir_all(&worktrees)?;
 
+        // Materialize every source snapshot before constructing guest
+        // worktrees. This is deliberately an opt-in operation: normal Jbox
+        // sessions retain their reproducible HEAD-only behavior.
+        let snapshots = if include_host_changes {
+            let snapshot_dir = session_dir.join("runtime/host-change-snapshots");
+            let mut snapshots = Vec::with_capacity(resolved.len());
+            for repo in &resolved {
+                let snapshot = snapshot_dir.join(format!("{}.patch", repo.name));
+                match self.git.snapshot_host_changes(&repo.source, &snapshot) {
+                    Ok(true) => snapshots.push(Some(snapshot)),
+                    Ok(false) => snapshots.push(None),
+                    Err(error) => {
+                        let _ = std::fs::remove_dir_all(&session_dir);
+                        return Err(error).with_context(|| {
+                            format!(
+                                "could not snapshot uncommitted host changes for {}",
+                                repo.source.display()
+                            )
+                        });
+                    }
+                }
+            }
+            snapshots
+        } else {
+            vec![None; resolved.len()]
+        };
+
         let mut repos: Vec<RepoState> = Vec::with_capacity(resolved.len());
-        for repo in &resolved {
+        for (repo, snapshot) in resolved.iter().zip(snapshots.iter()) {
             let worktree = worktrees.join(&repo.name);
             let created = match self
                 .git
@@ -319,6 +349,37 @@ impl App {
                 self.cleanup_worktrees(&repos);
                 let _ = std::fs::remove_dir_all(&session_dir);
                 return Err(error).context("could not prepare isolated guest Git metadata");
+            }
+            if let Some(snapshot) = snapshot
+                && let Err(error) = self.git.apply_host_changes(&worktree, snapshot)
+            {
+                let provisional = RepoState {
+                    name: repo.name.clone(),
+                    source: repo.source.clone(),
+                    worktree: worktree.clone(),
+                    mount: repo.mount.clone(),
+                    branch: created.branch.clone(),
+                    base_commit: created.commit.clone(),
+                    host_gitfile: host_gitfile.clone(),
+                    beads_snapshot: None,
+                    beads_bootstrap: Vec::new(),
+                };
+                let _ = self.git.restore_guest_metadata(&provisional);
+                let _ = self.git.remove_worktree(&repo.source, &worktree, false);
+                self.cleanup_worktrees(&repos);
+                let _ = std::fs::remove_dir_all(&session_dir);
+                return Err(error).with_context(|| {
+                    format!(
+                        "could not apply the host-change snapshot to generated worktree {}",
+                        worktree.display()
+                    )
+                });
+            }
+            if snapshot.is_some() {
+                println!(
+                    "{}: included uncommitted host changes in sandbox",
+                    repo.name
+                );
             }
             // `isolate_guest_metadata` hard-resets the generated worktree to
             // its session base. Snapshot Beads *after* that reset so a current
@@ -444,9 +505,6 @@ impl App {
         };
         self.state.save(&session)?;
         println!("jbox session {session_id} is running on {ssh_host}:{port}");
-        if !no_attach {
-            self.attach(&session_id)?;
-        }
         Ok(session_id)
     }
 

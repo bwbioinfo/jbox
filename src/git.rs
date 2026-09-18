@@ -9,7 +9,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub struct Git;
 const BEADS_EXPORT_LIMIT: u64 = 8 * 1024 * 1024;
@@ -69,6 +69,137 @@ impl Git {
         Self::run(worktree, &["reset", "--hard", &commit])?;
         let _ = Self::run(worktree, &["submodule", "update", "--init", "--recursive"]);
         Ok(WorktreeCreated { branch, commit })
+    }
+
+    /// Create a session-private Git patch representing the source checkout's
+    /// entire visible working tree, without changing its real index or files.
+    /// A temporary alternate index lets Git encode nonignored untracked files
+    /// in the ordinary binary patch, including symlinks, executable bits, and
+    /// deletions. The guest receives the result as unstaged changes, so a
+    /// source's staged/unstaged split is intentionally normalized.
+    pub fn snapshot_host_changes(&self, source: &Path, destination: &Path) -> Result<bool> {
+        self.reject_conflicted_source(source)?;
+        let parent = destination
+            .parent()
+            .context("host-change snapshot needs a parent directory")?;
+        fs::create_dir_all(parent)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        if destination.exists() {
+            bail!(
+                "refusing to replace existing host-change snapshot {}",
+                destination.display()
+            );
+        }
+
+        let temporary_index = destination.with_extension("index");
+        if temporary_index.exists() {
+            bail!(
+                "refusing to replace existing temporary Git index {}",
+                temporary_index.display()
+            );
+        }
+        let snapshot = (|| {
+            Self::run_with_index(source, &temporary_index, &["read-tree", "HEAD"])?;
+            Self::run_with_index(source, &temporary_index, &["add", "--all"])?;
+            Self::run_with_index(
+                source,
+                &temporary_index,
+                &["diff", "--cached", "--binary", "--full-index", "HEAD"],
+            )
+        })();
+        let _ = fs::remove_file(&temporary_index);
+        // Git may write an optional lock or cache-tree sidecar alongside an
+        // alternate index. They are session-local and never host state.
+        let _ = fs::remove_file(temporary_index.with_extension("index.lock"));
+        let patch = snapshot?;
+        if patch.is_empty() {
+            return Ok(false);
+        }
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .with_context(|| {
+                format!(
+                    "cannot create host-change snapshot {}",
+                    destination.display()
+                )
+            })?;
+        file.write_all(&patch)?;
+        file.sync_all()?;
+        drop(file);
+        fs::set_permissions(destination, fs::Permissions::from_mode(0o600))?;
+        Ok(true)
+    }
+
+    /// Apply and remove a session-private host-change patch after guest Git
+    /// metadata isolation has reset the generated worktree to its base commit.
+    /// The patch is never applied to the source repository.
+    pub fn apply_host_changes(&self, worktree: &Path, snapshot: &Path) -> Result<()> {
+        let patch = fs::read(snapshot)
+            .with_context(|| format!("cannot read host-change snapshot {}", snapshot.display()))?;
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(["apply", "--binary", "--whitespace=nowarn", "-"])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("could not execute git apply for host-change snapshot")?;
+        child
+            .stdin
+            .as_mut()
+            .context("could not open git apply input for host-change snapshot")?
+            .write_all(&patch)?;
+        let output = child
+            .wait_with_output()
+            .context("could not wait for git apply host-change snapshot")?;
+        if !output.status.success() {
+            bail!(
+                "could not apply host-change snapshot in {}: {}",
+                worktree.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        fs::remove_file(snapshot).with_context(|| {
+            format!(
+                "applied host-change snapshot but could not remove private copy {}",
+                snapshot.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    fn reject_conflicted_source(&self, source: &Path) -> Result<()> {
+        let conflicts = Self::run(source, &["diff", "--name-only", "--diff-filter=U"])?;
+        if !conflicts.is_empty() {
+            bail!(
+                "cannot include host changes from {} with unresolved conflicts:\n{}\nResolve or abort the Git operation before running `jbox run --include-host-changes`",
+                source.display(),
+                conflicts
+            );
+        }
+        Ok(())
+    }
+
+    fn run_with_index(repo: &Path, index: &Path, args: &[&str]) -> Result<Vec<u8>> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .env("GIT_INDEX_FILE", index)
+            .args(args)
+            .output()
+            .context("could not execute git with temporary host-change index")?;
+        if !output.status.success() {
+            bail!(
+                "git {} failed in {} while preparing host-change snapshot: {}",
+                args.join(" "),
+                repo.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(output.stdout)
     }
 
     /// Snapshot the source repository's current Beads issue export into the
@@ -1083,6 +1214,132 @@ mod tests {
         assert!(made.branch.starts_with("jbox/"));
         assert_eq!(std::fs::read_to_string(wt.join("a")).unwrap(), "base");
         assert!(Git.remove_worktree(tmp.path(), &wt, false).is_ok());
+    }
+
+    #[test]
+    fn snapshots_staged_unstaged_deleted_and_untracked_host_changes_without_mutation() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("source");
+        let guest = root.path().join("guest");
+        let scratch = tempdir().unwrap();
+        fs::create_dir(&source).unwrap();
+        git(&source, &["init"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Test"]);
+        fs::write(source.join("tracked.txt"), "base\n").unwrap();
+        fs::write(source.join("removed.txt"), "remove me\n").unwrap();
+        fs::write(source.join(".gitignore"), "ignored.txt\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "base"]);
+
+        fs::write(source.join("tracked.txt"), "staged\n").unwrap();
+        git(&source, &["add", "tracked.txt"]);
+        fs::write(source.join("tracked.txt"), "working tree\n").unwrap();
+        fs::remove_file(source.join("removed.txt")).unwrap();
+        fs::write(source.join("untracked.bin"), b"\0guest snapshot\xff").unwrap();
+        std::os::unix::fs::symlink("tracked.txt", source.join("untracked-link")).unwrap();
+        fs::write(source.join("ignored.txt"), "must not copy\n").unwrap();
+        let before =
+            Git::run(&source, &["status", "--porcelain", "--untracked-files=all"]).unwrap();
+
+        let snapshot = scratch.path().join("host.patch");
+        assert!(Git.snapshot_host_changes(&source, &snapshot).unwrap());
+        assert_eq!(
+            Git::run(&source, &["status", "--porcelain", "--untracked-files=all"]).unwrap(),
+            before,
+            "capturing must leave the source index and files untouched"
+        );
+
+        let made = Git
+            .add_worktree(&source, &guest, "bright-fox-123", "repo")
+            .unwrap();
+        let host_gitfile = scratch.path().join("host-gitfile");
+        let author = ResolvedGitAuthor {
+            name: Some("Guest".into()),
+            email: Some("guest@example.com".into()),
+        };
+        Git.isolate_guest_metadata(
+            &source,
+            &guest,
+            &made.branch,
+            &made.commit,
+            &host_gitfile,
+            &author,
+        )
+        .unwrap();
+        Git.apply_host_changes(&guest, &snapshot).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(guest.join("tracked.txt")).unwrap(),
+            "working tree\n"
+        );
+        assert!(!guest.join("removed.txt").exists());
+        assert_eq!(
+            fs::read(guest.join("untracked.bin")).unwrap(),
+            b"\0guest snapshot\xff"
+        );
+        assert_eq!(
+            fs::read_link(guest.join("untracked-link")).unwrap(),
+            std::path::PathBuf::from("tracked.txt")
+        );
+        assert!(!guest.join("ignored.txt").exists());
+        assert!(!snapshot.exists(), "applied snapshots are removed promptly");
+        let guest_status =
+            Git::run(&guest, &["status", "--porcelain", "--untracked-files=all"]).unwrap();
+        assert!(guest_status.contains("tracked.txt"));
+        assert!(guest_status.contains("removed.txt"));
+        assert!(guest_status.contains("untracked.bin"));
+        assert_eq!(
+            Git::run(&source, &["status", "--porcelain", "--untracked-files=all"]).unwrap(),
+            before,
+            "applying in the generated worktree must not affect the source"
+        );
+
+        let repo = RepoState {
+            name: "repo".into(),
+            source: source.clone(),
+            worktree: guest.clone(),
+            mount: "/workspace/repo".into(),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile,
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        };
+        Git.restore_guest_metadata(&repo).unwrap();
+        Git.remove_worktree(&source, &guest, true).unwrap();
+    }
+
+    #[test]
+    fn rejects_snapshotting_unresolved_host_conflicts() {
+        let source = tempdir().unwrap();
+        let scratch = tempdir().unwrap();
+        git(source.path(), &["init"]);
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test"]);
+        fs::write(source.path().join("conflicted"), "base\n").unwrap();
+        git(source.path(), &["add", "."]);
+        git(source.path(), &["commit", "-m", "base"]);
+        git(source.path(), &["checkout", "-b", "other"]);
+        fs::write(source.path().join("conflicted"), "other\n").unwrap();
+        git(source.path(), &["commit", "-am", "other"]);
+        git(source.path(), &["checkout", "-"]);
+        fs::write(source.path().join("conflicted"), "main\n").unwrap();
+        git(source.path(), &["commit", "-am", "main"]);
+        let merge = Command::new("git")
+            .arg("-C")
+            .arg(source.path())
+            .args(["merge", "other"])
+            .status()
+            .unwrap();
+        assert!(!merge.success());
+
+        let error = Git
+            .snapshot_host_changes(source.path(), &scratch.path().join("host.patch"))
+            .unwrap_err();
+        assert!(error.to_string().contains("unresolved conflicts"));
+        assert!(!scratch.path().join("host.patch").exists());
+        git(source.path(), &["merge", "--abort"]);
     }
 
     #[test]

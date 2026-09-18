@@ -20,6 +20,9 @@ enum Command {
     Run {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Start the guest from a non-mutating snapshot of staged, unstaged, and nonignored untracked host files.
+        #[arg(long)]
+        include_host_changes: bool,
         #[arg(long)]
         no_attach: bool,
     },
@@ -144,8 +147,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse_from(normalized_args());
     let app = jbox::App::open()?;
     match cli.command {
-        Command::Run { path, no_attach } => {
-            let id = app.create(&path, true)?;
+        Command::Run {
+            path,
+            include_host_changes,
+            no_attach,
+        } => {
+            let id = app.create(&path, include_host_changes)?;
             start_expiry_watch()?;
             if !no_attach {
                 app.attach(&id)?;
