@@ -29,7 +29,7 @@ while [ "$index" -lt "${JBOX_SKILL_COUNT:-0}" ]; do
     # `gh skill` has no Jcode target. An explicit directory installs the
     # standardized skill layout where Jcode discovers it, instead of silently
     # defaulting to GitHub Copilot. The mounted directory is session-owned.
-    env JBOX_ONE_SKILL_REPOSITORY="$repository" JBOX_ONE_SKILL_NAME="$skill" JBOX_ONE_SKILL_PIN="$pin" JBOX_ONE_SKILL_HIDDEN="$hidden" \
+    if ! env JBOX_ONE_SKILL_REPOSITORY="$repository" JBOX_ONE_SKILL_NAME="$skill" JBOX_ONE_SKILL_PIN="$pin" JBOX_ONE_SKILL_HIDDEN="$hidden" \
         su -s /bin/sh jbox -c '
             set -eu
             mkdir -p /home/jbox/.agents/skills
@@ -40,6 +40,12 @@ while [ "$index" -lt "${JBOX_SKILL_COUNT:-0}" ]; do
             if [ "$JBOX_ONE_SKILL_HIDDEN" = "1" ]; then set -- "$@" --allow-hidden-dirs; fi
             "$@"
         '
+    then
+        # Skills are an enhancement, not a daemon dependency. A renamed,
+        # deleted, or temporarily unreachable source must not turn a usable
+        # Jbox session into a container that exits before SSH starts.
+        echo "jbox: could not install optional skill source ${repository}; continuing without it" >&2
+    fi
     index=$((index + 1))
 done
 index=0
@@ -213,6 +219,7 @@ mod tests {
         assert!(JBOX_ENTRYPOINT.contains("JBOX_SKILL_COUNT"));
         assert!(JBOX_ENTRYPOINT.contains("/home/jbox/.agents/skills"));
         assert!(JBOX_ENTRYPOINT.contains("gh skill install"));
+        assert!(JBOX_ENTRYPOINT.contains("could not install optional skill source"));
         assert!(
             JBOX_ENTRYPOINT.find("gh auth setup-git").unwrap()
                 < JBOX_ENTRYPOINT.find("gh skill install").unwrap()

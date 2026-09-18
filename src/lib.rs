@@ -52,10 +52,10 @@ default_model = "gpt-5.6-terra"
 openai_reasoning_effort = "high"
 openai_service_tier = "off"
 
-[[jcode.skills]]
-# `gh skill install` runs inside the guest after GitHub CLI authentication.
-# Omit `skill` to install every discoverable skill in this repository.
-repository = "bwbioinfo/skills"
+# Optional skills install inside the guest after GitHub CLI authentication.
+# Add one or more blocks with a reachable public or private GitHub source:
+# [[jcode.skills]]
+# repository = "K-Dense-AI/scientific-agent-skills"
 # skill = "scanpy"
 # pin = "v1.2.3"
 # allow_hidden_dirs = true
@@ -70,7 +70,7 @@ Use the `jcode` skill for Jcode configuration, remote sessions, and authenticati
 
 [git]
 network = true
-# GitHub CLI credentials are required for the default private skills source.
+# GitHub CLI credentials support private Git remotes and optional skills.
 # Jbox mounts only ~/.config/gh/hosts.yml, read-only, into the guest.
 credentials = "github-cli"
 
