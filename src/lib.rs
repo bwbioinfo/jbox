@@ -1606,6 +1606,17 @@ done | LC_ALL=C sort -r | head -n 20
                 "runtime container for {id} is unexpectedly still running; use `jbox attach {id}` or `jbox stop {id}` first"
             );
         }
+        // A guest can be stopped outside Jbox, for example by a Docker daemon
+        // restart or a host shutdown. Docker retains its name for the exited
+        // container, while the retained worktree is the only Jbox state that
+        // must survive. Clear that inert runtime object before `docker run`
+        // recreates the guest with the same stable session name.
+        self.engine.stop(&session.container_name).with_context(|| {
+            format!(
+                "could not remove stale stopped runtime container for {}; its retained worktrees were left unchanged",
+                session.id
+            )
+        })?;
         let (config, primary) = Config::load(&session.config_path)?;
         self.validate_resume_config(&session, &config, &primary)?;
         self.engine.check()?;
@@ -1969,6 +1980,10 @@ done | LC_ALL=C sort -r | head -n 20
         {
             return Ok(());
         }
+        // `is_running` is false for an externally stopped Docker container,
+        // but Docker still reserves its name. Remove that inert object while
+        // reconciling state so a later `jbox resume` can recreate the guest.
+        self.engine.stop(&session.container_name)?;
         for repo in &session.repos {
             self.git.restore_and_import_guest_metadata(repo)?;
         }

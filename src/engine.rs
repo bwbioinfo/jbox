@@ -170,9 +170,7 @@ impl Engine for DockerEngine {
         command
             .arg(&spec.image)
             .arg("/usr/local/bin/jbox-entrypoint");
-        Self::run_checked(command).context(
-            "could not start Kata session. Confirm Docker's `kata` runtime and /dev/kvm are available",
-        )?;
+        Self::run_checked(command).context("could not start Jbox Kata session")?;
 
         // A successful `docker run -d` merely means the runtime accepted the
         // process. Verify that it survives long enough to expose SSH before
