@@ -66,6 +66,11 @@ pub struct Session {
     pub last_activity_at: DateTime<Utc>,
     pub ttl_seconds: i64,
     pub config_path: PathBuf,
+    /// Host directory from which the CLI started this session. This differs
+    /// from the repository root when `jbox` is invoked from a subdirectory.
+    /// Sessions saved before this field was introduced leave it unset.
+    #[serde(default)]
+    pub launch_directory: Option<PathBuf>,
     pub image: String,
     pub repos: Vec<RepoState>,
     #[serde(default)]

@@ -273,7 +273,18 @@ impl App {
     /// Create a session from `HEAD`, optionally layering a session-local copy
     /// of the host's visible working tree on top. The source checkout is never
     /// changed by either path.
-    pub fn create(&self, input: &Path, include_host_changes: bool) -> Result<String> {
+    pub fn create(
+        &self,
+        input: &Path,
+        include_host_changes: bool,
+        launch_directory: &Path,
+    ) -> Result<String> {
+        let launch_directory = launch_directory.canonicalize().with_context(|| {
+            format!(
+                "cannot resolve launch directory {}",
+                launch_directory.display()
+            )
+        })?;
         let (config, primary) = Config::load(input)?;
         let git_author = config.git.author.resolve()?;
         if git_author.name.is_none() || git_author.email.is_none() {
@@ -516,6 +527,7 @@ impl App {
             last_activity_at: now,
             ttl_seconds: config.resources.ttl_seconds,
             config_path: config.path,
+            launch_directory: Some(launch_directory),
             image,
             repos,
             jcode_default_provider: config.jcode.default_provider.clone(),
@@ -2081,24 +2093,7 @@ done | LC_ALL=C sort -r | head -n 20
     }
 
     fn print_sessions(&self, empty_message: &str, sessions: Vec<Session>) -> Result<()> {
-        if sessions.is_empty() {
-            println!("{empty_message}");
-            return Ok(());
-        }
-        println!("ID\tSTATE\tLAST ACTIVITY\tREPOSITORIES");
-        for s in sessions {
-            println!(
-                "{}\t{:?}\t{}\t{}",
-                s.id,
-                s.state,
-                s.last_activity_at.format("%Y-%m-%d %H:%M UTC"),
-                s.repos
-                    .iter()
-                    .map(|r| r.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-        }
+        print!("{}", format_session_list(empty_message, &sessions));
         Ok(())
     }
 
@@ -2690,6 +2685,34 @@ fn jbox_terminal_title(session_id: &str, mount: &str) -> String {
     format!("[📦 JBOX] {session_id} · {mount}")
 }
 
+fn format_session_list(empty_message: &str, sessions: &[Session]) -> String {
+    if sessions.is_empty() {
+        return format!("{empty_message}\n");
+    }
+
+    let mut output = String::from("ID\tSTATE\tLAST ACTIVITY\tREPOSITORIES\tHOST DIRECTORY\n");
+    for session in sessions {
+        let launch_directory = session
+            .launch_directory
+            .as_deref()
+            .map_or_else(|| "-".into(), |path| path.display().to_string());
+        output.push_str(&format!(
+            "{}\t{:?}\t{}\t{}\t{}\n",
+            session.id,
+            session.state,
+            session.last_activity_at.format("%Y-%m-%d %H:%M UTC"),
+            session
+                .repos
+                .iter()
+                .map(|repo| repo.name.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            launch_directory,
+        ));
+    }
+    output
+}
+
 fn guest_jcode_config(jcode: &config::Jcode) -> String {
     let mut lines =
         vec!["# Generated for this jbox session. Do not store credentials here.".into()];
@@ -2766,6 +2789,7 @@ mod tests {
             last_activity_at: now,
             ttl_seconds: 86_400,
             config_path: source.join(".jbox.toml"),
+            launch_directory: Some(source.clone()),
             image: "test".into(),
             repos: vec![RepoState {
                 name: "repo".into(),
@@ -2832,6 +2856,30 @@ mod tests {
         assert_eq!(listed[0].id, "project-session");
         assert_eq!(listed[0].repos.len(), 2);
         assert_eq!(app.list_sessions().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn session_list_shows_launch_directory_and_handles_legacy_sessions() {
+        let temp = tempdir().unwrap();
+        let launch_directory = temp.path().join("launched-here");
+        let current = temp.path().join("current");
+        let mut current_session = test_session("current-session", current);
+        current_session.launch_directory = Some(launch_directory.clone());
+
+        let legacy_json = serde_json::to_value(test_session("legacy-session", temp.path().join("legacy"))).unwrap();
+        let mut legacy_json = legacy_json;
+        legacy_json
+            .as_object_mut()
+            .unwrap()
+            .remove("launch_directory");
+        let legacy_session = serde_json::from_value::<Session>(legacy_json).unwrap();
+        assert!(legacy_session.launch_directory.is_none());
+
+        let output = format_session_list("No jbox sessions.", &[current_session, legacy_session]);
+        assert!(output.starts_with("ID\tSTATE\tLAST ACTIVITY\tREPOSITORIES\tHOST DIRECTORY\n"));
+        assert!(output.contains(&format!("\t{}\n", launch_directory.display())));
+        assert!(output.contains("legacy-session\tStopped"));
+        assert!(output.contains("\t-\n"));
     }
 
     #[test]

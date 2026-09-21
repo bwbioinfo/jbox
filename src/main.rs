@@ -165,7 +165,8 @@ fn main() -> Result<()> {
             include_host_changes,
             no_attach,
         } => {
-            let id = app.create(&path, include_host_changes)?;
+            let launch_directory = std::env::current_dir()?;
+            let id = app.create(&path, include_host_changes, &launch_directory)?;
             start_expiry_watch()?;
             if !no_attach {
                 app.attach(&id)?;
