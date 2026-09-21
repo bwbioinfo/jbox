@@ -64,8 +64,7 @@ openai_service_tier = "off"
 # Session-wide guidance is mounted as ~/AGENTS.md, not written to the worktree.
 instructions = """
 Use the `work-with-geonic` skill for all work in this workspace.
-Use the `jbox` skill for workspace, lifecycle, isolation, or credential tasks.
-Use the `jcode` skill for Jcode configuration, remote sessions, and authentication.
+Use the `jcode-jbox` skill for Jbox workspace, lifecycle, isolation, credential, Jcode configuration, remote-session, and authentication tasks.
 """
 
 [git]

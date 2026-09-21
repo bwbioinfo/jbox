@@ -134,8 +134,7 @@ write to or alter any Git worktree:
 [jcode.agent]
 instructions = """
 Use the `work-with-geonic` skill for all work in this workspace.
-Use the `jbox` skill for workspace and isolation tasks.
-Use the `jcode` skill for Jcode configuration and remote sessions.
+Use the `jcode-jbox` skill for Jbox workspace, lifecycle, isolation, credential, Jcode configuration, remote-session, and authentication tasks.
 """
 ```
 
