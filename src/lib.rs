@@ -1183,6 +1183,37 @@ done | LC_ALL=C sort -r | head -n 20
         if !status.success() {
             bail!("preview shell exited with {status}");
         }
+
+        // A host-native preview requires the guest to be stopped while its Git
+        // metadata is host-readable. Do not strand an attached Jcode client
+        // after a test-only preview, though: a pristine preview can be removed
+        // safely, after which the recorded conversation can be resumed.
+        if self.git.preview_has_changes(&preview, &repo.branch)? {
+            println!(
+                "Preview {} has changes and remains available. The Jbox guest stays stopped so those changes can be reviewed before they become part of its worktree. Run `jbox accept` from the original host repository to adopt them, then `jbox resume` to return to Jcode.",
+                preview.display()
+            );
+            return Ok(());
+        }
+
+        self.discard_preview(repo, &preview, &seed, &branch)?;
+        println!(
+            "Preview closed without source changes. Restarting session {} and reopening its recorded Jcode conversation.",
+            session.id
+        );
+        self.resume(&session.id).with_context(|| {
+            format!(
+                "preview closed cleanly, but Jbox could not restart {}; run `jbox resume {}` from the original host repository",
+                session.id, session.id
+            )
+        })?;
+        let mut resumed = self.load_session(&session.id)?;
+        self.attach_session(&mut resumed, &repo.mount).with_context(|| {
+            format!(
+                "session {} restarted, but Jcode could not reconnect; run `jbox attach {}` from the original host repository",
+                session.id, session.id
+            )
+        })?;
         Ok(())
     }
 

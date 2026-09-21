@@ -323,8 +323,12 @@ The original host checkout remains clean.
 # From the original host repository, create a host-native preview and run tests.
 jbox preview
 
-# Exit the preview shell, then make its edits authoritative and accept them
-# into the currently checked-out host branch.
+# A preview that did not change source files closes, restarts the guest, and
+# reconnects to the recorded Jcode conversation automatically. If source files
+# changed, exit leaves the preview open for the explicit acceptance below.
+
+# From the original host repository, make preview edits authoritative and
+# accept them into the currently checked-out host branch.
 jbox accept
 
 # Or discard the old preview and create a fresh one from the retained session.
@@ -334,14 +338,18 @@ jbox preview
 jbox resume
 ```
 
-When an active preview exists, repository-scoped `jbox accept` checkpoints the
-preview, adopts its exact state into the retained session branch, and performs
-the normal confirmed acceptance. Running `jbox preview` again asks before
+When the preview shell exits with no visible source changes, Jbox discards the
+pristine preview, restarts the guest, and reopens the recorded Jcode
+conversation. This keeps a test-only preview from ending the active Jcode
+workflow. When it contains edits or commits, it remains open and the guest
+stays stopped so those changes cannot be silently adopted: run
+repository-scoped `jbox accept` to checkpoint and adopt its exact state, then
+run `jbox resume` to return to Jcode. Running `jbox preview` again asks before
 discarding preview edits and rebuilding it. `jbox resume` and `jbox clean`
-refuse while a preview exists, preventing an unreviewed preview from being
-silently lost. Preview checkpoint commits use the configured Jbox Git author,
-including any `.jbox.toml` override. `jbox overlay` remains available for
-one-off patch testing of the primary checkout.
+refuse while a changed preview exists, preventing an unreviewed preview from
+being silently lost. Preview checkpoint commits use the configured Jbox Git
+author, including any `.jbox.toml` override. `jbox overlay` remains available
+for one-off patch testing of the primary checkout.
 
 If `--merge` creates a host conflict, acceptance is **paused**, not discarded:
 jbox lists every unresolved host file and retains the jbox session branch.

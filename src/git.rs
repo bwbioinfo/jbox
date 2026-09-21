@@ -1588,6 +1588,9 @@ mod tests {
         };
         Git.add_preview_worktree(&repo, &preview, preview_branch, &preview_author)
             .unwrap();
+        // A pristine preview is safe to discard and reconnect to the guest
+        // automatically when its host shell closes.
+        assert!(!Git.preview_has_changes(&preview, &repo.branch).unwrap());
         assert_eq!(Git::run(&preview, &["config", "user.name"]).unwrap(), "Preview");
         Git.apply_patch(&preview, &seed, false).unwrap();
         assert!(Git.preview_has_changes(&preview, &repo.branch).unwrap());
