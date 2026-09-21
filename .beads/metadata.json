@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "jbox",
+  "project_id": "9cd0bead-60f6-4863-9445-0e2f76e37643"
+}
