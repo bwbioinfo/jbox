@@ -7,6 +7,10 @@ backend = "kata"
 [workspace]
 mount = "/workspace/jbox"
 
+[[repos]]
+path = "../skills"
+mount = "/workspace/skills"
+
 [image]
 dockerfile = ".jbox/Dockerfile"
 
