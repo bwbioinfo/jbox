@@ -7,12 +7,13 @@ pub mod state;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use config::{Config, ResolvedRepository};
+use config::{Config, ResolvedGitAuthor, ResolvedRepository};
 use engine::{ContainerSpec, DockerEngine, Engine};
 use git::Git;
 use image::ImageManager;
 use paths::{JboxPaths, safe_target};
 use state::{RepoState, Session, SessionState, StateStore};
+use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1071,11 +1072,190 @@ done | LC_ALL=C sort -r | head -n 20
         Ok(())
     }
 
+    /// Open a disposable host-native preview of a stopped session worktree.
+    /// A preview is isolated from the primary checkout. Re-running this command
+    /// replaces an existing preview after confirmation, which makes a fresh
+    /// preview the natural discard operation.
+    pub fn preview(&self, id: &str, input: &Path) -> Result<()> {
+        let mut session = self.load_session(id)?;
+        let source = Config::repository_root(input)?;
+        let repo = session
+            .repos
+            .iter()
+            .find(|repo| repo.source == source)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "session {id} has no worktree for {}; run `jbox preview` from a participating host repository",
+                    source.display()
+                )
+            })?;
+        self.preview_repository(&mut session, &repo)
+    }
+
+    pub fn preview_from_repository(&self, input: &Path) -> Result<()> {
+        let Some((mut session, repo)) =
+            self.select_repository_worktree(input, "preview", None)?
+        else {
+            return Ok(());
+        };
+        self.preview_repository(&mut session, &repo)
+    }
+
+    fn preview_repository(&self, session: &mut Session, repo: &RepoState) -> Result<()> {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!("`jbox preview` needs an interactive terminal");
+        }
+        if session.state == SessionState::Running {
+            println!(
+                "stopping session {} before opening its host-native preview; the retained guest worktree will be preserved.",
+                session.id
+            );
+            self.stop_running_session(session)?;
+        }
+
+        let preview = self.preview_worktree_path(&session.id, repo);
+        let seed = self.preview_seed_path(&session.id, repo);
+        let branch = self.preview_branch(&session.id, repo);
+        if preview.exists() {
+            let changed = self.git.preview_has_changes(&preview, &repo.branch)?;
+            if changed {
+                if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+                    bail!(
+                        "preview {} has changes; run `jbox preview` from an interactive terminal to confirm replacing it",
+                        preview.display()
+                    );
+                }
+                print!(
+                    "Discard changed preview for session {} and create a fresh one? [y/N]: ",
+                    session.id
+                );
+                io::stdout().flush()?;
+                let mut confirmed = String::new();
+                io::stdin().read_line(&mut confirmed)?;
+                if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
+                    println!("preview refresh cancelled.");
+                    return Ok(());
+                }
+            }
+            self.discard_preview(repo, &preview, &seed, &branch)?;
+        }
+
+        fs::create_dir_all(
+            preview
+                .parent()
+                .context("preview worktree has no parent directory")?,
+        )?;
+        fs::set_permissions(
+            preview
+                .parent()
+                .context("preview worktree has no parent directory")?,
+            fs::Permissions::from_mode(0o700),
+        )?;
+        let seeded = self.git.snapshot_session_changes(repo, &seed)?;
+        let author = self.preview_author(session)?;
+        if let Err(error) = self
+            .git
+            .add_preview_worktree(repo, &preview, &branch, &author)
+        {
+            let _ = fs::remove_file(&seed);
+            return Err(error);
+        }
+        if seeded {
+            if let Err(error) = self.git.apply_patch(&preview, &seed, false) {
+                let _ = self.discard_preview(repo, &preview, &seed, &branch);
+                return Err(error).context("could not apply session changes to preview");
+            }
+        }
+
+        println!(
+            "Preview for session {} is isolated at {}. Run native tests or edit there, then exit and run `jbox accept` to keep it or `jbox preview` to discard it and start fresh.",
+            session.id,
+            preview.display()
+        );
+        let status = Command::new("bash")
+            .args(["--noprofile", "--norc"])
+            .current_dir(&preview)
+            .env("JBOX_PREVIEW_SESSION", &session.id)
+            .env("JBOX_PREVIEW_WORKTREE", &preview)
+            .status()
+            .context("could not open a local shell in preview worktree")?;
+        if !status.success() {
+            bail!("preview shell exited with {status}");
+        }
+        Ok(())
+    }
+
+    fn preview_author(&self, session: &Session) -> Result<ResolvedGitAuthor> {
+        let (config, _) = Config::load(&session.config_path)?;
+        config.git.author.resolve()
+    }
+
+    fn discard_preview(
+        &self,
+        repo: &RepoState,
+        preview: &Path,
+        seed: &Path,
+        branch: &str,
+    ) -> Result<()> {
+        self.git.remove_preview_worktree(repo, preview, branch)?;
+        let _ = fs::remove_file(seed);
+        println!("discarded host-native preview for {}", repo.name);
+        Ok(())
+    }
+
+    /// Adopt an active preview into the retained session branch. The preview
+    /// begins as an exact copy of the guest's dirty state, so the original
+    /// seed must still match before its host edits can replace that state.
+    fn adopt_preview(&self, session: &mut Session, repo: &RepoState) -> Result<bool> {
+        let preview = self.preview_worktree_path(&session.id, repo);
+        if !preview.is_dir() {
+            return Ok(false);
+        }
+        if session.state != SessionState::Stopped {
+            bail!(
+                "cannot accept preview for running session {}; stop or recreate the preview first",
+                session.id
+            );
+        }
+        let seed = self.preview_seed_path(&session.id, repo);
+        let current = seed.with_extension("current.patch");
+        let current_seeded = self.git.snapshot_session_changes(repo, &current)?;
+        let seeded = seed.is_file();
+        let unchanged = seeded == current_seeded
+            && (!seeded || fs::read(&seed)? == fs::read(&current)?);
+        let _ = fs::remove_file(&current);
+        if !unchanged {
+            bail!(
+                "retained session worktree {} changed after preview creation. Its preview remains at {}; inspect or discard it with `jbox preview` before accepting",
+                repo.name,
+                preview.display()
+            );
+        }
+
+        self.git.checkpoint_preview_changes(&preview, &session.id)?;
+        let branch = self.preview_branch(&session.id, repo);
+        self.git.adopt_preview_commit(repo, &branch)?;
+        self.discard_preview(repo, &preview, &seed, &branch)?;
+        self.touch(session)?;
+        println!("adopted preview edits into session {} for {}", session.id, repo.name);
+        Ok(true)
+    }
+
     /// Accept the latest committed snapshot from every repository in a session
     /// into the explicitly selected host branch. Unlike `stop`, this keeps a
     /// running guest and its isolated Git metadata intact for further work.
     pub fn accept(&self, id: &str, target: &str, options: AcceptOptions) -> Result<()> {
         let mut session = self.load_session(id)?;
+        if session
+            .repos
+            .iter()
+            .any(|repo| self.preview_worktree_path(&session.id, repo).is_dir())
+        {
+            bail!(
+                "session {id} has an active preview; run `jbox accept` from the participating host repository so Jbox can adopt that preview into the checked-out branch"
+            );
+        }
         let targets = vec![target.to_owned(); session.repos.len()];
         let repos = session.repos.clone();
         self.accept_snapshots(&mut session, &repos, &targets, options)
@@ -1096,6 +1276,16 @@ done | LC_ALL=C sort -r | head -n 20
         else {
             return Ok(());
         };
+        if session
+            .repos
+            .iter()
+            .any(|repo| self.preview_worktree_path(&session.id, repo).is_dir())
+        {
+            bail!(
+                "session {} has an active preview; run repository-scoped `jbox accept` from that preview's original host repository so Jbox can adopt it first",
+                session.id
+            );
+        }
         let targets = session
             .repos
             .iter()
@@ -1173,6 +1363,7 @@ done | LC_ALL=C sort -r | head -n 20
         else {
             return Ok(());
         };
+        let has_preview = self.preview_worktree_path(&session.id, &repo).is_dir();
         let Some(options) = self.prompt_merge_if_diverged(&session, &repo, &target, options)?
         else {
             return Ok(());
@@ -1192,6 +1383,9 @@ done | LC_ALL=C sort -r | head -n 20
         if !matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES") {
             println!("accept cancelled.");
             return Ok(());
+        }
+        if has_preview {
+            self.adopt_preview(&mut session, &repo)?;
         }
         self.accept_snapshots(
             &mut session,
@@ -1618,6 +1812,15 @@ done | LC_ALL=C sort -r | head -n 20
             println!("jbox session {id} is already running. Attaching to it.");
             return self.attach_session(&mut session, &mount);
         }
+        if session
+            .repos
+            .iter()
+            .any(|repo| self.preview_worktree_path(&session.id, repo).is_dir())
+        {
+            bail!(
+                "cannot resume session {id} while it has an active host-native preview. Run `jbox accept` to keep the preview or `jbox preview` to discard and replace it first"
+            );
+        }
         if self.engine.is_running(&session.container_name)? {
             bail!(
                 "runtime container for {id} is unexpectedly still running; use `jbox attach {id}` or `jbox stop {id}` first"
@@ -1894,6 +2097,16 @@ done | LC_ALL=C sort -r | head -n 20
                     session.id
                 );
             }
+            if session
+                .repos
+                .iter()
+                .any(|repo| self.preview_worktree_path(&session.id, repo).is_dir())
+            {
+                bail!(
+                    "cannot clean {} while it has an active host-native preview. Run `jbox accept` to keep it or `jbox preview` from the host repository to discard it first",
+                    session.id
+                );
+            }
             let changed = session.repos.iter().any(|r| {
                 self.git
                     .has_uncommitted_or_unmerged_changes(r)
@@ -2047,6 +2260,26 @@ done | LC_ALL=C sort -r | head -n 20
             .join(session_id)
             .join("runtime/host-overlays")
             .join(format!("{}.patch", repo.name))
+    }
+
+    fn preview_worktree_path(&self, session_id: &str, repo: &RepoState) -> PathBuf {
+        self.paths
+            .sessions
+            .join(session_id)
+            .join("runtime/host-previews")
+            .join(&repo.name)
+    }
+
+    fn preview_seed_path(&self, session_id: &str, repo: &RepoState) -> PathBuf {
+        self.paths
+            .sessions
+            .join(session_id)
+            .join("runtime/host-previews")
+            .join(format!("{}.seed.patch", repo.name))
+    }
+
+    fn preview_branch(&self, session_id: &str, repo: &RepoState) -> String {
+        format!("jbox/{session_id}/preview/{}", repo.name)
     }
 
     fn restore_retained_metadata(&self, repos: &[RepoState]) {

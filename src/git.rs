@@ -71,6 +71,117 @@ impl Git {
         Ok(WorktreeCreated { branch, commit })
     }
 
+    /// Create a host-native preview worktree from a stopped session branch.
+    /// Unlike an overlay, this never modifies the original host checkout.
+    pub fn add_preview_worktree(
+        &self,
+        repo: &RepoState,
+        worktree: &Path,
+        branch: &str,
+        author: &ResolvedGitAuthor,
+    ) -> Result<()> {
+        if worktree.exists() {
+            bail!(
+                "refusing to replace existing preview worktree {}",
+                worktree.display()
+            );
+        }
+        let current = Self::run(&repo.source, &["rev-parse", "HEAD"])?;
+        let session_head = Self::run(&repo.source, &["rev-parse", "--verify", &repo.branch])?;
+        if current != session_head {
+            bail!(
+                "cannot create preview for {}: host {} is at {}, but session branch {} is at {}. Rebase or accept the session before previewing so native tests use matching history",
+                repo.name,
+                repo.source.display(),
+                current,
+                repo.branch,
+                session_head
+            );
+        }
+        Self::run(
+            &repo.source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                &worktree.to_string_lossy(),
+                &repo.branch,
+            ],
+        )?;
+        if let Some(name) = &author.name {
+            Self::run(worktree, &["config", "user.name", name])?;
+        }
+        if let Some(email) = &author.email {
+            Self::run(worktree, &["config", "user.email", email])?;
+        }
+        Ok(())
+    }
+
+    /// Remove a disposable preview worktree and its private branch. Callers
+    /// use this only for an explicitly discarded preview or after its content
+    /// has been adopted by the session branch.
+    pub fn remove_preview_worktree(
+        &self,
+        repo: &RepoState,
+        worktree: &Path,
+        branch: &str,
+    ) -> Result<()> {
+        self.remove_worktree(&repo.source, worktree, true)?;
+        if Self::run(&repo.source, &["show-ref", "--verify", "--quiet", branch]).is_ok() {
+            Self::run(&repo.source, &["branch", "-D", branch])?;
+        }
+        Ok(())
+    }
+
+    pub fn has_uncommitted_changes_at(&self, worktree: &Path) -> Result<bool> {
+        Ok(!Self::run(worktree, &["status", "--porcelain"])?.is_empty())
+    }
+
+    /// A preview needs confirmation before replacement when it has either
+    /// uncommitted edits or commits beyond the retained session branch.
+    pub fn preview_has_changes(&self, worktree: &Path, session_branch: &str) -> Result<bool> {
+        if self.has_uncommitted_changes_at(worktree)? {
+            return Ok(true);
+        }
+        let preview_head = Self::run(worktree, &["rev-parse", "HEAD"])?;
+        let session_head = Self::run(worktree, &["rev-parse", "--verify", session_branch])?;
+        Ok(preview_head != session_head)
+    }
+
+    /// Checkpoint all visible preview edits. The preview is an explicit,
+    /// disposable host-native editing surface, so no Jbox bootstrap files are
+    /// present to exclude here.
+    pub fn checkpoint_preview_changes(&self, worktree: &Path, session_id: &str) -> Result<bool> {
+        self.reject_conflicted_source(worktree)?;
+        if !self.has_uncommitted_changes_at(worktree)? {
+            return Ok(false);
+        }
+        Self::run(worktree, &["add", "--all"])?;
+        if Self::run(worktree, &["diff", "--cached", "--quiet"]).is_ok() {
+            return Ok(false);
+        }
+        Self::run(
+            worktree,
+            &[
+                "commit",
+                "-m",
+                &format!("jbox: accept preview {session_id}"),
+            ],
+        )?;
+        Ok(true)
+    }
+
+    /// Replace the retained session worktree's dirty state with the committed
+    /// preview snapshot. The caller must first verify that the retained
+    /// worktree has not changed since the preview was created.
+    pub fn adopt_preview_commit(&self, repo: &RepoState, preview_branch: &str) -> Result<()> {
+        Self::run(&repo.worktree, &["reset", "--hard", "HEAD"])?;
+        Self::run(&repo.worktree, &["clean", "-fd"])?;
+        Self::run(&repo.worktree, &["reset", "--hard", preview_branch])?;
+        Ok(())
+    }
+
     /// Create a session-private Git patch representing the source checkout's
     /// entire visible working tree, without changing its real index or files.
     /// A temporary alternate index lets Git encode nonignored untracked files
@@ -1435,6 +1546,93 @@ mod tests {
             "keep this\n"
         );
         fs::remove_file(source.join("native-test-output")).unwrap();
+        Git.remove_worktree(&source, &guest, true).unwrap();
+    }
+
+    #[test]
+    fn preview_worktree_adopts_native_edits_without_touching_host_checkout() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("source");
+        let guest = root.path().join("guest");
+        let preview = root.path().join("preview");
+        fs::create_dir(&source).unwrap();
+        git(&source, &["init"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Test"]);
+        fs::write(source.join("tracked"), "base\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "base"]);
+        let made = Git
+            .add_worktree(&source, &guest, "bright-fox-123", "repo")
+            .unwrap();
+        let repo = RepoState {
+            name: "repo".into(),
+            source: source.clone(),
+            worktree: guest.clone(),
+            mount: "/workspace/repo".into(),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile: root.path().join("host-gitfile"),
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        };
+        fs::write(guest.join("tracked"), "guest edit\n").unwrap();
+        fs::write(guest.join("guest-only"), "guest file\n").unwrap();
+        let seed = root.path().join("preview.seed.patch");
+        assert!(Git.snapshot_session_changes(&repo, &seed).unwrap());
+
+        let preview_branch = "jbox/bright-fox-123/preview/repo";
+        let preview_author = ResolvedGitAuthor {
+            name: Some("Preview".into()),
+            email: Some("preview@example.com".into()),
+        };
+        Git.add_preview_worktree(&repo, &preview, preview_branch, &preview_author)
+            .unwrap();
+        assert_eq!(Git::run(&preview, &["config", "user.name"]).unwrap(), "Preview");
+        Git.apply_patch(&preview, &seed, false).unwrap();
+        assert!(Git.preview_has_changes(&preview, &repo.branch).unwrap());
+        assert_eq!(fs::read_to_string(preview.join("tracked")).unwrap(), "guest edit\n");
+        assert_eq!(
+            fs::read_to_string(preview.join("guest-only")).unwrap(),
+            "guest file\n"
+        );
+        assert_eq!(fs::read_to_string(source.join("tracked")).unwrap(), "base\n");
+
+        fs::write(preview.join("native-edit"), "tested on host\n").unwrap();
+        assert!(
+            Git.checkpoint_preview_changes(&preview, "bright-fox-123")
+                .unwrap()
+        );
+        assert!(Git.preview_has_changes(&preview, &repo.branch).unwrap());
+        Git.adopt_preview_commit(&repo, preview_branch).unwrap();
+        assert!(!Git.preview_has_changes(&preview, &repo.branch).unwrap());
+        assert_eq!(fs::read_to_string(guest.join("tracked")).unwrap(), "guest edit\n");
+        assert_eq!(
+            fs::read_to_string(guest.join("native-edit")).unwrap(),
+            "tested on host\n"
+        );
+        assert_eq!(fs::read_to_string(source.join("tracked")).unwrap(), "base\n");
+
+        // A completed accept fast-forwards the original checkout to the
+        // session branch. A later preview must use that current session head,
+        // rather than the session's initial base commit.
+        git(&source, &["merge", "--ff-only", &repo.branch]);
+        assert_eq!(
+            fs::read_to_string(source.join("native-edit")).unwrap(),
+            "tested on host\n"
+        );
+
+        Git.remove_preview_worktree(&repo, &preview, preview_branch)
+            .unwrap();
+        assert!(!preview.exists());
+        assert!(Git::run(&source, &["show-ref", "--verify", "--quiet", preview_branch]).is_err());
+
+        let later_preview = root.path().join("later-preview");
+        let later_branch = "jbox/bright-fox-123/preview-later/repo";
+        Git.add_preview_worktree(&repo, &later_preview, later_branch, &preview_author)
+            .unwrap();
+        Git.remove_preview_worktree(&repo, &later_preview, later_branch)
+            .unwrap();
         Git.remove_worktree(&source, &guest, true).unwrap();
     }
 

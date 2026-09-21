@@ -67,6 +67,11 @@ enum Command {
         #[arg(long)]
         undo: bool,
     },
+    /// Open a disposable host-native preview of a session's current changes.
+    Preview {
+        /// Session to preview. Omit it to select a workspace for the current repository.
+        session: Option<String>,
+    },
     /// Fast-forward a host branch to a session's committed snapshot without stopping it.
     Accept {
         /// Session to accept. Omit it to select a session for the current repository.
@@ -200,6 +205,10 @@ fn main() -> Result<()> {
         Command::Overlay { session, undo } => {
             app.overlay(&session, &std::env::current_dir()?, undo)?
         }
+        Command::Preview { session } => match session {
+            Some(session) => app.preview(&session, &std::env::current_dir()?)?,
+            None => app.preview_from_repository(&std::env::current_dir()?)?,
+        },
         Command::Accept {
             session,
             into,
@@ -290,6 +299,7 @@ fn normalized_args() -> Vec<OsString> {
         "diff",
         "stop",
         "overlay",
+        "preview",
         "accept",
         "rebase",
         "resolve",

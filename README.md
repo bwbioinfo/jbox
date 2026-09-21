@@ -312,6 +312,37 @@ commits files in the normal host checkout. It refuses a detached worktree or
 an unresolved merge/rebase rather than forcing a commit. `--stash-host` uses a
 named, recoverable Git stash and drops it only after a successful reapply.
 
+### Previewing host-native changes
+
+For the common edit-test-accept loop, use `preview` rather than `overlay`.
+`preview` stops the guest and opens a local host shell in a disposable
+worktree containing the session's current committed and uncommitted changes.
+The original host checkout remains clean.
+
+```bash
+# From the original host repository, create a host-native preview and run tests.
+jbox preview
+
+# Exit the preview shell, then make its edits authoritative and accept them
+# into the currently checked-out host branch.
+jbox accept
+
+# Or discard the old preview and create a fresh one from the retained session.
+jbox preview
+
+# Resume the Jcode guest after accepting the preview.
+jbox resume
+```
+
+When an active preview exists, repository-scoped `jbox accept` checkpoints the
+preview, adopts its exact state into the retained session branch, and performs
+the normal confirmed acceptance. Running `jbox preview` again asks before
+discarding preview edits and rebuilding it. `jbox resume` and `jbox clean`
+refuse while a preview exists, preventing an unreviewed preview from being
+silently lost. Preview checkpoint commits use the configured Jbox Git author,
+including any `.jbox.toml` override. `jbox overlay` remains available for
+one-off patch testing of the primary checkout.
+
 If `--merge` creates a host conflict, acceptance is **paused**, not discarded:
 jbox lists every unresolved host file and retains the jbox session branch.
 Resolve and stage the files in the host checkout, then run
