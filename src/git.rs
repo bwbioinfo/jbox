@@ -1228,9 +1228,16 @@ impl Git {
                 repo.worktree.display()
             );
         }
-        let onto = Self::run(&repo.source, &["check-ref-format", "--branch", onto])?;
+        self.preflight_rebase_target(&repo.source, onto)
+    }
+
+    /// Validate a host rebase target without inspecting a generated worktree.
+    /// Checkpoint-mode synchronization uses this before it commits visible guest
+    /// files, then runs the complete worktree preflight after that checkpoint.
+    pub fn preflight_rebase_target(&self, source: &Path, onto: &str) -> Result<()> {
+        let onto = Self::run(source, &["check-ref-format", "--branch", onto])?;
         Self::run(
-            &repo.source,
+            source,
             &["rev-parse", "--verify", &format!("refs/heads/{onto}")],
         )?;
         Ok(())

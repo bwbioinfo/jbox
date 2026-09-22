@@ -2049,7 +2049,12 @@ done | LC_ALL=C sort -r | head -n 20
                 ));
                 continue;
             }
-            if let Err(error) = self.git.preflight_rebase_worktree(repo, &upstream.branch) {
+            let rebase_preflight = if dirty {
+                self.git.preflight_rebase_target(&repo.source, &upstream.branch)
+            } else {
+                self.git.preflight_rebase_worktree(repo, &upstream.branch)
+            };
+            if let Err(error) = rebase_preflight {
                 problems.push(format!("{}: {error:#}", repo.name));
                 continue;
             }
@@ -3554,6 +3559,23 @@ mod tests {
             .repositories
             .iter()
             .all(|entry| entry.stage == SyncStage::Pushed));
+    }
+
+    #[test]
+    fn sync_checkpoint_mode_plans_and_commits_visible_guest_changes_before_rebase() {
+        let root = tempdir().unwrap();
+        let app = test_app(root.path());
+        let repo = sync_test_repo(root.path(), "checkpoint", "checkpoint-session");
+        std::fs::write(repo.worktree.join("uncommitted"), "preserve me\n").unwrap();
+        let mut session = test_session("checkpoint-session", repo.source.clone());
+        session.repos = vec![repo.clone()];
+
+        let (progress, problems) = app.sync_plan(&session, true, false).unwrap();
+        assert!(problems.is_empty(), "{problems:#?}");
+        session.sync = Some(progress);
+        app.checkpoint_sync_worktrees(&mut session).unwrap();
+        assert!(!app.git.validate_session_checkpoint(&repo).unwrap());
+        assert!(repo.worktree.join("uncommitted").is_file());
     }
 
     #[test]
