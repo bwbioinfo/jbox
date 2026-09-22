@@ -53,8 +53,11 @@ default_model = "gpt-5.6-terra"
 openai_reasoning_effort = "high"
 openai_service_tier = "off"
 
-# Optional skills install inside the guest after GitHub CLI authentication.
-# Add one or more blocks with a reachable public or private GitHub source:
+# Install all discoverable bwbioinfo skills inside the guest after GitHub CLI
+# authentication. Add more public or private GitHub sources as needed:
+[[jcode.skills]]
+repository = "bwbioinfo/skills"
+
 # [[jcode.skills]]
 # repository = "K-Dense-AI/scientific-agent-skills"
 # skill = "scanpy"
@@ -2901,7 +2904,10 @@ mod tests {
             .unwrap();
 
         assert!(temp.path().join(".jbox.toml").is_file());
-        assert!(Config::load(temp.path()).is_ok());
+        let (config, _) = Config::load(temp.path()).unwrap();
+        assert_eq!(config.jcode.skills.len(), 1);
+        assert_eq!(config.jcode.skills[0].repository, "bwbioinfo/skills");
+        assert_eq!(config.jcode.skills[0].skill, None);
         let dockerfile = std::fs::read_to_string(temp.path().join(".jbox/Dockerfile")).unwrap();
         assert!(dockerfile.contains("FROM ${JBOX_BASE_IMAGE}"));
         assert!(dockerfile.contains("    ripgrep \\"));

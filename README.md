@@ -96,7 +96,8 @@ Every jbox base image includes the Beads CLI (`bd` and its `beads` alias),
 installed by the upstream checksum-verifying installer. Run `bd init` from a
 guest worktree when the project should use Beads issue tracking.
 
-Declare one or more GitHub skill sources with `[[jcode.skills]]`. Jbox runs
+The generated template installs every discoverable skill from
+`bwbioinfo/skills`. Add other GitHub sources with `[[jcode.skills]]`. Jbox runs
 `gh skill install` **inside the guest** before the Jcode daemon starts, placing
 the skills in `~/.agents/skills`, where Jcode discovers them. Sources therefore
 need `network.internet = true`, `git.network = true`, and
