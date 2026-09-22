@@ -810,7 +810,9 @@ impl App {
 
     pub fn attach(&self, id: &str) -> Result<()> {
         let mut session = self.load_session(id)?;
-        let mount = session.repos[0].mount.clone();
+        let current_directory = std::env::current_dir()
+            .context("could not determine the directory for Jbox attachment")?;
+        let mount = attachment_mount(&session, &current_directory);
         self.attach_session(&mut session, &mount)
     }
 
@@ -3221,6 +3223,23 @@ fn jcode_attach_args(
     args
 }
 
+/// An explicit session ID remains convenient after a session-wide operation,
+/// but it must not discard the repository context of the invoking terminal.
+/// Outside a participating Git repository, retain the historic primary-mount
+/// fallback so `jbox attach <session>` remains useful from elsewhere.
+fn attachment_mount(session: &Session, input: &Path) -> String {
+    Config::repository_root(input)
+        .ok()
+        .and_then(|repository| {
+            session
+                .repos
+                .iter()
+                .find(|repo| repo.source == repository)
+                .map(|repo| repo.mount.clone())
+        })
+        .unwrap_or_else(|| session.repos[0].mount.clone())
+}
+
 /// Make an isolated guest unmistakable before its Jcode TUI takes over the
 /// terminal. Jcode's supported SSH CLI deliberately has no TUI-theme or
 /// header-decoration flag, so jbox owns only terminal chrome outside the TUI.
@@ -3932,6 +3951,37 @@ mod tests {
         let args = jcode_attach_args("127.0.0.2", "/workspace/project", Some("session_fox_123"));
 
         assert!(args.ends_with(&["--resume".into(), "session_fox_123".into()]));
+    }
+
+    #[test]
+    fn explicit_attachment_prefers_the_current_project_repository_mount() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("primary");
+        let sibling = temp.path().join("sibling");
+        let sibling_nested = sibling.join("nested");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&sibling_nested).unwrap();
+        git(&primary, &["init"]);
+        git(&sibling, &["init"]);
+
+        let mut session = test_session("project-session", primary.clone());
+        session.repos.push(RepoState {
+            name: "sibling".into(),
+            source: sibling.clone(),
+            worktree: temp.path().join("sibling-worktree"),
+            mount: "/workspace/sibling".into(),
+            branch: "jbox/project-session/sibling".into(),
+            base_commit: "deadbeef".into(),
+            host_gitfile: temp.path().join("sibling-gitfile"),
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        });
+
+        assert_eq!(
+            attachment_mount(&session, &sibling_nested),
+            "/workspace/sibling"
+        );
+        assert_eq!(attachment_mount(&session, temp.path()), "/workspace/repo");
     }
 
     #[test]

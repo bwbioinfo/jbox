@@ -211,6 +211,10 @@ jbox stop
 jbox clean
 ```
 
+An explicit `jbox attach SESSION` invoked from a participating repository also
+opens that repository's guest workspace. When invoked elsewhere, it opens the
+session's primary workspace.
+
 When jbox opens Jcode or a guest shell from an interactive terminal, it first
 renders a boxed **📦 JBOX GUEST** marker and sets the terminal title to
 `[📦 JBOX] <session> · <workspace>`. This distinguishes the Kata-isolated

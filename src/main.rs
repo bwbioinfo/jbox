@@ -40,7 +40,8 @@ enum Command {
         all: bool,
     },
     Attach {
-        /// Session to attach. Omit it to select a running workspace for the current repository.
+        /// Session to attach. From a participating repository, opens its workspace; otherwise
+        /// opens the primary workspace. Omit it to select a running workspace for the current repository.
         session: Option<String>,
     },
     Shell {
