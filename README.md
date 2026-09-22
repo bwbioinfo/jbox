@@ -261,7 +261,12 @@ repository. Jbox prints the complete plan and asks once. When the guest is
 running, rebase states clearly that it takes the shared guest offline only
 briefly, then automatically restarts it after every rebase succeeds. Attached
 Jcode clients may display reconnecting during that maintenance window and then
-resume their saved conversation. It never stops a guest
+resume the saved conversation for their repository workspace. Each repository
+mount keeps its own Jcode conversation, so reattaching from one project
+repository never resumes an agent working in a sibling repository. For an older
+multi-repository session with a single shared continuity marker, Jbox retains
+that conversation but starts a fresh repository-scoped conversation instead of
+guessing its workspace. It never stops a guest
 when a sibling has uncommitted work, unresolved conflicts, a detached host
 checkout, or an invalid target branch. Git can still discover a content conflict
 while rebasing one repository after the guest is stopped. In that case completed

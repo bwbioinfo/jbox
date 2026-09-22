@@ -704,11 +704,11 @@ impl App {
             true,
         ));
         let jcode_session_hook = runtime.join("record-session");
-        std::fs::write(
-            &jcode_session_hook,
-            "#!/bin/sh\nset -eu\numask 077\ncase \"${JCODE_HOOK_SESSION_ID:-}\" in\n  ''|*[!A-Za-z0-9_-]*) exit 0 ;;\nesac\nout=/home/jbox/.local/share/jcode/last-session-id\ntmp=\"${out}.tmp.$$\"\nprintf '%s\\n' \"$JCODE_HOOK_SESSION_ID\" > \"$tmp\"\nmv \"$tmp\" \"$out\"\n",
-        )?;
+        std::fs::write(&jcode_session_hook, jcode_session_start_hook(repos))?;
         std::fs::set_permissions(&jcode_session_hook, std::fs::Permissions::from_mode(0o700))?;
+        let continuity_version = runtime.join("repository-scoped-continuity-v1");
+        std::fs::write(&continuity_version, "v1\n")?;
+        std::fs::set_permissions(&continuity_version, std::fs::Permissions::from_mode(0o600))?;
         environment.push((
             "JCODE_HOOK_SESSION_START".into(),
             "/home/jbox/.local/share/jcode/record-session".into(),
@@ -829,17 +829,36 @@ impl App {
 
     fn attach_session(&self, session: &mut Session, mount: &str) -> Result<()> {
         self.require_running(session)?;
+        if self.requires_repository_scoped_jcode_restart(session) {
+            bail!(
+                "jbox session {} must restart once before repository-scoped Jcode continuity can be used. This retains all worktrees and conversations. Run `jbox stop {}` and then `jbox resume {}` from a participating repository before attaching again",
+                session.id,
+                session.id,
+                session.id
+            );
+        }
         self.touch(session)?;
         render_jbox_session_chrome(&session.id, mount)?;
         let ssh_socket = self.paths.session_ssh_dir(&session.id).join("agent.sock");
-        let last_session = match self.paths.last_jcode_session_id(&session.id) {
+        let last_session = match self.repository_jcode_session_id(session, mount) {
             Some(session_id) => Some(session_id),
+            // A legacy multi-repository session had one shared marker, which
+            // cannot safely identify the repository that owns its conversation.
+            // Retain it on disk but begin a repository-scoped conversation.
+            None if session.repos.len() > 1 => {
+                if let Some(session_id) = self.paths.legacy_jcode_session_id(&session.id) {
+                    println!(
+                        "Retaining legacy shared Jcode conversation {session_id}; starting a repository-scoped conversation for {mount}."
+                    );
+                }
+                None
+            }
             // The hook is created while building every current session. A
             // missing marker at first attach is expected, and must start a
             // new conversation rather than scanning shared credential state
             // for unrelated historical sessions.
             None if self.paths.has_jcode_session_hook(&session.id) => None,
-            None => self.recover_legacy_jcode_session_id(session)?,
+            None => self.recover_legacy_jcode_session_id(session, mount)?,
         };
         if let Some(session_id) = &last_session {
             println!("Resuming Jcode conversation {session_id}.");
@@ -856,13 +875,37 @@ impl App {
         Ok(())
     }
 
+    fn repository_jcode_session_id(&self, session: &Session, mount: &str) -> Option<String> {
+        self.paths
+            .last_jcode_session_id(&session.id, mount)
+            .or_else(|| {
+                // A single repository has no cross-workspace ambiguity, so
+                // retain existing continuity until the hook records a scoped
+                // marker. A multi-repository legacy marker is never guessed.
+                (session.repos.len() == 1)
+                    .then(|| self.paths.legacy_jcode_session_id(&session.id))
+                    .flatten()
+            })
+    }
+
+    fn requires_repository_scoped_jcode_restart(&self, session: &Session) -> bool {
+        session.repos.len() > 1
+            && !self
+                .paths
+                .has_repository_scoped_jcode_continuity(&session.id)
+    }
+
     /// Sessions created before the session-start hook existed do not have a
     /// host marker. Ask the already-isolated guest for saved conversations
     /// that contain an assistant response, then persist the chosen validated
     /// ID. A single candidate migrates automatically. Multiple candidates are
     /// never guessed because legacy sessions may have accumulated accidental
     /// empty attaches before continuity tracking was introduced.
-    fn recover_legacy_jcode_session_id(&self, session: &Session) -> Result<Option<String>> {
+    fn recover_legacy_jcode_session_id(
+        &self,
+        session: &Session,
+        mount: &str,
+    ) -> Result<Option<String>> {
         let config = self.paths.write_ssh_config(session)?;
         let mut child = Command::new("ssh")
             .args(["-F", config.to_str().unwrap(), "jbox", "sh", "-s"])
@@ -945,7 +988,7 @@ done | LC_ALL=C sort -r | head -n 20
             sessions[index - 1].1
         };
         self.paths
-            .save_last_jcode_session_id(&session.id, session_id)
+            .save_last_jcode_session_id(&session.id, mount, session_id)
             .context("could not save recovered legacy Jcode conversation ID")?;
         println!("Recovered Jcode conversation {session_id} from legacy session state.");
         Ok(Some((*session_id).to_owned()))
@@ -3223,6 +3266,27 @@ fn jcode_attach_args(
     args
 }
 
+fn jcode_session_start_hook(repos: &[RepoState]) -> String {
+    let mut hook = String::from(
+        "#!/bin/sh\nset -eu\numask 077\ncase \"${JCODE_HOOK_SESSION_ID:-}\" in\n  ''|*[!A-Za-z0-9_-]*) exit 0 ;;\nesac\ncase \"${JCODE_HOOK_CWD:-}\" in\n",
+    );
+    for repo in repos {
+        hook.push_str("  ");
+        hook.push_str(&shell_single_quote(&repo.mount));
+        hook.push_str(") out=/home/jbox/.local/share/jcode/");
+        hook.push_str(&JboxPaths::jcode_session_marker_name(&repo.mount));
+        hook.push_str(" ;;\n");
+    }
+    hook.push_str(
+        "  *) exit 0 ;;\nesac\ntmp=\"${out}.tmp.$$\"\nprintf '%s\\n' \"$JCODE_HOOK_SESSION_ID\" > \"$tmp\"\nmv \"$tmp\" \"$out\"\n",
+    );
+    hook
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// An explicit session ID remains convenient after a session-wide operation,
 /// but it must not discard the repository context of the invoking terminal.
 /// Outside a participating Git repository, retain the historic primary-mount
@@ -3951,6 +4015,153 @@ mod tests {
         let args = jcode_attach_args("127.0.0.2", "/workspace/project", Some("session_fox_123"));
 
         assert!(args.ends_with(&["--resume".into(), "session_fox_123".into()]));
+    }
+
+    #[test]
+    fn jcode_continuity_is_scoped_to_each_repository_mount() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let mut session = test_session("project-session", temp.path().join("primary"));
+        session.repos.push(RepoState {
+            name: "sibling".into(),
+            source: temp.path().join("sibling"),
+            worktree: temp.path().join("sibling-worktree"),
+            mount: "/workspace/sibling".into(),
+            branch: "jbox/project-session/sibling".into(),
+            base_commit: "deadbeef".into(),
+            host_gitfile: temp.path().join("sibling-gitfile"),
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        });
+
+        app.paths
+            .save_last_jcode_session_id(
+                &session.id,
+                &session.repos[0].mount,
+                "session_primary_123",
+            )
+            .unwrap();
+        app.paths
+            .save_last_jcode_session_id(
+                &session.id,
+                &session.repos[1].mount,
+                "session_sibling_456",
+            )
+            .unwrap();
+
+        assert_eq!(
+            app.repository_jcode_session_id(&session, &session.repos[0].mount),
+            Some("session_primary_123".into())
+        );
+        assert_eq!(
+            app.repository_jcode_session_id(&session, &session.repos[1].mount),
+            Some("session_sibling_456".into())
+        );
+    }
+
+    #[test]
+    fn multi_repository_sessions_do_not_resume_a_legacy_shared_conversation() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let mut session = test_session("project-session", temp.path().join("primary"));
+        session.repos.push(RepoState {
+            name: "sibling".into(),
+            source: temp.path().join("sibling"),
+            worktree: temp.path().join("sibling-worktree"),
+            mount: "/workspace/sibling".into(),
+            branch: "jbox/project-session/sibling".into(),
+            base_commit: "deadbeef".into(),
+            host_gitfile: temp.path().join("sibling-gitfile"),
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        });
+        let legacy_marker = app
+            .paths
+            .sessions
+            .join(&session.id)
+            .join("runtime/jcode/last-session-id");
+        std::fs::create_dir_all(legacy_marker.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_marker, "session_legacy_789\n").unwrap();
+
+        assert_eq!(
+            app.repository_jcode_session_id(&session, &session.repos[1].mount),
+            None
+        );
+
+        session.repos.truncate(1);
+        assert_eq!(
+            app.repository_jcode_session_id(&session, &session.repos[0].mount),
+            Some("session_legacy_789".into())
+        );
+    }
+
+    #[test]
+    fn multi_repository_attachments_require_the_scoped_hook_after_upgrade() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let mut session = test_session("project-session", temp.path().join("primary"));
+        session.repos.push(RepoState {
+            name: "sibling".into(),
+            source: temp.path().join("sibling"),
+            worktree: temp.path().join("sibling-worktree"),
+            mount: "/workspace/sibling".into(),
+            branch: "jbox/project-session/sibling".into(),
+            base_commit: "deadbeef".into(),
+            host_gitfile: temp.path().join("sibling-gitfile"),
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        });
+
+        assert!(app.requires_repository_scoped_jcode_restart(&session));
+        let marker = app
+            .paths
+            .sessions
+            .join(&session.id)
+            .join("runtime/jcode/repository-scoped-continuity-v1");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "v1\n").unwrap();
+        assert!(!app.requires_repository_scoped_jcode_restart(&session));
+    }
+
+    #[test]
+    fn session_start_hook_records_conversations_by_guest_mount() {
+        let temp = tempdir().unwrap();
+        let mut session = test_session("project-session", temp.path().join("primary"));
+        session.repos.push(RepoState {
+            name: "sibling".into(),
+            source: temp.path().join("sibling"),
+            worktree: temp.path().join("sibling-worktree"),
+            mount: "/workspace/sibling".into(),
+            branch: "jbox/project-session/sibling".into(),
+            base_commit: "deadbeef".into(),
+            host_gitfile: temp.path().join("sibling-gitfile"),
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        });
+
+        let hook = jcode_session_start_hook(&session.repos);
+        for repo in &session.repos {
+            assert!(hook.contains(&format!(
+                "  {}) out=/home/jbox/.local/share/jcode/{} ;;",
+                shell_single_quote(&repo.mount),
+                JboxPaths::jcode_session_marker_name(&repo.mount),
+            )));
+        }
+        assert!(!hook.contains("out=/home/jbox/.local/share/jcode/last-session-id\n"));
+        assert_eq!(shell_single_quote("/workspace/it's-safe"), "'/workspace/it'\\''s-safe'");
+
+        let mut shell = Command::new("sh")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        shell
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(hook.as_bytes())
+            .unwrap();
+        assert!(shell.wait().unwrap().success());
     }
 
     #[test]

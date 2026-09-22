@@ -1,6 +1,7 @@
 use crate::state::Session;
 use anyhow::{Context, Result, bail};
 use directories::BaseDirs;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -249,10 +250,35 @@ impl JboxPaths {
         self.sessions.join(id).join("ssh")
     }
 
+    /// Marker names are keyed by the complete guest mount instead of a source
+    /// repository name. This avoids collisions and keeps untrusted persisted
+    /// mount strings out of host file paths.
+    pub fn jcode_session_marker_name(mount: &str) -> String {
+        format!("last-session-{:x}", Sha256::digest(mount.as_bytes()))
+    }
+
+    fn jcode_session_marker(&self, id: &str, mount: &str) -> PathBuf {
+        self.sessions
+            .join(id)
+            .join("runtime/jcode")
+            .join(Self::jcode_session_marker_name(mount))
+    }
+
     /// Guest-provided state is treated as untrusted even though this directory
     /// is session-scoped. Restrict IDs before forwarding one to the local Jcode
-    /// command line on a later attach.
-    pub fn last_jcode_session_id(&self, id: &str) -> Option<String> {
+    /// command line on a later attach. Each participating repository resumes
+    /// only the conversation recorded for its guest mount.
+    pub fn last_jcode_session_id(&self, id: &str, mount: &str) -> Option<String> {
+        let file = self.jcode_session_marker(id, mount);
+        let value = fs::read_to_string(file).ok()?;
+        let value = value.trim();
+        Self::valid_jcode_session_id(value).then_some(value.to_owned())
+    }
+
+    /// Sessions created before repository-scoped continuity used one shared
+    /// marker. It remains readable for an unambiguous single-repository
+    /// session, but multi-repository sessions deliberately do not resume it.
+    pub fn legacy_jcode_session_id(&self, id: &str) -> Option<String> {
         let file = self.sessions.join(id).join("runtime/jcode/last-session-id");
         let value = fs::read_to_string(file).ok()?;
         let value = value.trim();
@@ -268,18 +294,38 @@ impl JboxPaths {
             .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
     }
 
+    /// The hook itself is deliberately guest-executable shell. Keep a separate
+    /// host-readable version marker so a newly upgraded CLI never assumes a
+    /// running guest still has the older shared-conversation hook installed.
+    pub fn has_repository_scoped_jcode_continuity(&self, id: &str) -> bool {
+        let file = self
+            .sessions
+            .join(id)
+            .join("runtime/jcode/repository-scoped-continuity-v1");
+        fs::read_to_string(file).is_ok_and(|contents| contents == "v1\n")
+    }
+
     /// Persist a host-discovered legacy session ID in the same narrowly scoped
     /// runtime directory used by the guest hook. The write is atomic so a later
     /// attach never consumes a partial marker.
-    pub fn save_last_jcode_session_id(&self, id: &str, session_id: &str) -> Result<()> {
+    pub fn save_last_jcode_session_id(
+        &self,
+        id: &str,
+        mount: &str,
+        session_id: &str,
+    ) -> Result<()> {
         if !Self::valid_jcode_session_id(session_id) {
             bail!("refusing invalid Jcode session ID recovered for jbox session {id}");
         }
         let directory = self.sessions.join(id).join("runtime/jcode");
         fs::create_dir_all(&directory)?;
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-        let marker = directory.join("last-session-id");
-        let temporary = directory.join(format!(".last-session-id-{}.jbox", uuid::Uuid::new_v4()));
+        let marker = self.jcode_session_marker(id, mount);
+        let temporary = directory.join(format!(
+            ".{}-{}.jbox",
+            Self::jcode_session_marker_name(mount),
+            uuid::Uuid::new_v4()
+        ));
         fs::write(&temporary, format!("{session_id}\n"))?;
         fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
         fs::rename(temporary, marker)?;
@@ -597,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn recovered_jcode_session_markers_are_validated_and_private() {
+    fn recovered_jcode_session_markers_are_mount_scoped_validated_and_private() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = JboxPaths {
             data: tmp.path().join("data"),
@@ -607,22 +653,33 @@ mod tests {
         };
 
         paths
-            .save_last_jcode_session_id("calm-otter", "session_fox_123")
+            .save_last_jcode_session_id("calm-otter", "/workspace/first", "session_fox_123")
             .unwrap();
         assert_eq!(
-            paths.last_jcode_session_id("calm-otter").as_deref(),
+            paths
+                .last_jcode_session_id("calm-otter", "/workspace/first")
+                .as_deref(),
             Some("session_fox_123")
+        );
+        assert_eq!(
+            paths.last_jcode_session_id("calm-otter", "/workspace/second"),
+            None
         );
         let marker = paths
             .sessions
-            .join("calm-otter/runtime/jcode/last-session-id");
+            .join("calm-otter/runtime/jcode")
+            .join(JboxPaths::jcode_session_marker_name("/workspace/first"));
         assert_eq!(
             fs::metadata(marker).unwrap().permissions().mode() & 0o777,
             0o600
         );
         assert!(
             paths
-                .save_last_jcode_session_id("calm-otter", "session;unsafe")
+                .save_last_jcode_session_id(
+                    "calm-otter",
+                    "/workspace/first",
+                    "session;unsafe"
+                )
                 .is_err()
         );
         assert!(!paths.has_jcode_session_hook("calm-otter"));
@@ -634,5 +691,14 @@ mod tests {
         fs::remove_file(&hook).unwrap();
         std::os::unix::fs::symlink("elsewhere", &hook).unwrap();
         assert!(!paths.has_jcode_session_hook("calm-otter"));
+        assert!(!paths.has_repository_scoped_jcode_continuity("calm-otter"));
+        fs::write(
+            paths
+                .sessions
+                .join("calm-otter/runtime/jcode/repository-scoped-continuity-v1"),
+            "v1\n",
+        )
+        .unwrap();
+        assert!(paths.has_repository_scoped_jcode_continuity("calm-otter"));
     }
 }
