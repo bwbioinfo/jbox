@@ -112,6 +112,24 @@ enum Command {
         #[arg(long)]
         onto: Option<String>,
     },
+    /// Synchronize every repository in a selected project session with its configured upstream.
+    Sync {
+        /// Report every repository's synchronization plan without changing branches or remotes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Commit visible generated-worktree changes before rebasing and accepting them.
+        #[arg(long)]
+        checkpoint: bool,
+        /// Confirm local rebases, acceptance, and every non-force push without prompts.
+        #[arg(long, conflicts_with = "dry_run")]
+        yes: bool,
+        /// Resume a retained synchronization after resolving its reported Git operation.
+        #[arg(long = "continue", conflicts_with_all = ["dry_run", "checkpoint", "abort"])]
+        continue_sync: bool,
+        /// Abort a currently paused host or guest rebase, retaining all completed sync stages.
+        #[arg(long, conflicts_with_all = ["dry_run", "checkpoint", "yes", "continue_sync"])]
+        abort: bool,
+    },
     /// Open a local shell in a retained worktree to resolve a Git operation before resuming.
     Resolve {
         /// Session whose worktree to open. Omit it to select from the current repository.
@@ -258,6 +276,22 @@ fn main() -> Result<()> {
         Command::Rebase { onto } => {
             app.rebase_from_repository(&std::env::current_dir()?, onto.as_deref())?
         }
+        Command::Sync {
+            dry_run,
+            checkpoint,
+            yes,
+            continue_sync,
+            abort,
+        } => app.sync_from_repository(
+            &std::env::current_dir()?,
+            jbox::SyncOptions {
+                dry_run,
+                checkpoint,
+                yes,
+                continue_sync,
+                abort,
+            },
+        )?,
         Command::Resolve { session } => match session {
             Some(session) => app.resolve(&session, &std::env::current_dir()?)?,
             None => app.resolve_from_repository(&std::env::current_dir()?)?,
@@ -307,6 +341,7 @@ fn normalized_args() -> Vec<OsString> {
         "preview",
         "accept",
         "rebase",
+        "sync",
         "resolve",
         "resume",
         "clean",
@@ -359,6 +394,21 @@ mod tests {
             Command::Overlay {
                 session: None,
                 undo: false
+            }
+        ));
+    }
+
+    #[test]
+    fn sync_uses_project_scope_and_standard_continue_flag() {
+        let cli = Cli::try_parse_from(["jbox", "sync", "--continue"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Sync {
+                dry_run: false,
+                checkpoint: false,
+                yes: false,
+                continue_sync: true,
+                abort: false,
             }
         ));
     }

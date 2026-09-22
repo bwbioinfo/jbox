@@ -77,6 +77,38 @@ pub struct Session {
     pub jcode_default_provider: Option<String>,
     #[serde(default)]
     pub jcode_default_model: Option<String>,
+    /// Durable progress for a project-wide host synchronization. A sync can
+    /// touch several independent remotes, so this records completed stages for
+    /// actionable continuation after a conflict or a rejected later push.
+    #[serde(default)]
+    pub sync: Option<SyncProgress>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncProgress {
+    pub checkpoint: bool,
+    pub restart_guest: bool,
+    pub repositories: Vec<SyncRepositoryProgress>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncRepositoryProgress {
+    pub name: String,
+    pub host_branch: String,
+    pub upstream_remote: String,
+    pub upstream_ref: String,
+    pub original_host_head: String,
+    pub original_guest_head: String,
+    pub stage: SyncStage,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SyncStage {
+    Planned,
+    HostSynchronized,
+    GuestRebased,
+    Accepted,
+    Pushed,
 }
 impl Session {
     pub fn expired(&self) -> bool {

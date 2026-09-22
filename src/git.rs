@@ -8,11 +8,21 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub struct Git;
 const BEADS_EXPORT_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// The exact remote branch configured as a checked-out host branch's upstream.
+/// Jbox deliberately never guesses `origin` or assumes the upstream branch has
+/// the same name as the local branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upstream {
+    pub branch: String,
+    pub remote: String,
+    pub remote_ref: String,
+}
 pub struct WorktreeCreated {
     pub branch: String,
     pub commit: String,
@@ -1025,12 +1035,183 @@ impl Git {
     pub fn current_branch(&self, repository: &Path) -> Result<String> {
         Self::run(repository, &["branch", "--show-current"])
     }
+
+    /// Resolve and validate the exact upstream for the current host branch.
+    /// The clean and operation checks happen here, before `pull --rebase` can
+    /// modify a checkout.
+    pub fn upstream(&self, repository: &Path) -> Result<Upstream> {
+        let branch = self.current_branch(repository)?;
+        if branch.is_empty() {
+            bail!(
+                "cannot synchronize host repository {}: it is detached; check out a branch with a configured upstream",
+                repository.display()
+            );
+        }
+        if !Self::run(repository, &["status", "--porcelain"])?.is_empty() {
+            bail!(
+                "cannot synchronize host repository {}: it has uncommitted changes; commit or stash them before `jbox sync`",
+                repository.display()
+            );
+        }
+        if let Some(operation) = self.in_progress_operation(repository)? {
+            bail!(
+                "cannot synchronize host repository {}: a Git {operation} is in progress; finish or abort it before `jbox sync`",
+                repository.display()
+            );
+        }
+        let branch_ref = format!("refs/heads/{branch}");
+        let remote = Self::run(
+            repository,
+            &[
+                "for-each-ref",
+                "--format=%(upstream:remotename)",
+                &branch_ref,
+            ],
+        )?;
+        let remote_ref = Self::run(
+            repository,
+            &[
+                "for-each-ref",
+                "--format=%(upstream:remoteref)",
+                &branch_ref,
+            ],
+        )?;
+        if remote.is_empty() || remote_ref.is_empty() {
+            bail!(
+                "cannot synchronize `{branch}` in {}: it has no configured upstream; configure one before `jbox sync`",
+                repository.display()
+            );
+        }
+        Ok(Upstream {
+            branch,
+            remote,
+            remote_ref,
+        })
+    }
+
+    /// Synchronize the current clean host branch with its explicit upstream.
+    /// `pull --rebase` only rewrites commits local to this checkout and never
+    /// force-pushes the resulting history.
+    pub fn rebase_host_onto_upstream(&self, repository: &Path, upstream: &Upstream) -> Result<()> {
+        let current = self.current_branch(repository)?;
+        if current != upstream.branch {
+            bail!(
+                "cannot synchronize {}: host branch changed from `{}` to `{current}`",
+                repository.display(),
+                upstream.branch
+            );
+        }
+        Self::run(
+            repository,
+            &[
+                "pull",
+                "--rebase",
+                "--no-autostash",
+                &upstream.remote,
+                &upstream.remote_ref,
+            ],
+        )
+        .with_context(|| {
+            format!(
+                "host rebase stopped in {}; resolve and stage its conflicts, run `git rebase --continue`, then run `jbox sync --continue`",
+                repository.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Test that the exact upstream can be fetched before Jbox stops a guest or
+    /// rewrites any local branch. `--dry-run` contacts the remote but leaves
+    /// local tracking refs and the checked-out branch unchanged.
+    pub fn preflight_upstream_fetch(&self, repository: &Path, upstream: &Upstream) -> Result<()> {
+        Self::run(
+            repository,
+            &[
+                "fetch",
+                "--dry-run",
+                "--no-tags",
+                &upstream.remote,
+                &upstream.remote_ref,
+            ],
+        )
+        .with_context(|| {
+            format!(
+                "cannot fetch configured upstream {}/{} for {}",
+                upstream.remote,
+                upstream.remote_ref,
+                repository.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Push the checked-out host branch to precisely the configured upstream.
+    /// The explicit refspec avoids `push.default` sending unrelated branches.
+    pub fn push_upstream(&self, repository: &Path, upstream: &Upstream) -> Result<()> {
+        let current = self.current_branch(repository)?;
+        if current != upstream.branch {
+            bail!(
+                "cannot push {}: host branch changed from `{}` to `{current}`",
+                repository.display(),
+                upstream.branch
+            );
+        }
+        Self::run(
+            repository,
+            &[
+                "push",
+                "--porcelain",
+                &upstream.remote,
+                &format!("HEAD:{}", upstream.remote_ref),
+            ],
+        )
+        .with_context(|| {
+            format!(
+                "could not push {} to {}/{}; accepted commits remain local and `jbox sync --continue` can retry after the remote is reconciled",
+                repository.display(),
+                upstream.remote,
+                upstream.remote_ref
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Return the active destructive Git operation, if any. Git's operation
+    /// directories work for normal and linked worktrees, unlike assuming a
+    /// `.git` directory exists below the checkout root.
+    pub fn in_progress_operation(&self, repository: &Path) -> Result<Option<&'static str>> {
+        let git_dir = PathBuf::from(Self::run(repository, &["rev-parse", "--absolute-git-dir"])?);
+        if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+            return Ok(Some("rebase"));
+        }
+        if git_dir.join("MERGE_HEAD").exists() {
+            return Ok(Some("merge"));
+        }
+        if git_dir.join("CHERRY_PICK_HEAD").exists() {
+            return Ok(Some("cherry-pick"));
+        }
+        Ok(None)
+    }
     pub fn rebase_worktree(&self, repo: &RepoState, onto: &str) -> Result<()> {
         self.preflight_rebase_worktree(repo, onto)?;
         Self::run(&repo.worktree, &["rebase", onto]).with_context(|| {
             format!(
                 "rebase stopped for {}; resolve conflicts in {}, then run `git rebase --continue` there",
                 repo.name,
+                repo.worktree.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Advance a clean, already-accepted session branch to the host branch
+    /// after the host itself was rebased for a failed-push retry. This is safe
+    /// only after acceptance: no guest-only commits or files may be discarded.
+    pub fn align_accepted_worktree(&self, repo: &RepoState, host_branch: &str) -> Result<()> {
+        self.preflight_rebase_worktree(repo, host_branch)?;
+        Self::run(&repo.worktree, &["reset", "--hard", host_branch]).with_context(|| {
+            format!(
+                "could not align accepted session worktree {} with host branch `{host_branch}`",
                 repo.worktree.display()
             )
         })?;

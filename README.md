@@ -265,6 +265,52 @@ earlier rebases and the stopped session are retained: resolve with `jbox resolve
 run `git rebase --continue`, then rerun `jbox rebase` to continue the remaining
 repositories.
 
+### Synchronizing every project repository
+
+`jbox sync` selects a retained session from any participating checkout, then
+plans and operates on **every** repository in that session, including the
+primary repository and all `[[repos]]` entries. Each host checkout must be on a
+clean branch with a configured upstream. Jbox uses that exact upstream, never
+guesses `origin`, and never assumes matching local and remote branch names.
+
+```bash
+# From any participating original host checkout, inspect every configured
+# upstream, worktree, preview, overlay, and required recovery action.
+jbox sync --dry-run
+
+# Checkpoint visible generated-worktree files to session branches, then
+# synchronize host branches, rebase guests, fast-forward accept, and push.
+jbox sync --checkpoint
+```
+
+The first command contacts each configured upstream with a non-mutating fetch
+check and prints the complete project plan. If any repository is detached,
+dirty, missing an upstream, has a preview or overlay, has an unresolved Git
+operation, or cannot reach its upstream, Jbox does not stop the guest or change
+any host branch. It reports each blocker and its shortest recovery path. A
+normal sync refuses visible guest files unless `--checkpoint` is explicit, so
+it never creates an unexpected agent commit.
+
+After confirmation, Jbox freezes a running guest, runs host `pull --rebase`
+against each repository's configured upstream, rebases every guest worktree,
+and fast-forward accepts each snapshot. Rebasing changes only unpushed local
+commit IDs, never uses a force push, and stops for reviewed conflict resolution.
+Jbox asks separately before pushing because independent remotes cannot be
+atomic. Pass `--yes` only when both local rewrites and every normal push are
+intended.
+
+If Git pauses or a later remote push is rejected, the session remains stopped
+with a durable per-repository synchronization journal. Resolve and stage the
+reported rebase, run `git rebase --continue`, then run `jbox sync --continue`
+from the affected original checkout. A continuation retries only unfinished
+repositories. When a remote moved after local acceptance, it rebases the host
+again and realigns the clean accepted guest branch before retrying the push, so
+it does not duplicate guest commits. `jbox sync --abort` aborts paused rebases
+only. It intentionally retains host updates, accepted commits, and any pushes
+that already completed. While this journal exists, `jbox resume` and
+`jbox clean` refuse so a new guest lifetime or cleanup cannot bypass unfinished
+remote synchronization.
+
 Attach and shell consider running worktrees and begin in the selected guest
 mount. Status and diff inspect only that worktree. Stop and clean remain
 operations on the whole development machine, so their confirmations state how

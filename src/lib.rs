@@ -9,10 +9,12 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use config::{Config, ResolvedGitAuthor, ResolvedRepository};
 use engine::{ContainerSpec, DockerEngine, Engine};
-use git::Git;
+use git::{Git, Upstream};
 use image::ImageManager;
 use paths::{JboxPaths, safe_target};
-use state::{RepoState, Session, SessionState, StateStore};
+use state::{
+    RepoState, Session, SessionState, StateStore, SyncProgress, SyncRepositoryProgress, SyncStage,
+};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -127,6 +129,17 @@ pub struct AcceptOptions {
     pub stash_host: bool,
     /// Merge, rather than fast-forward, a guest snapshot into a diverged host branch.
     pub merge: bool,
+}
+
+/// Controls project-wide synchronization. The normal mode deliberately asks
+/// separately before local history changes and before any remote push.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SyncOptions {
+    pub dry_run: bool,
+    pub checkpoint: bool,
+    pub yes: bool,
+    pub continue_sync: bool,
+    pub abort: bool,
 }
 
 /// Values that differ between a new guest and restarting a retained session.
@@ -593,6 +606,7 @@ impl App {
             repos,
             jcode_default_provider: config.jcode.default_provider.clone(),
             jcode_default_model: config.jcode.default_model.clone(),
+            sync: None,
         };
         self.state.save(&session)?;
         println!("jbox session {session_id} is running on {ssh_host}:{port}");
@@ -1841,6 +1855,433 @@ done | LC_ALL=C sort -r | head -n 20
         Ok(())
     }
 
+    /// Synchronize every host repository in the selected development machine.
+    /// Each host uses its own explicitly configured upstream. A journal in the
+    /// session state makes a later conflict or failed push recoverable without
+    /// losing accepted work or guessing which repositories already finished.
+    pub fn sync_from_repository(&self, input: &Path, options: SyncOptions) -> Result<()> {
+        let Some((mut session, _)) = self.select_repository_worktree(input, "synchronize", None)?
+        else {
+            return Ok(());
+        };
+
+        if options.abort {
+            return self.abort_sync(&mut session);
+        }
+        if session.sync.is_some() && !options.continue_sync {
+            bail!(
+                "session {} has a retained synchronization plan; resolve any reported Git operation, then run `jbox sync --continue`, or run `jbox sync --abort` to abandon only its paused rebase",
+                session.id
+            );
+        }
+        if options.continue_sync && session.sync.is_none() {
+            bail!(
+                "session {} has no retained synchronization plan; run `jbox sync` instead",
+                session.id
+            );
+        }
+
+        let checkpoint = session
+            .sync
+            .as_ref()
+            .map_or(options.checkpoint, |progress| progress.checkpoint);
+        let (mut progress, problems) = self.sync_plan(&session, checkpoint, options.continue_sync)?;
+        self.print_sync_plan(&session, &progress, checkpoint, &problems);
+        if !problems.is_empty() {
+            bail!(
+                "jbox sync made no branch or remote changes because {} repository issue(s) need attention",
+                problems.len()
+            );
+        }
+        if options.dry_run {
+            println!("dry run complete. No branches, worktrees, or remotes were changed.");
+            return Ok(());
+        }
+        if !options.yes
+            && !confirm(&format!(
+                "Synchronize all {} repositories in session {}?",
+                session.repos.len(),
+                session.id
+            ))?
+        {
+            println!("sync cancelled. No branches or remotes were changed.");
+            return Ok(());
+        }
+
+        let restart_guest = session.state == SessionState::Running
+            || session
+                .sync
+                .as_ref()
+                .is_some_and(|existing| existing.restart_guest);
+        progress.restart_guest = restart_guest;
+        session.sync = Some(progress);
+        self.state.save(&session)?;
+        if restart_guest {
+            println!(
+                "Stopping {} while its host branches and worktrees are synchronized...",
+                session.id
+            );
+            self.stop_running_session(&mut session)?;
+        }
+
+        if checkpoint {
+            self.checkpoint_sync_worktrees(&mut session)?;
+        }
+        self.sync_host_branches(&mut session)?;
+        self.sync_guest_worktrees(&mut session)?;
+        self.sync_accept(&mut session)?;
+
+        println!("All local repositories are synchronized and accepted.");
+        println!(
+            "Pushing can update independent remotes and is not atomic across repositories. If one push fails, completed pushes remain published and unfinished repositories stay in the retained sync journal."
+        );
+        if !options.yes
+            && !confirm(&format!(
+                "Push all {} synchronized host branches?",
+                session.repos.len()
+            ))?
+        {
+            println!(
+                "push cancelled. Local accepted commits are retained; run `jbox sync --continue` to push them later."
+            );
+            return Ok(());
+        }
+        self.sync_push(&mut session)?;
+
+        let restart_guest = session
+            .sync
+            .as_ref()
+            .is_some_and(|progress| progress.restart_guest);
+        session.sync = None;
+        self.state.save(&session)?;
+        if restart_guest {
+            println!("All repositories pushed. Restarting {}...", session.id);
+            self.resume(&session.id)?;
+        }
+        println!(
+            "synchronized and pushed all {} repositories in session {}.",
+            session.repos.len(),
+            session.id
+        );
+        Ok(())
+    }
+
+    fn sync_plan(
+        &self,
+        session: &Session,
+        checkpoint: bool,
+        continuing: bool,
+    ) -> Result<(SyncProgress, Vec<String>)> {
+        let previous = session.sync.as_ref();
+        let mut repositories = Vec::new();
+        let mut problems = Vec::new();
+        for repo in &session.repos {
+            if self.host_overlay_path(&session.id, repo).is_file() {
+                problems.push(format!(
+                    "{} has an active host overlay. Run `jbox overlay --undo` from {} first.",
+                    repo.name,
+                    repo.source.display()
+                ));
+                continue;
+            }
+            if self.preview_worktree_path(&session.id, repo).is_dir() {
+                problems.push(format!(
+                    "{} has an active host-native preview. Accept or discard it from {} before sync.",
+                    repo.name,
+                    repo.source.display()
+                ));
+                continue;
+            }
+            match self.git.in_progress_operation(&repo.worktree) {
+                Ok(Some(operation)) => {
+                    problems.push(format!(
+                        "{} has a guest Git {operation} in progress in {}. Resolve or abort it before sync.",
+                        repo.name,
+                        repo.worktree.display()
+                    ));
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    problems.push(format!("{}: {error:#}", repo.name));
+                    continue;
+                }
+            }
+            match self.git.current_branch(&repo.worktree) {
+                Ok(branch) if branch == repo.branch => {}
+                Ok(branch) => {
+                    problems.push(format!(
+                        "{} worktree {} is on `{branch}`, expected session branch `{}`. Restore that branch before sync.",
+                        repo.name,
+                        repo.worktree.display(),
+                        repo.branch
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    problems.push(format!("{}: {error:#}", repo.name));
+                    continue;
+                }
+            }
+            let upstream = match self.git.upstream(&repo.source) {
+                Ok(upstream) => upstream,
+                Err(error) => {
+                    problems.push(format!("{}: {error:#}", repo.name));
+                    continue;
+                }
+            };
+            if let Err(error) = self.git.preflight_upstream_fetch(&repo.source, &upstream) {
+                problems.push(format!("{}: {error:#}", repo.name));
+                continue;
+            }
+            let dirty = match self.git.validate_session_checkpoint(repo) {
+                Ok(dirty) => dirty,
+                Err(error) => {
+                    problems.push(format!("{}: {error:#}", repo.name));
+                    continue;
+                }
+            };
+            if dirty && !checkpoint {
+                problems.push(format!(
+                    "{} has visible generated-worktree changes. Run `jbox sync --checkpoint` from {} to commit them only to its session branch.",
+                    repo.name,
+                    repo.source.display()
+                ));
+                continue;
+            }
+            if let Err(error) = self.git.preflight_rebase_worktree(repo, &upstream.branch) {
+                problems.push(format!("{}: {error:#}", repo.name));
+                continue;
+            }
+            let previous_repo = previous.and_then(|progress| {
+                progress.repositories.iter().find(|candidate| {
+                    candidate.name == repo.name
+                        && candidate.host_branch == upstream.branch
+                        && candidate.upstream_remote == upstream.remote
+                        && candidate.upstream_ref == upstream.remote_ref
+                })
+            });
+            if continuing && previous_repo.is_none() {
+                problems.push(format!(
+                    "{} no longer matches its retained sync target. Run `jbox sync --abort`, then start a new `jbox sync` after reviewing its branch and upstream.",
+                    repo.name
+                ));
+                continue;
+            }
+            repositories.push(SyncRepositoryProgress {
+                name: repo.name.clone(),
+                host_branch: upstream.branch,
+                upstream_remote: upstream.remote,
+                upstream_ref: upstream.remote_ref,
+                original_host_head: previous_repo.map_or_else(
+                    || self.git.head(&repo.source),
+                    |entry| Ok(entry.original_host_head.clone()),
+                )?,
+                original_guest_head: previous_repo.map_or_else(
+                    || self.git.head(&repo.worktree),
+                    |entry| Ok(entry.original_guest_head.clone()),
+                )?,
+                stage: previous_repo.map_or(SyncStage::Planned, |entry| entry.stage),
+            });
+        }
+        Ok((
+            SyncProgress {
+                checkpoint,
+                restart_guest: false,
+                repositories,
+            },
+            problems,
+        ))
+    }
+
+    fn print_sync_plan(
+        &self,
+        session: &Session,
+        progress: &SyncProgress,
+        checkpoint: bool,
+        problems: &[String],
+    ) {
+        println!("Synchronization plan for session {}:", session.id);
+        for repository in &progress.repositories {
+            println!(
+                "  {}: {} -> {}/{} [{}]",
+                repository.name,
+                repository.host_branch,
+                repository.upstream_remote,
+                repository.upstream_ref,
+                format_sync_stage(repository.stage)
+            );
+        }
+        if checkpoint {
+            println!("  generated-worktree changes: checkpoint before rebase");
+        }
+        if !problems.is_empty() {
+            println!("Synchronization needs attention:");
+            for problem in problems {
+                println!("  - {problem}");
+            }
+        }
+    }
+
+    fn sync_host_branches(&self, session: &mut Session) -> Result<()> {
+        let targets = self.sync_targets(session)?;
+        for (repo, target, stage) in targets {
+            if stage >= SyncStage::HostSynchronized && stage != SyncStage::Accepted {
+                continue;
+            }
+            self.git
+                .rebase_host_onto_upstream(&repo.source, &target)
+                .with_context(|| self.sync_recovery_message(session, &repo))?;
+            if stage != SyncStage::Accepted {
+                self.update_sync_stage(session, &repo.name, SyncStage::HostSynchronized)?;
+            }
+            println!("synchronized host {} onto {}/{}", repo.name, target.remote, target.remote_ref);
+            if stage == SyncStage::Accepted {
+                self.git
+                    .align_accepted_worktree(&repo, &target.branch)
+                    .with_context(|| self.sync_recovery_message(session, &repo))?;
+                println!("aligned accepted guest {} with `{}`", repo.name, target.branch);
+            }
+        }
+        Ok(())
+    }
+
+    fn sync_guest_worktrees(&self, session: &mut Session) -> Result<()> {
+        let targets = self.sync_targets(session)?;
+        for (repo, target, stage) in targets {
+            if stage >= SyncStage::GuestRebased {
+                continue;
+            }
+            self.git
+                .rebase_worktree(&repo, &target.branch)
+                .with_context(|| self.sync_recovery_message(session, &repo))?;
+            self.update_sync_stage(session, &repo.name, SyncStage::GuestRebased)?;
+            println!("rebased guest {} onto `{}`", repo.name, target.branch);
+        }
+        Ok(())
+    }
+
+    fn sync_accept(&self, session: &mut Session) -> Result<()> {
+        let targets = self.sync_targets(session)?;
+        for (repo, target, stage) in targets {
+            if stage >= SyncStage::Accepted {
+                continue;
+            }
+            self.git
+                .accept_snapshot(&repo, &target.branch)
+                .with_context(|| self.sync_recovery_message(session, &repo))?;
+            self.update_sync_stage(session, &repo.name, SyncStage::Accepted)?;
+            println!("accepted {} into `{}`", repo.name, target.branch);
+        }
+        Ok(())
+    }
+
+    fn sync_push(&self, session: &mut Session) -> Result<()> {
+        let targets = self.sync_targets(session)?;
+        for (repo, target, stage) in targets {
+            if stage == SyncStage::Pushed {
+                continue;
+            }
+            self.git
+                .push_upstream(&repo.source, &target)
+                .with_context(|| self.sync_recovery_message(session, &repo))?;
+            self.update_sync_stage(session, &repo.name, SyncStage::Pushed)?;
+            println!("pushed {} to {}/{}", repo.name, target.remote, target.remote_ref);
+        }
+        Ok(())
+    }
+
+    fn checkpoint_sync_worktrees(&self, session: &mut Session) -> Result<()> {
+        for repo in &session.repos {
+            self.git.validate_session_checkpoint(repo)?;
+        }
+        for repo in &session.repos {
+            if self.git.checkpoint_session_changes(repo, &session.id)? {
+                println!("checkpointed generated worktree changes for {}", repo.name);
+            }
+        }
+        Ok(())
+    }
+
+    fn sync_targets(&self, session: &Session) -> Result<Vec<(RepoState, Upstream, SyncStage)>> {
+        let progress = session
+            .sync
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("internal error: sync progress was not recorded"))?;
+        session
+            .repos
+            .iter()
+            .map(|repo| {
+                let entry = progress
+                    .repositories
+                    .iter()
+                    .find(|entry| entry.name == repo.name)
+                    .ok_or_else(|| anyhow::anyhow!("internal error: no sync target for {}", repo.name))?;
+                Ok((
+                    repo.clone(),
+                    Upstream {
+                        branch: entry.host_branch.clone(),
+                        remote: entry.upstream_remote.clone(),
+                        remote_ref: entry.upstream_ref.clone(),
+                    },
+                    entry.stage,
+                ))
+            })
+            .collect()
+    }
+
+    fn update_sync_stage(&self, session: &mut Session, name: &str, stage: SyncStage) -> Result<()> {
+        let progress = session
+            .sync
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("internal error: sync progress was not recorded"))?;
+        let entry = progress
+            .repositories
+            .iter_mut()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| anyhow::anyhow!("internal error: no sync progress for {name}"))?;
+        entry.stage = stage;
+        self.state.save(session)
+    }
+
+    fn sync_recovery_message(&self, session: &Session, repo: &RepoState) -> String {
+        format!(
+            "synchronization is retained for session {}. Resolve Git in {}, then run `jbox sync --continue` from {}",
+            session.id,
+            repo.source.display(),
+            repo.source.display()
+        )
+    }
+
+    fn abort_sync(&self, session: &mut Session) -> Result<()> {
+        if session.sync.is_none() {
+            bail!("session {} has no retained synchronization to abort", session.id);
+        }
+        let mut aborted = 0;
+        for repo in &session.repos {
+            for worktree in [&repo.source, &repo.worktree] {
+                if self.git.in_progress_operation(worktree)? == Some("rebase") {
+                    Command::new("git")
+                        .arg("-C")
+                        .arg(worktree)
+                        .args(["rebase", "--abort"])
+                        .status()
+                        .with_context(|| format!("could not abort rebase in {}", worktree.display()))?
+                        .success()
+                        .then_some(())
+                        .ok_or_else(|| anyhow::anyhow!("could not abort rebase in {}", worktree.display()))?;
+                    aborted += 1;
+                }
+            }
+        }
+        session.sync = None;
+        self.state.save(session)?;
+        println!(
+            "aborted {aborted} paused rebase operation(s). Completed host rebases, accepted commits, and pushes were retained."
+        );
+        Ok(())
+    }
+
     /// Open a host-local shell in the matching retained worktree. This is an
     /// intentional escape hatch for resolving a paused rebase or merge before
     /// a guest can safely be resumed. It never starts a container or changes
@@ -1925,6 +2366,11 @@ done | LC_ALL=C sort -r | head -n 20
     /// isolated guest Git metadata.
     pub fn resume(&self, id: &str) -> Result<()> {
         let mut session = self.load_session(id)?;
+        if session.sync.is_some() {
+            bail!(
+                "cannot resume session {id} while synchronization is retained; resolve the reported Git operation and run `jbox sync --continue`, or run `jbox sync --abort` before resuming"
+            );
+        }
         if session.state == SessionState::Running {
             let mount = session.repos[0].mount.clone();
             println!("jbox session {id} is already running. Attaching to it.");
@@ -2188,6 +2634,12 @@ done | LC_ALL=C sort -r | head -n 20
             None => self.list_sessions()?,
         };
         for mut session in targets {
+            if session.sync.is_some() {
+                bail!(
+                    "cannot clean {} while synchronization is retained; run `jbox sync --continue` to finish it or `jbox sync --abort` to abandon its paused rebase first",
+                    session.id
+                );
+            }
             if session
                 .repos
                 .iter()
@@ -2810,6 +3262,27 @@ fn jbox_terminal_title(session_id: &str, mount: &str) -> String {
     format!("[📦 JBOX] {session_id} · {mount}")
 }
 
+fn confirm(prompt: &str) -> Result<bool> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        bail!("{prompt} Re-run in an interactive terminal or pass --yes.");
+    }
+    print!("{prompt} [y/N]: ");
+    io::stdout().flush()?;
+    let mut confirmed = String::new();
+    io::stdin().read_line(&mut confirmed)?;
+    Ok(matches!(confirmed.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+fn format_sync_stage(stage: SyncStage) -> &'static str {
+    match stage {
+        SyncStage::Planned => "planned",
+        SyncStage::HostSynchronized => "host synchronized",
+        SyncStage::GuestRebased => "guest rebased",
+        SyncStage::Accepted => "accepted locally",
+        SyncStage::Pushed => "pushed",
+    }
+}
+
 fn format_session_list(empty_message: &str, sessions: &[Session]) -> String {
     if sessions.is_empty() {
         return format!("{empty_message}\n");
@@ -2899,6 +3372,23 @@ mod tests {
         }
     }
 
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    }
+
     #[test]
     fn prime_uses_fixed_module_arguments_with_or_without_sudo() {
         let root = prime_module_command(true);
@@ -2967,7 +3457,160 @@ mod tests {
             }],
             jcode_default_provider: None,
             jcode_default_model: None,
+            sync: None,
         }
+    }
+
+    fn sync_test_repo(root: &Path, name: &str, session_id: &str) -> RepoState {
+        let remote = root.join(format!("{name}.git"));
+        let source = root.join(format!("{name}-source"));
+        let worktree = root.join(format!("{name}-worktree"));
+        std::fs::create_dir(&source).unwrap();
+        Command::new("git")
+            .args(["init", "--bare", remote.to_str().unwrap()])
+            .status()
+            .unwrap();
+        git(&source, &["init"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Test"]);
+        std::fs::write(source.join("base"), "base\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "base"]);
+        git(&source, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&source, &["push", "-u", "origin", "HEAD"]);
+        let made = Git
+            .add_worktree(&source, &worktree, session_id, name)
+            .unwrap();
+
+        // A host-only commit exercises host pull --rebase rather than only a
+        // trivial fast-forward. It is intentionally not pushed yet.
+        std::fs::write(source.join("host"), "host\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "host"]);
+
+        // Advance the configured upstream through an independent checkout.
+        let writer = root.join(format!("{name}-writer"));
+        git(
+            root,
+            &["clone", remote.to_str().unwrap(), writer.to_str().unwrap()],
+        );
+        git(&writer, &["config", "user.email", "test@example.com"]);
+        git(&writer, &["config", "user.name", "Test"]);
+        std::fs::write(writer.join("upstream"), "upstream\n").unwrap();
+        git(&writer, &["add", "."]);
+        git(&writer, &["commit", "-m", "upstream"]);
+        git(&writer, &["push"]);
+
+        std::fs::write(worktree.join("guest"), "guest\n").unwrap();
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-m", "guest"]);
+
+        RepoState {
+            name: name.into(),
+            source,
+            worktree,
+            mount: format!("/workspace/{name}"),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile: root.join(format!("{name}-host-gitfile")),
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sync_rebases_accepts_and_pushes_every_project_repository() {
+        let root = tempdir().unwrap();
+        let app = test_app(root.path());
+        let first = sync_test_repo(root.path(), "first", "sync-session");
+        let second = sync_test_repo(root.path(), "second", "sync-session");
+        let mut session = test_session("sync-session", first.source.clone());
+        session.repos = vec![first.clone(), second.clone()];
+
+        let (progress, problems) = app.sync_plan(&session, false, false).unwrap();
+        assert!(problems.is_empty(), "{problems:#?}");
+        assert_eq!(progress.repositories.len(), 2);
+        session.sync = Some(progress);
+        app.state.save(&session).unwrap();
+
+        app.sync_host_branches(&mut session).unwrap();
+        app.sync_guest_worktrees(&mut session).unwrap();
+        app.sync_accept(&mut session).unwrap();
+        app.sync_push(&mut session).unwrap();
+
+        for repo in [&first, &second] {
+            assert_eq!(
+                Git.head(&repo.source).unwrap(),
+                git(&repo.source, &["rev-parse", "@{upstream}"])
+            );
+            for file in ["host", "upstream", "guest"] {
+                assert!(repo.source.join(file).is_file(), "{} missing {file}", repo.name);
+            }
+        }
+        assert!(session
+            .sync
+            .as_ref()
+            .unwrap()
+            .repositories
+            .iter()
+            .all(|entry| entry.stage == SyncStage::Pushed));
+    }
+
+    #[test]
+    fn sync_continuation_rebases_an_accepted_branch_after_a_push_race() {
+        let root = tempdir().unwrap();
+        let app = test_app(root.path());
+        let repo = sync_test_repo(root.path(), "race", "race-session");
+        let mut session = test_session("race-session", repo.source.clone());
+        session.repos = vec![repo.clone()];
+        let (progress, problems) = app.sync_plan(&session, false, false).unwrap();
+        assert!(problems.is_empty(), "{problems:#?}");
+        session.sync = Some(progress);
+
+        app.sync_host_branches(&mut session).unwrap();
+        app.sync_guest_worktrees(&mut session).unwrap();
+        app.sync_accept(&mut session).unwrap();
+        assert_eq!(
+            session.sync.as_ref().unwrap().repositories[0].stage,
+            SyncStage::Accepted
+        );
+
+        // A different client advances the remote after Jbox accepted locally
+        // but before it can push. Continuation must rebase the host and align
+        // the clean, already-accepted guest branch without duplicating commits.
+        let writer = root.path().join("race-writer");
+        std::fs::write(writer.join("later"), "later\n").unwrap();
+        git(&writer, &["add", "."]);
+        git(&writer, &["commit", "-m", "later"]);
+        git(&writer, &["push"]);
+
+        app.sync_host_branches(&mut session).unwrap();
+        app.sync_push(&mut session).unwrap();
+        assert_eq!(
+            Git.head(&repo.source).unwrap(),
+            git(&repo.source, &["rev-parse", "@{upstream}"])
+        );
+        assert_eq!(Git.head(&repo.worktree).unwrap(), Git.head(&repo.source).unwrap());
+        for file in ["host", "upstream", "guest", "later"] {
+            assert!(repo.source.join(file).is_file(), "missing {file}");
+        }
+    }
+
+    #[test]
+    fn retained_sync_blocks_resume_and_clean_until_explicit_recovery() {
+        let root = tempdir().unwrap();
+        let app = test_app(root.path());
+        let source = root.path().join("source");
+        let mut session = test_session("retained-sync", source);
+        session.sync = Some(SyncProgress {
+            checkpoint: false,
+            restart_guest: false,
+            repositories: Vec::new(),
+        });
+        app.state.save(&session).unwrap();
+
+        assert!(app.resume(&session.id).unwrap_err().to_string().contains("synchronization is retained"));
+        assert!(app.clean(Some(&session.id), false).unwrap_err().to_string().contains("synchronization is retained"));
     }
 
     #[test]
