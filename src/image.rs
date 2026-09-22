@@ -41,10 +41,16 @@ while [ "$index" -lt "${JBOX_SKILL_COUNT:-0}" ]; do
             "$@"
         '
     then
-        # Skills are an enhancement, not a daemon dependency. A renamed,
-        # deleted, or temporarily unreachable source must not turn a usable
-        # Jbox session into a container that exits before SSH starts.
-        echo "jbox: could not install optional skill source ${repository}; continuing without it" >&2
+        # Keep the original `gh` error above, then provide remediation that is
+        # actionable without leaking the guest's read-only credential material.
+        # A session snapshots hosts.yml at launch, so host reauthentication only
+        # takes effect after the user launches a new Jbox session.
+        echo "jbox: failed to install configured GitHub skill source: ${repository}" >&2
+        echo "jbox: if this source is private, on the host run:" >&2
+        echo "jbox:   gh auth login --hostname github.com --web --scopes repo" >&2
+        echo "jbox: sign in with an account that can read ${repository}, then verify:" >&2
+        echo "jbox:   gh repo view ${repository} --json nameWithOwner" >&2
+        echo "jbox: launch a new Jbox session after that verification succeeds." >&2
     fi
     index=$((index + 1))
 done
@@ -219,7 +225,10 @@ mod tests {
         assert!(JBOX_ENTRYPOINT.contains("JBOX_SKILL_COUNT"));
         assert!(JBOX_ENTRYPOINT.contains("/home/jbox/.agents/skills"));
         assert!(JBOX_ENTRYPOINT.contains("gh skill install"));
-        assert!(JBOX_ENTRYPOINT.contains("could not install optional skill source"));
+        assert!(JBOX_ENTRYPOINT.contains("failed to install configured GitHub skill source"));
+        assert!(JBOX_ENTRYPOINT.contains("gh auth login --hostname github.com --web --scopes repo"));
+        assert!(JBOX_ENTRYPOINT.contains("gh repo view ${repository} --json nameWithOwner"));
+        assert!(JBOX_ENTRYPOINT.contains("launch a new Jbox session"));
         assert!(
             JBOX_ENTRYPOINT.find("gh auth setup-git").unwrap()
                 < JBOX_ENTRYPOINT.find("gh skill install").unwrap()

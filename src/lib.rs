@@ -657,13 +657,17 @@ impl App {
             ));
         }
         if !config.jcode.skills.is_empty() {
-            let skills_dir = ssh
+            // `gh skill` records source metadata at `.agents/.skill-lock.json`.
+            // Mount the parent directory, not only `skills`, so the non-root
+            // guest user can update that file while installing and refreshing
+            // configured skills.
+            let agents_dir = ssh
                 .parent()
                 .context("session SSH directory lacks a parent")?
-                .join("runtime/skills");
-            std::fs::create_dir_all(&skills_dir)?;
-            std::fs::set_permissions(&skills_dir, std::fs::Permissions::from_mode(0o700))?;
-            mounts.push((skills_dir, PathBuf::from("/home/jbox/.agents/skills"), true));
+                .join("runtime/agents");
+            std::fs::create_dir_all(&agents_dir)?;
+            std::fs::set_permissions(&agents_dir, std::fs::Permissions::from_mode(0o700))?;
+            mounts.push((agents_dir, PathBuf::from("/home/jbox/.agents"), true));
             environment.push((
                 "JBOX_SKILL_COUNT".into(),
                 if launch.reuse_runtime_state {
@@ -2978,7 +2982,7 @@ mod tests {
     }
 
     #[test]
-    fn skills_repository_becomes_an_isolated_guest_mount() {
+    fn skills_repository_mount_includes_writable_gh_metadata_parent() {
         let temp = tempdir().unwrap();
         assert!(
             Command::new("git")
@@ -3012,7 +3016,7 @@ mod tests {
         assert!(
             spec.mounts
                 .iter()
-                .any(|(_, target, _)| { target == Path::new("/home/jbox/.agents/skills") })
+                .any(|(_, target, _)| { target == Path::new("/home/jbox/.agents") })
         );
         assert!(
             spec.environment
@@ -3021,6 +3025,16 @@ mod tests {
         assert!(
             spec.environment
                 .contains(&("JBOX_SKILL_0_REPOSITORY".into(), "example/skills".into(),))
+        );
+        assert!(
+            spec.environment
+                .contains(&("JBOX_SKILL_0_NAME".into(), String::new(),))
+        );
+        assert!(
+            spec.environment.contains(&(
+                "JBOX_SKILL_1_REPOSITORY".into(),
+                "K-Dense-AI/scientific-agent-skills".into(),
+            ))
         );
         assert!(
             spec.environment

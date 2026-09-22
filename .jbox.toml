@@ -35,12 +35,12 @@ openai_reasoning_effort = "high"
 openai_service_tier = "off"
 
 [[jcode.skills]]
-# Private skills authenticate through the read-only GitHub CLI host config.
-# Omit `skill` to install every discoverable skill in the repository.
+# Every configured GitHub repository is installed by `gh skill install` in the guest.
+# Omit `skill` to install every discoverable skill from this private repository.
 repository = "bwbioinfo/skills"
 
 [[jcode.skills]]
-# A named public skill can be added alongside a complete private skill set.
+# Install the named public scientific skill alongside the complete private skill set.
 repository = "K-Dense-AI/scientific-agent-skills"
 skill = "scanpy"
 
