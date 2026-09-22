@@ -210,6 +210,36 @@ impl App {
         self.doctor()
     }
 
+    /// Prompt before a session starts when required Kata modules are missing.
+    /// Batch invocations never run sudo implicitly.
+    fn offer_priming_if_needed(&self, internet: bool) -> Result<()> {
+        let missing = missing_prime_requirements(
+            internet,
+            Path::new("/dev/vhost-vsock").exists(),
+            module_loaded("vhost_net"),
+        );
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let missing = missing.join(" and ");
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!(
+                "cannot start a Jbox guest: {missing} is unavailable. Run `jbox prime` in an interactive terminal, then retry"
+            );
+        }
+        println!("Jbox needs {missing} before it can start this guest.");
+        print!("Run `jbox prime` now? [y/N]: ");
+        io::stdout().flush()?;
+        let mut confirmed = String::new();
+        io::stdin().read_line(&mut confirmed)?;
+        if !prime_confirmation(&confirmed) {
+            bail!(
+                "Jbox startup cancelled before creating session state. Run `jbox prime` and retry when ready"
+            );
+        }
+        self.prime()
+    }
+
     /// Create missing project-local configuration artifacts. Existing files
     /// are deliberately never replaced.
     pub fn init(&self, input: &Path, tools: &[String]) -> Result<()> {
@@ -326,6 +356,7 @@ impl App {
         resolved.extend(config.resolve_repositories(&primary)?);
         config.validate_repositories(&resolved)?;
         self.engine.check()?;
+        self.offer_priming_if_needed(config.network.internet)?;
 
         if config.git.network && config.git.credentials == "jbox" {
             self.paths.ensure_credentials()?;
@@ -1897,6 +1928,10 @@ done | LC_ALL=C sort -r | head -n 20
                 "runtime container for {id} is unexpectedly still running; use `jbox attach {id}` or `jbox stop {id}` first"
             );
         }
+        let (config, primary) = Config::load(&session.config_path)?;
+        self.validate_resume_config(&session, &config, &primary)?;
+        self.engine.check()?;
+        self.offer_priming_if_needed(config.network.internet)?;
         // A guest can be stopped outside Jbox, for example by a Docker daemon
         // restart or a host shutdown. Docker retains its name for the exited
         // container, while the retained worktree is the only Jbox state that
@@ -1908,9 +1943,6 @@ done | LC_ALL=C sort -r | head -n 20
                 session.id
             )
         })?;
-        let (config, primary) = Config::load(&session.config_path)?;
-        self.validate_resume_config(&session, &config, &primary)?;
-        self.engine.check()?;
         if config.git.network && config.git.credentials == "jbox" {
             self.paths.ensure_credentials()?;
         }
@@ -2625,6 +2657,25 @@ fn prime_module_command(is_root: bool) -> Command {
     command
 }
 
+fn missing_prime_requirements(
+    internet: bool,
+    vsock_available: bool,
+    vhost_net_available: bool,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if !vsock_available {
+        missing.push("the VSOCK device");
+    }
+    if internet && !vhost_net_available {
+        missing.push("the vhost_net kernel module");
+    }
+    missing
+}
+
+fn prime_confirmation(input: &str) -> bool {
+    matches!(input.trim(), "y" | "Y" | "yes" | "YES")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImageDockerfileSetting {
     MissingImageTable,
@@ -2851,6 +2902,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["modprobe", "vhost_vsock", "vhost_net"]
         );
+    }
+
+    #[test]
+    fn prime_prompt_requires_only_the_modules_needed_by_the_session() {
+        assert!(missing_prime_requirements(true, true, true).is_empty());
+        assert_eq!(
+            missing_prime_requirements(true, false, false),
+            ["the VSOCK device", "the vhost_net kernel module"]
+        );
+        assert_eq!(
+            missing_prime_requirements(false, true, false),
+            Vec::<&str>::new()
+        );
+        assert!(prime_confirmation("yes\n"));
+        assert!(prime_confirmation("Y"));
+        assert!(!prime_confirmation("yesterday"));
+        assert!(!prime_confirmation(""));
     }
 
     fn test_session(id: &str, source: PathBuf) -> Session {

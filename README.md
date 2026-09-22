@@ -45,6 +45,10 @@ after a successful smoke test with a root-owned
 `/etc/modules-load.d/kata-containers.conf` containing `vhost_vsock` and
 `vhost_net`.
 
+When interactive session startup discovers either required module is missing,
+jbox offers to run `jbox prime` before it creates a session. Non-interactive
+invocations never invoke `sudo`; they fail with the command to run first.
+
 `kata-all-bin` 4.x packages the supported `runtime-rs` shim at
 `/opt/kata/runtime-rs/bin/containerd-shim-kata-v2`. Register that shim with Docker
 using the packaged QEMU runtime-rs configuration. Merge this `runtimes` entry into
