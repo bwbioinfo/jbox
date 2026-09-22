@@ -62,7 +62,7 @@ enum Command {
     /// Temporarily apply a session's uncommitted changes to the current host repository, or undo that overlay.
     Overlay {
         /// Session that owns the generated worktree.
-        session: String,
+        session: Option<String>,
         /// Remove the previously applied overlay without touching unrelated test output.
         #[arg(long)]
         undo: bool,
@@ -205,9 +205,10 @@ fn main() -> Result<()> {
             Some(session) => app.stop(&session)?,
             None => app.stop_from_repository(&std::env::current_dir()?)?,
         },
-        Command::Overlay { session, undo } => {
-            app.overlay(&session, &std::env::current_dir()?, undo)?
-        }
+        Command::Overlay { session, undo } => match session {
+            Some(session) => app.overlay(&session, &std::env::current_dir()?, undo)?,
+            None => app.overlay_from_repository(&std::env::current_dir()?, undo)?,
+        },
         Command::Preview { session } => match session {
             Some(session) => app.preview(&session, &std::env::current_dir()?)?,
             None => app.preview_from_repository(&std::env::current_dir()?)?,
@@ -348,5 +349,17 @@ mod tests {
         let args = [OsString::from("jbox"), OsString::from(".")];
         // Keep the parsing behavior covered without altering the real process args.
         assert_eq!(args[1], ".");
+    }
+
+    #[test]
+    fn overlay_accepts_repository_scoped_invocation_without_a_session_id() {
+        let cli = Cli::try_parse_from(["jbox", "overlay"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Overlay {
+                session: None,
+                undo: false
+            }
+        ));
     }
 }

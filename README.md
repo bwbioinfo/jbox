@@ -51,26 +51,27 @@ invocations never invoke `sudo`; they fail with the command to run first.
 
 `kata-all-bin` 4.x packages the supported `runtime-rs` shim at
 `/opt/kata/runtime-rs/bin/containerd-shim-kata-v2`. Register that shim with Docker
-using the packaged QEMU runtime-rs configuration. Merge this `runtimes` entry into
-an existing `/etc/docker/daemon.json`, rather than overwriting any existing daemon
-settings. In particular, retain existing runtimes such as NVIDIA:
-
-```json
-{
-  "runtimes": {
-    "kata": {
-      "runtimeType": "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2",
-      "options": {
-        "ConfigPath": "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-qemu-runtime-rs.toml"
-      }
-    }
-  }
-}
-```
-
-Then restart Docker and verify it before using jbox:
+using the packaged QEMU runtime-rs configuration. This complete command safely
+updates the existing `/etc/docker/daemon.json`, preserving other valid JSON
+settings and runtimes such as NVIDIA, then restarts and verifies Docker:
 
 ```bash
+sudo python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("/etc/docker/daemon.json")
+path.parent.mkdir(parents=True, exist_ok=True)
+config = {} if not path.exists() else json.loads(path.read_text())
+runtimes = config.setdefault("runtimes", {})
+runtimes["kata"] = {
+    "runtimeType": "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2",
+    "options": {
+        "ConfigPath": "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-qemu-runtime-rs.toml"
+    },
+}
+path.write_text(json.dumps(config, indent=2) + "\n")
+PY
 sudo systemctl restart docker
 docker info --format '{{json .Runtimes}}'
 docker run --runtime kata --rm alpine:latest uname -r
@@ -85,9 +86,15 @@ unless Docker reports a runtime named `kata`.
 
 ## Use
 
+Install Jbox from its source checkout:
+
 ```bash
 cargo install --path .
-cd ~/src/project
+```
+
+Then, from the root of the Git repository you want to isolate, run:
+
+```bash
 jbox init --tool ripgrep --tool jq
 jbox .
 ```
@@ -162,6 +169,12 @@ handoff. When a provider approaches a limit, stop assigning it new work and
 route eligible new tasks to another viable provider. Do not create work merely
 to consume allowance, retry quota failures to evade limits, use unapproved
 accounts, or enable API or extra paid usage without explicit user approval.
+
+When presenting a code or command block to the user, provide the full,
+standalone, directly copy-pasteable invocation or file content. Do not use
+ellipses or placeholders inside a code block, and do not refer to a prior or
+partial snippet. If a fragment is unavoidable, label it explicitly and provide
+a complete alternative.
 """
 ```
 
@@ -179,25 +192,23 @@ Remove any of these keys to inherit that individual value from the host Jcode
 client. The generated guest `config.toml` is session-scoped and contains no
 credentials.
 
-`jbox .` creates a session such as `bright-otter-a1b2c3`, prints each worktree branch and base commit, starts the guest, and opens the local jcode TUI. The VM remains alive after the TUI disconnects. Reconnect or inspect it with:
+`jbox .` creates a session, prints each worktree branch and base commit, starts
+the guest, and opens the local jcode TUI. The VM remains alive after the TUI
+disconnects. Run each of the following complete commands from a participating
+host repository. Jbox selects its only matching session or presents a picker:
 
 ```bash
-jbox ls # only sessions containing the current repository
-jbox ls --all # every session across all repositories
-jbox attach bright-otter-a1b2c3
-jbox shell bright-otter-a1b2c3
-# Omit the session in a repository. Jbox uses the only matching worktree,
-# or presents a picker when multiple retained worktrees match.
+jbox ls
+jbox ls --all
+jbox attach
+jbox shell
 jbox status
-jbox diff # shows diffs for every repository in the selected Jbox project session
-jbox resume # restarts a stopped guest, or attaches when its selected guest is already running
-jbox status bright-otter-a1b2c3
-jbox diff bright-otter-a1b2c3
-jbox accept bright-otter-a1b2c3 --into main
-# Select a session and accept every repository it contains.
+jbox diff
+jbox resume
+jbox accept
 jbox accept --all
-jbox stop bright-otter-a1b2c3
-jbox clean bright-otter-a1b2c3
+jbox stop
+jbox clean
 ```
 
 When jbox opens Jcode or a guest shell from an interactive terminal, it first
@@ -304,16 +315,17 @@ again. A normal refusal never changes the host checkout.
 Choose an explicit mode for the type of work that needs preserving:
 
 ```bash
-# Commit visible agent changes in the generated jbox worktree, then accept.
-jbox accept <session> --into main --checkpoint
+# Commit visible agent changes in the generated jbox worktree, then accept it
+# into the current host branch.
+jbox accept --checkpoint
 
 # Preserve tracked and untracked edits in the normal host checkout, accept a
 # fast-forward snapshot, then reapply those edits.
-jbox accept <session> --into main --stash-host
+jbox accept --stash-host
 
 # Explicitly merge a guest snapshot into a diverged host branch.
-jbox accept <session> --into main --merge
-jbox accept <session> --into main --stash-host --merge
+jbox accept --merge
+jbox accept --stash-host --merge
 ```
 
 `--checkpoint` commits only the generated jbox worktree. It never stages or
@@ -435,9 +447,9 @@ To deliberately bring current work in, use `jbox run --include-host-changes`. Jb
 To test **uncommitted guest changes** with host-native tooling, run this from the participating original checkout:
 
 ```bash
-jbox overlay <session>
+jbox overlay
 # run native tests against the temporary host overlay
-jbox overlay <session> --undo
+jbox overlay --undo
 ```
 
 `overlay` refuses a dirty or advanced host checkout, saves a private reversible patch under the retained session, and applies the guest changes as unstaged host files. `--undo` reverses only that patch, preserving unrelated test output. If the same overlaid files were edited while testing, undo refuses rather than overwrite them. Resolve those edits first, then retry. Jbox will not clean a session while its overlay remains active.

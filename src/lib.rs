@@ -87,6 +87,12 @@ handoff. When a provider approaches a limit, stop assigning it new work and
 route eligible new tasks to another viable provider. Do not create work merely
 to consume allowance, retry quota failures to evade limits, use unapproved
 accounts, or enable API or extra paid usage without explicit user approval.
+
+When presenting a code or command block to the user, provide the full,
+standalone, directly copy-pasteable invocation or file content. Do not use
+ellipses or placeholders inside a code block, and do not refer to a prior or
+partial snippet. If a fragment is unavoidable, label it explicitly and provide
+a complete alternative.
 """
 
 [git]
@@ -1141,6 +1147,16 @@ done | LC_ALL=C sort -r | head -n 20
             id
         );
         Ok(())
+    }
+
+    /// Select a retained session for the current repository before applying or
+    /// removing its overlay. This is the copy-pasteable repository-scoped UX.
+    pub fn overlay_from_repository(&self, input: &Path, undo: bool) -> Result<()> {
+        let action = if undo { "undo an overlay from" } else { "overlay" };
+        let Some((session, _)) = self.select_repository_worktree(input, action, None)? else {
+            return Ok(());
+        };
+        self.overlay(&session.id, input, undo)
     }
 
     /// Open a disposable host-native preview of a stopped session worktree.
@@ -3048,6 +3064,14 @@ mod tests {
         assert_eq!(config.jcode.skills.len(), 1);
         assert_eq!(config.jcode.skills[0].repository, "bwbioinfo/skills");
         assert_eq!(config.jcode.skills[0].skill, None);
+        assert!(
+            config
+                .jcode
+                .agent
+                .instructions
+                .as_deref()
+                .is_some_and(|instructions| instructions.contains("directly copy-pasteable"))
+        );
         let dockerfile = std::fs::read_to_string(temp.path().join(".jbox/Dockerfile")).unwrap();
         assert!(dockerfile.contains("FROM ${JBOX_BASE_IMAGE}"));
         assert!(dockerfile.contains("    ripgrep \\"));
