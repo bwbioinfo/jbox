@@ -134,6 +134,8 @@ enum Command {
         #[command(subcommand)]
         command: CredentialCommand,
     },
+    /// Load Kata VSOCK and guest-networking modules for the current boot.
+    Prime,
     Doctor,
     Expire,
     #[command(hide = true)]
@@ -277,6 +279,7 @@ fn main() -> Result<()> {
                 app.import_credentials(all, yes, replace)?
             }
         },
+        Command::Prime => app.prime()?,
         Command::Doctor => app.doctor()?,
         Command::Expire => app.expire()?,
         Command::WatchExpiry => loop {
@@ -307,6 +310,7 @@ fn normalized_args() -> Vec<OsString> {
         "resume",
         "clean",
         "credentials",
+        "prime",
         "doctor",
         "expire",
         "watch-expiry",

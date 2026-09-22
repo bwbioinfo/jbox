@@ -29,17 +29,21 @@ Host investigation found hardware virtualization available (`/dev/kvm`, Intel VT
 
 ### Host setup for Arch/Manjaro
 
-Run these commands yourself because they modify the host and need administrator access:
+Install Kata yourself because package installation modifies the host and needs
+administrator access. Then use `jbox prime` to load its guest-networking
+modules for the current boot:
 
 ```bash
 yay -S kata-all-bin
-sudo modprobe vhost_vsock vhost_net
+jbox prime
 ```
 
-`/dev/kvm` and `/dev/vhost-vsock` must be available. The commands above load the
-Kata VSOCK and guest-networking modules for the current boot. Persist them after a
-successful smoke test with a root-owned `/etc/modules-load.d/kata-containers.conf`
-containing `vhost_vsock` and `vhost_net`.
+`jbox prime` explicitly invokes `sudo modprobe vhost_vsock vhost_net`, verifies
+the result with `jbox doctor`, and never changes persistent host configuration.
+`/dev/kvm` and `/dev/vhost-vsock` must be available. Persist the loaded modules
+after a successful smoke test with a root-owned
+`/etc/modules-load.d/kata-containers.conf` containing `vhost_vsock` and
+`vhost_net`.
 
 `kata-all-bin` 4.x packages the supported `runtime-rs` shim at
 `/opt/kata/runtime-rs/bin/containerd-shim-kata-v2`. Register that shim with Docker

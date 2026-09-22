@@ -159,18 +159,16 @@ impl App {
             if Path::new("/dev/vhost-vsock").exists() {
                 "available"
             } else {
-                "missing: load vhost_vsock"
+                "missing: run `jbox prime`"
             }
         );
-        let vhost_net = std::fs::read_to_string("/proc/modules")
-            .map(|modules| modules.lines().any(|line| line.starts_with("vhost_net ")))
-            .unwrap_or(false);
+        let vhost_net = module_loaded("vhost_net");
         println!(
             "Kata guest networking: {}",
             if vhost_net {
                 "vhost_net loaded"
             } else {
-                "vhost_net missing: run `sudo modprobe vhost_net`"
+                "vhost_net missing: run `jbox prime`"
             }
         );
         match self.engine.check() {
@@ -187,6 +185,29 @@ impl App {
             "Network: Docker bridge grants Internet access but cannot enforce host/LAN denial by itself. Apply host firewall policy before treating this boundary as strict."
         );
         Ok(())
+    }
+
+    /// Load the Kata VSOCK and guest-networking modules for the current boot.
+    /// This deliberately has no persistence side effects under `/etc`.
+    pub fn prime(&self) -> Result<()> {
+        println!("Loading Kata VSOCK and guest-networking modules for this boot...");
+        let status = prime_module_command(current_euid_is_root()?)
+            .status()
+            .context("could not invoke modprobe; install sudo or run this command as root")?;
+        if !status.success() {
+            bail!(
+                "could not load Kata networking modules; run `sudo modprobe vhost_vsock vhost_net` and inspect the error above"
+            );
+        }
+        if !Path::new("/dev/vhost-vsock").exists() || !module_loaded("vhost_net") {
+            bail!(
+                "Kata networking modules did not become available after modprobe; inspect `dmesg` and run `jbox doctor`"
+            );
+        }
+        println!(
+            "Kata networking modules are ready for this boot. To load them after every reboot, add `vhost_vsock` and `vhost_net` to a root-owned /etc/modules-load.d configuration."
+        );
+        self.doctor()
     }
 
     /// Create missing project-local configuration artifacts. Existing files
@@ -2574,6 +2595,36 @@ done | LC_ALL=C sort -r | head -n 20
     }
 }
 
+fn module_loaded(name: &str) -> bool {
+    std::fs::read_to_string("/proc/modules")
+        .map(|modules| {
+            modules
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(name))
+        })
+        .unwrap_or(false)
+}
+
+fn current_euid_is_root() -> Result<bool> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .context("cannot determine effective user ID from /proc/self/status")?;
+    let effective_uid = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|uids| uids.split_whitespace().nth(1))
+        .context("cannot determine effective user ID from /proc/self/status")?;
+    Ok(effective_uid == "0")
+}
+
+fn prime_module_command(is_root: bool) -> Command {
+    let mut command = Command::new(if is_root { "modprobe" } else { "sudo" });
+    if !is_root {
+        command.arg("modprobe");
+    }
+    command.args(["vhost_vsock", "vhost_net"]);
+    command
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImageDockerfileSetting {
     MissingImageTable,
@@ -2779,6 +2830,27 @@ mod tests {
             git: Git,
             engine: DockerEngine,
         }
+    }
+
+    #[test]
+    fn prime_uses_fixed_module_arguments_with_or_without_sudo() {
+        let root = prime_module_command(true);
+        assert_eq!(root.get_program(), "modprobe");
+        assert_eq!(
+            root.get_args()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>(),
+            ["vhost_vsock", "vhost_net"]
+        );
+
+        let user = prime_module_command(false);
+        assert_eq!(user.get_program(), "sudo");
+        assert_eq!(
+            user.get_args()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>(),
+            ["modprobe", "vhost_vsock", "vhost_net"]
+        );
     }
 
     fn test_session(id: &str, source: PathBuf) -> Session {
