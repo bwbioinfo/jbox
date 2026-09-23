@@ -527,7 +527,10 @@ impl Config {
         if !config.network.internet && config.git.network {
             bail!("git.network=true requires network.internet=true");
         }
-        if !matches!(config.git.credentials.as_str(), "jbox" | "github-cli" | "none") {
+        if !matches!(
+            config.git.credentials.as_str(),
+            "jbox" | "github-cli" | "none"
+        ) {
             bail!("git.credentials must be `jbox`, `github-cli`, or `none`");
         }
         if config.git.credentials == "github-cli" && !config.git.network {
@@ -820,7 +823,8 @@ fn validate_git_access(git: &Git) -> Result<()> {
         if profile.host != "github.com" {
             bail!(
                 "git credential profile `{}` currently supports only host `github.com`, not `{}`",
-                profile.name, profile.host
+                profile.name,
+                profile.host
             );
         }
         if !valid_github_account(&profile.account) {
@@ -865,13 +869,15 @@ fn validate_git_access(git: &Git) -> Result<()> {
                 grant.id
             );
         }
-        let profile = profiles.get(grant.credential_profile.as_str()).ok_or_else(|| {
-            anyhow::anyhow!(
-                "git repository grant `{}` refers to unknown credential profile `{}`",
-                grant.id,
-                grant.credential_profile
-            )
-        })?;
+        let profile = profiles
+            .get(grant.credential_profile.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "git repository grant `{}` refers to unknown credential profile `{}`",
+                    grant.id,
+                    grant.credential_profile
+                )
+            })?;
         if grant.delivery == GitCredentialDelivery::GuestPassthrough {
             guest_profiles.insert(profile.name.as_str());
         }
@@ -1016,9 +1022,9 @@ fn validate_grant_operations(grant: &GitRepositoryGrant) -> Result<()> {
 
 fn valid_config_identifier(value: &str) -> bool {
     !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn valid_github_account(value: &str) -> bool {
@@ -1039,9 +1045,10 @@ fn valid_ref_rule(value: &str) -> bool {
         && !value.contains("@{")
         && !value.ends_with('.')
         && !value.ends_with(".lock")
-        && value
-            .bytes()
-            .all(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\'))
+        && value.bytes().all(|byte| {
+            !byte.is_ascii_whitespace()
+                && !matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+        })
 }
 
 fn capability_name(capability: GitCapability) -> &'static str {
@@ -1244,7 +1251,11 @@ mod tests {
         assert!(Config::load(temp.path()).is_ok());
     }
 
-    fn profile(name: &str, contents: GitCapability, pull_requests: GitCapability) -> GitCredentialProfile {
+    fn profile(
+        name: &str,
+        contents: GitCapability,
+        pull_requests: GitCapability,
+    ) -> GitCredentialProfile {
         GitCredentialProfile {
             name: name.into(),
             provider: "github-cli".into(),
@@ -1322,11 +1333,7 @@ allowed_operations = ["clone", "fetch"]
             GitCredentialDelivery::GuestPassthrough
         );
         assert_eq!(
-            parsed
-                .guest_passthrough_profile()
-                .unwrap()
-                .unwrap()
-                .account,
+            parsed.guest_passthrough_profile().unwrap().unwrap().account,
             "jbox-skills-bot"
         );
     }

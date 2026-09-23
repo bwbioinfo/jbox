@@ -1792,15 +1792,24 @@ mod tests {
         // A pristine preview is safe to discard and reconnect to the guest
         // automatically when its host shell closes.
         assert!(!Git.preview_has_changes(&preview, &repo.branch).unwrap());
-        assert_eq!(Git::run(&preview, &["config", "user.name"]).unwrap(), "Preview");
+        assert_eq!(
+            Git::run(&preview, &["config", "user.name"]).unwrap(),
+            "Preview"
+        );
         Git.apply_patch(&preview, &seed, false).unwrap();
         assert!(Git.preview_has_changes(&preview, &repo.branch).unwrap());
-        assert_eq!(fs::read_to_string(preview.join("tracked")).unwrap(), "guest edit\n");
+        assert_eq!(
+            fs::read_to_string(preview.join("tracked")).unwrap(),
+            "guest edit\n"
+        );
         assert_eq!(
             fs::read_to_string(preview.join("guest-only")).unwrap(),
             "guest file\n"
         );
-        assert_eq!(fs::read_to_string(source.join("tracked")).unwrap(), "base\n");
+        assert_eq!(
+            fs::read_to_string(source.join("tracked")).unwrap(),
+            "base\n"
+        );
 
         fs::write(preview.join("native-edit"), "tested on host\n").unwrap();
         assert!(
@@ -1810,12 +1819,18 @@ mod tests {
         assert!(Git.preview_has_changes(&preview, &repo.branch).unwrap());
         Git.adopt_preview_commit(&repo, preview_branch).unwrap();
         assert!(!Git.preview_has_changes(&preview, &repo.branch).unwrap());
-        assert_eq!(fs::read_to_string(guest.join("tracked")).unwrap(), "guest edit\n");
+        assert_eq!(
+            fs::read_to_string(guest.join("tracked")).unwrap(),
+            "guest edit\n"
+        );
         assert_eq!(
             fs::read_to_string(guest.join("native-edit")).unwrap(),
             "tested on host\n"
         );
-        assert_eq!(fs::read_to_string(source.join("tracked")).unwrap(), "base\n");
+        assert_eq!(
+            fs::read_to_string(source.join("tracked")).unwrap(),
+            "base\n"
+        );
 
         // A completed accept fast-forwards the original checkout to the
         // session branch. A later preview must use that current session head,
@@ -1829,7 +1844,13 @@ mod tests {
         Git.remove_preview_worktree(&repo, &preview, preview_branch)
             .unwrap();
         assert!(!preview.exists());
-        assert!(Git::run(&source, &["show-ref", "--verify", "--quiet", preview_branch]).is_err());
+        assert!(
+            Git::run(
+                &source,
+                &["show-ref", "--verify", "--quiet", preview_branch]
+            )
+            .is_err()
+        );
 
         let later_preview = root.path().join("later-preview");
         let later_branch = "jbox/bright-fox-123/preview-later/repo";

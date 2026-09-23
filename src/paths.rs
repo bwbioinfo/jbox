@@ -114,7 +114,10 @@ impl JboxPaths {
         }
         let metadata = fs::metadata(&hosts)?;
         if metadata.permissions().mode() & 0o022 != 0 {
-            bail!("GitHub CLI credential file is writable by group or other users: {}", hosts.display());
+            bail!(
+                "GitHub CLI credential file is writable by group or other users: {}",
+                hosts.display()
+            );
         }
         Ok(hosts)
     }
@@ -141,7 +144,10 @@ impl JboxPaths {
         if !valid_github_account(account) {
             bail!("GitHub account must be a valid GitHub login");
         }
-        let destination = self.credentials.join("github").join(format!("{account}.yml"));
+        let destination = self
+            .credentials
+            .join("github")
+            .join(format!("{account}.yml"));
         if destination.exists() {
             return self.diagnose_github_cli_profile(account);
         }
@@ -169,12 +175,20 @@ impl JboxPaths {
         contents: &str,
         replace: bool,
     ) -> Result<GithubCliProfileReport> {
-        let destination = self.credentials.join("github").join(format!("{account}.yml"));
-        let parent = destination.parent().context("profile destination lacks a parent")?;
+        let destination = self
+            .credentials
+            .join("github")
+            .join(format!("{account}.yml"));
+        let parent = destination
+            .parent()
+            .context("profile destination lacks a parent")?;
         fs::create_dir_all(parent)?;
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
         if destination.exists() && !replace {
-            bail!("Jbox GitHub profile already exists: {}; use --replace to replace it", destination.display());
+            bail!(
+                "Jbox GitHub profile already exists: {}; use --replace to replace it",
+                destination.display()
+            );
         }
         if destination.exists() && fs::symlink_metadata(&destination)?.file_type().is_symlink() {
             bail!("refusing to replace symlinked Jbox GitHub profile");
@@ -200,9 +214,13 @@ impl JboxPaths {
         if !valid_github_account(account) {
             bail!("GitHub account must be a valid GitHub login");
         }
-        let destination = self.credentials.join("github").join(format!("{account}.yml"));
-        let metadata = fs::symlink_metadata(&destination)
-            .with_context(|| format!("Jbox GitHub profile is missing: {}", destination.display()))?;
+        let destination = self
+            .credentials
+            .join("github")
+            .join(format!("{account}.yml"));
+        let metadata = fs::symlink_metadata(&destination).with_context(|| {
+            format!("Jbox GitHub profile is missing: {}", destination.display())
+        })?;
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
             bail!("Jbox GitHub profile is not a regular file");
         }
@@ -217,7 +235,9 @@ impl JboxPaths {
             account: account.to_owned(),
             source: destination.clone(),
             destination,
-            token_present: contents.lines().any(|line| line.trim_start().starts_with("oauth_token:")),
+            token_present: contents
+                .lines()
+                .any(|line| line.trim_start().starts_with("oauth_token:")),
         })
     }
 
@@ -658,7 +678,14 @@ fn valid_github_account(account: &str) -> bool {
 /// dependent, and copying it can carry tokens for other accounts.
 fn github_cli_profile_contents(account: &str) -> Result<String> {
     let output = Command::new("gh")
-        .args(["auth", "token", "--hostname", "github.com", "--user", account])
+        .args([
+            "auth",
+            "token",
+            "--hostname",
+            "github.com",
+            "--user",
+            account,
+        ])
         .output()
         .context("GitHub CLI (`gh`) is required to import a GitHub profile")?;
     if !output.status.success() {
@@ -689,7 +716,9 @@ fn yaml_double_quoted(value: &str) -> String {
             '\n' => result.push_str("\\n"),
             '\r' => result.push_str("\\r"),
             '\t' => result.push_str("\\t"),
-            control if control.is_control() => result.push_str(&format!("\\u{:04x}", control as u32)),
+            control if control.is_control() => {
+                result.push_str(&format!("\\u{:04x}", control as u32))
+            }
             character => result.push(character),
         }
     }
@@ -823,8 +852,17 @@ mod tests {
         let config = tmp.path().join("config");
         let hosts = config.join("gh/hosts.yml");
         fs::create_dir_all(hosts.parent().unwrap()).unwrap();
-        fs::write(&hosts, "github.com:\n    user: alice\n    oauth_token: alice-secret\n").unwrap();
-        let paths = JboxPaths { data: tmp.path().join("data"), cache: tmp.path().join("cache"), sessions: tmp.path().join("sessions"), credentials: tmp.path().join("credentials") };
+        fs::write(
+            &hosts,
+            "github.com:\n    user: alice\n    oauth_token: alice-secret\n",
+        )
+        .unwrap();
+        let paths = JboxPaths {
+            data: tmp.path().join("data"),
+            cache: tmp.path().join("cache"),
+            sessions: tmp.path().join("sessions"),
+            credentials: tmp.path().join("credentials"),
+        };
         let report = paths.store_github_cli_profile(
             "alice",
             &hosts,
@@ -834,7 +872,14 @@ mod tests {
         let imported = fs::read_to_string(report.destination).unwrap();
         assert!(imported.contains("alice-secret"));
         assert!(!imported.contains("bob-secret"));
-        assert_eq!(fs::metadata(paths.credentials.join("github/alice.yml")).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(paths.credentials.join("github/alice.yml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         let retained = paths.ensure_github_cli_profile("alice").unwrap();
         assert_eq!(retained.source, retained.destination);
         assert_eq!(retained.account, "alice");
@@ -888,11 +933,7 @@ mod tests {
         );
         assert!(
             paths
-                .save_last_jcode_session_id(
-                    "calm-otter",
-                    "/workspace/first",
-                    "session;unsafe"
-                )
+                .save_last_jcode_session_id("calm-otter", "/workspace/first", "session;unsafe")
                 .is_err()
         );
         assert!(!paths.has_jcode_session_hook("calm-otter"));

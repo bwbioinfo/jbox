@@ -640,7 +640,9 @@ impl App {
         let Some(profile) = config.git.guest_passthrough_profile()? else {
             return Ok(None);
         };
-        Ok(Some(self.paths.ensure_github_cli_profile(&profile.account)?))
+        Ok(Some(
+            self.paths.ensure_github_cli_profile(&profile.account)?,
+        ))
     }
 
     fn container_spec(
@@ -824,10 +826,7 @@ impl App {
                 false,
             ));
             environment.push(("JBOX_GITHUB_CLI_CREDENTIALS".into(), "scoped".into()));
-            environment.push((
-                "JBOX_GITHUB_CLI_ACCOUNT".into(),
-                profile.account.clone(),
-            ));
+            environment.push(("JBOX_GITHUB_CLI_ACCOUNT".into(), profile.account.clone()));
         } else if config.git.credentials == "github-cli" {
             mounts.push((
                 self.paths.github_cli_hosts()?,
@@ -1213,17 +1212,19 @@ done | LC_ALL=C sort -r | head -n 20
                             operation.as_str()
                         ),
                     ),
-                    Some(grant) => match validate_brokered_plan_reference(grant, operation, reference) {
-                        Ok(()) => (
-                            Some(grant.id.clone()),
-                            true,
-                            format!(
-                                "brokered grant `{}` permits this dry-run plan; no network action was performed",
-                                grant.id
+                    Some(grant) => {
+                        match validate_brokered_plan_reference(grant, operation, reference) {
+                            Ok(()) => (
+                                Some(grant.id.clone()),
+                                true,
+                                format!(
+                                    "brokered grant `{}` permits this dry-run plan; no network action was performed",
+                                    grant.id
+                                ),
                             ),
-                        ),
-                        Err(reason) => (Some(grant.id.clone()), false, reason),
-                    },
+                            Err(reason) => (Some(grant.id.clone()), false, reason),
+                        }
+                    }
                 },
             },
         };
@@ -1269,7 +1270,12 @@ done | LC_ALL=C sort -r | head -n 20
                 plan.remote,
                 plan.reference.as_deref().unwrap_or("-")
             );
-            println!("  plan={} grant={} reason={}", plan.id, plan.grant_id.as_deref().unwrap_or("-"), plan.reason);
+            println!(
+                "  plan={} grant={} reason={}",
+                plan.id,
+                plan.grant_id.as_deref().unwrap_or("-"),
+                plan.reason
+            );
         }
         Ok(())
     }
@@ -1418,7 +1424,11 @@ done | LC_ALL=C sort -r | head -n 20
     /// Select a retained session for the current repository before applying or
     /// removing its overlay. This is the copy-pasteable repository-scoped UX.
     pub fn overlay_from_repository(&self, input: &Path, undo: bool) -> Result<()> {
-        let action = if undo { "undo an overlay from" } else { "overlay" };
+        let action = if undo {
+            "undo an overlay from"
+        } else {
+            "overlay"
+        };
         let Some((session, _)) = self.select_repository_worktree(input, action, None)? else {
             return Ok(());
         };
@@ -1447,8 +1457,7 @@ done | LC_ALL=C sort -r | head -n 20
     }
 
     pub fn preview_from_repository(&self, input: &Path) -> Result<()> {
-        let Some((mut session, repo)) =
-            self.select_repository_worktree(input, "preview", None)?
+        let Some((mut session, repo)) = self.select_repository_worktree(input, "preview", None)?
         else {
             return Ok(());
         };
@@ -1514,11 +1523,9 @@ done | LC_ALL=C sort -r | head -n 20
             let _ = fs::remove_file(&seed);
             return Err(error);
         }
-        if seeded {
-            if let Err(error) = self.git.apply_patch(&preview, &seed, false) {
-                let _ = self.discard_preview(repo, &preview, &seed, &branch);
-                return Err(error).context("could not apply session changes to preview");
-            }
+        if seeded && let Err(error) = self.git.apply_patch(&preview, &seed, false) {
+            let _ = self.discard_preview(repo, &preview, &seed, &branch);
+            return Err(error).context("could not apply session changes to preview");
         }
 
         println!(
@@ -1606,8 +1613,8 @@ done | LC_ALL=C sort -r | head -n 20
         let current = seed.with_extension("current.patch");
         let current_seeded = self.git.snapshot_session_changes(repo, &current)?;
         let seeded = seed.is_file();
-        let unchanged = seeded == current_seeded
-            && (!seeded || fs::read(&seed)? == fs::read(&current)?);
+        let unchanged =
+            seeded == current_seeded && (!seeded || fs::read(&seed)? == fs::read(&current)?);
         let _ = fs::remove_file(&current);
         if !unchanged {
             bail!(
@@ -1622,7 +1629,10 @@ done | LC_ALL=C sort -r | head -n 20
         self.git.adopt_preview_commit(repo, &branch)?;
         self.discard_preview(repo, &preview, &seed, &branch)?;
         self.touch(session)?;
-        println!("adopted preview edits into session {} for {}", session.id, repo.name);
+        println!(
+            "adopted preview edits into session {} for {}",
+            session.id, repo.name
+        );
         Ok(true)
     }
 
@@ -2137,7 +2147,8 @@ done | LC_ALL=C sort -r | head -n 20
             .sync
             .as_ref()
             .map_or(options.checkpoint, |progress| progress.checkpoint);
-        let (mut progress, problems) = self.sync_plan(&session, checkpoint, options.continue_sync)?;
+        let (mut progress, problems) =
+            self.sync_plan(&session, checkpoint, options.continue_sync)?;
         self.print_sync_plan(&session, &progress, checkpoint, &problems);
         if !problems.is_empty() {
             bail!(
@@ -2302,7 +2313,8 @@ done | LC_ALL=C sort -r | head -n 20
                 continue;
             }
             let rebase_preflight = if dirty {
-                self.git.preflight_rebase_target(&repo.source, &upstream.branch)
+                self.git
+                    .preflight_rebase_target(&repo.source, &upstream.branch)
             } else {
                 self.git.preflight_rebase_worktree(repo, &upstream.branch)
             };
@@ -2392,12 +2404,18 @@ done | LC_ALL=C sort -r | head -n 20
             if stage != SyncStage::Accepted {
                 self.update_sync_stage(session, &repo.name, SyncStage::HostSynchronized)?;
             }
-            println!("synchronized host {} onto {}/{}", repo.name, target.remote, target.remote_ref);
+            println!(
+                "synchronized host {} onto {}/{}",
+                repo.name, target.remote, target.remote_ref
+            );
             if stage == SyncStage::Accepted {
                 self.git
                     .align_accepted_worktree(&repo, &target.branch)
                     .with_context(|| self.sync_recovery_message(session, &repo))?;
-                println!("aligned accepted guest {} with `{}`", repo.name, target.branch);
+                println!(
+                    "aligned accepted guest {} with `{}`",
+                    repo.name, target.branch
+                );
             }
         }
         Ok(())
@@ -2443,7 +2461,10 @@ done | LC_ALL=C sort -r | head -n 20
                 .push_upstream(&repo.source, &target)
                 .with_context(|| self.sync_recovery_message(session, &repo))?;
             self.update_sync_stage(session, &repo.name, SyncStage::Pushed)?;
-            println!("pushed {} to {}/{}", repo.name, target.remote, target.remote_ref);
+            println!(
+                "pushed {} to {}/{}",
+                repo.name, target.remote, target.remote_ref
+            );
         }
         Ok(())
     }
@@ -2473,7 +2494,9 @@ done | LC_ALL=C sort -r | head -n 20
                     .repositories
                     .iter()
                     .find(|entry| entry.name == repo.name)
-                    .ok_or_else(|| anyhow::anyhow!("internal error: no sync target for {}", repo.name))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("internal error: no sync target for {}", repo.name)
+                    })?;
                 Ok((
                     repo.clone(),
                     Upstream {
@@ -2512,7 +2535,10 @@ done | LC_ALL=C sort -r | head -n 20
 
     fn abort_sync(&self, session: &mut Session) -> Result<()> {
         if session.sync.is_none() {
-            bail!("session {} has no retained synchronization to abort", session.id);
+            bail!(
+                "session {} has no retained synchronization to abort",
+                session.id
+            );
         }
         let mut aborted = 0;
         for repo in &session.repos {
@@ -2523,10 +2549,14 @@ done | LC_ALL=C sort -r | head -n 20
                         .arg(worktree)
                         .args(["rebase", "--abort"])
                         .status()
-                        .with_context(|| format!("could not abort rebase in {}", worktree.display()))?
+                        .with_context(|| {
+                            format!("could not abort rebase in {}", worktree.display())
+                        })?
                         .success()
                         .then_some(())
-                        .ok_or_else(|| anyhow::anyhow!("could not abort rebase in {}", worktree.display()))?;
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("could not abort rebase in {}", worktree.display())
+                        })?;
                     aborted += 1;
                 }
             }
@@ -3390,9 +3420,9 @@ fn github_repository_from_remote_url(url: &str) -> Option<String> {
         || owner.is_empty()
         || repository.is_empty()
         || ![owner, repository].into_iter().all(|component| {
-            component.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-            })
+            component
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         })
     {
         return None;
@@ -3411,16 +3441,18 @@ fn validate_brokered_plan_reference(
             .then_some(())
             .ok_or_else(|| format!("operation `{}` does not accept --ref", operation.as_str()));
     }
-    let reference = reference.ok_or_else(|| "push-branch requires --ref refs/heads/<branch>".to_owned())?;
+    let reference =
+        reference.ok_or_else(|| "push-branch requires --ref refs/heads/<branch>".to_owned())?;
     if !valid_brokered_ref(reference) {
         return Err("push ref must be a safe refs/heads/<branch> name".into());
     }
-    if grant
-        .protected_refs
-        .iter()
-        .any(|protected| reference == protected || reference.starts_with(&(protected.clone() + "/")))
-    {
-        return Err(format!("push ref `{reference}` is protected by grant `{}`", grant.id));
+    if grant.protected_refs.iter().any(|protected| {
+        reference == protected || reference.starts_with(&(protected.clone() + "/"))
+    }) {
+        return Err(format!(
+            "push ref `{reference}` is protected by grant `{}`",
+            grant.id
+        ));
     }
     if !grant
         .allowed_push_ref_prefixes
@@ -3442,9 +3474,9 @@ fn valid_brokered_ref(reference: &str) -> bool {
         && !reference.ends_with('.')
         && !reference.ends_with('/')
         && !reference.contains("//")
-        && reference.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.')
-        })
+        && reference
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'))
 }
 
 fn current_euid_is_root() -> Result<bool> {
@@ -3862,15 +3894,17 @@ merge = "user-confirmed"
             git: Git,
             engine: DockerEngine,
         };
-        assert!(app
-            .validate_resume_config(&session, &config, &primary)
-            .is_ok());
+        assert!(
+            app.validate_resume_config(&session, &config, &primary)
+                .is_ok()
+        );
 
         let mut changed = config.clone();
         changed.git.repository_grants[0].force_push = true;
-        assert!(app
-            .validate_resume_config(&session, &changed, &primary)
-            .is_err());
+        assert!(
+            app.validate_resume_config(&session, &changed, &primary)
+                .is_err()
+        );
     }
 
     fn test_session(id: &str, source: PathBuf) -> Session {
@@ -3915,7 +3949,12 @@ merge = "user-confirmed"
         git(temp.path(), &["init"]);
         git(
             temp.path(),
-            &["remote", "add", "origin", "https://github.com/bwbioinfo/jbox.git"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/bwbioinfo/jbox.git",
+            ],
         );
         let app = test_app(temp.path());
         let mut session = test_session("brokered", temp.path().to_path_buf());
@@ -3959,20 +3998,17 @@ merge = "user-confirmed"
             Some("refs/heads/main"),
         )
         .unwrap();
-        app.plan_brokered_action(
-            "brokered",
-            "jbox",
-            "origin",
-            "pr-create",
-            None,
-        )
-        .unwrap();
+        app.plan_brokered_action("brokered", "jbox", "origin", "pr-create", None)
+            .unwrap();
 
         let plans = app.state.load("brokered").unwrap().brokered_plans;
         assert_eq!(plans.len(), 3);
         assert!(plans[0].allowed);
         assert_eq!(plans[0].repository, "bwbioinfo/jbox");
-        assert_eq!(plans[0].remote_url.as_deref(), Some("https://github.com/bwbioinfo/jbox.git"));
+        assert_eq!(
+            plans[0].remote_url.as_deref(),
+            Some("https://github.com/bwbioinfo/jbox.git")
+        );
         assert!(!plans[1].allowed);
         assert!(plans[1].reason.contains("protected"));
         assert!(!plans[2].allowed);
@@ -4014,7 +4050,10 @@ merge = "user-confirmed"
         std::fs::write(source.join("base"), "base\n").unwrap();
         git(&source, &["add", "."]);
         git(&source, &["commit", "-m", "base"]);
-        git(&source, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(
+            &source,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
         git(&source, &["push", "-u", "origin", "HEAD"]);
         let made = Git
             .add_worktree(&source, &worktree, session_id, name)
@@ -4082,16 +4121,22 @@ merge = "user-confirmed"
                 git(&repo.source, &["rev-parse", "@{upstream}"])
             );
             for file in ["host", "upstream", "guest"] {
-                assert!(repo.source.join(file).is_file(), "{} missing {file}", repo.name);
+                assert!(
+                    repo.source.join(file).is_file(),
+                    "{} missing {file}",
+                    repo.name
+                );
             }
         }
-        assert!(session
-            .sync
-            .as_ref()
-            .unwrap()
-            .repositories
-            .iter()
-            .all(|entry| entry.stage == SyncStage::Pushed));
+        assert!(
+            session
+                .sync
+                .as_ref()
+                .unwrap()
+                .repositories
+                .iter()
+                .all(|entry| entry.stage == SyncStage::Pushed)
+        );
     }
 
     #[test]
@@ -4145,7 +4190,10 @@ merge = "user-confirmed"
             Git.head(&repo.source).unwrap(),
             git(&repo.source, &["rev-parse", "@{upstream}"])
         );
-        assert_eq!(Git.head(&repo.worktree).unwrap(), Git.head(&repo.source).unwrap());
+        assert_eq!(
+            Git.head(&repo.worktree).unwrap(),
+            Git.head(&repo.source).unwrap()
+        );
         for file in ["host", "upstream", "guest", "later"] {
             assert!(repo.source.join(file).is_file(), "missing {file}");
         }
@@ -4164,8 +4212,18 @@ merge = "user-confirmed"
         });
         app.state.save(&session).unwrap();
 
-        assert!(app.resume(&session.id).unwrap_err().to_string().contains("synchronization is retained"));
-        assert!(app.clean(Some(&session.id), false).unwrap_err().to_string().contains("synchronization is retained"));
+        assert!(
+            app.resume(&session.id)
+                .unwrap_err()
+                .to_string()
+                .contains("synchronization is retained")
+        );
+        assert!(
+            app.clean(Some(&session.id), false)
+                .unwrap_err()
+                .to_string()
+                .contains("synchronization is retained")
+        );
     }
 
     #[test]
@@ -4227,7 +4285,9 @@ merge = "user-confirmed"
         let mut current_session = test_session("current-session", current);
         current_session.launch_directory = Some(launch_directory.clone());
 
-        let legacy_json = serde_json::to_value(test_session("legacy-session", temp.path().join("legacy"))).unwrap();
+        let legacy_json =
+            serde_json::to_value(test_session("legacy-session", temp.path().join("legacy")))
+                .unwrap();
         let mut legacy_json = legacy_json;
         legacy_json
             .as_object_mut()
@@ -4402,12 +4462,10 @@ merge = "user-confirmed"
             spec.environment
                 .contains(&("JBOX_SKILL_0_PRIVATE".into(), "0".into(),))
         );
-        assert!(
-            spec.environment.contains(&(
-                "JBOX_SKILL_1_REPOSITORY".into(),
-                "K-Dense-AI/scientific-agent-skills".into(),
-            ))
-        );
+        assert!(spec.environment.contains(&(
+            "JBOX_SKILL_1_REPOSITORY".into(),
+            "K-Dense-AI/scientific-agent-skills".into(),
+        )));
         assert!(
             spec.environment
                 .contains(&("JBOX_SKILL_1_NAME".into(), "scanpy".into(),))
@@ -4476,10 +4534,7 @@ allowed_operations = ["clone"]
         .unwrap();
         let (config, _) = Config::load(temp.path()).unwrap();
         let app = test_app(temp.path());
-        let profile = app
-            .paths
-            .credentials
-            .join("github/jbox-skills-bot.yml");
+        let profile = app.paths.credentials.join("github/jbox-skills-bot.yml");
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         std::fs::write(
             &profile,
@@ -4508,14 +4563,14 @@ allowed_operations = ["clone"]
             PathBuf::from("/home/jbox/.config/gh/hosts.yml"),
             false,
         )));
-        assert!(spec.environment.contains(&(
-            "JBOX_GITHUB_CLI_CREDENTIALS".into(),
-            "scoped".into(),
-        )));
-        assert!(spec.environment.contains(&(
-            "JBOX_GITHUB_CLI_ACCOUNT".into(),
-            "jbox-skills-bot".into(),
-        )));
+        assert!(
+            spec.environment
+                .contains(&("JBOX_GITHUB_CLI_CREDENTIALS".into(), "scoped".into(),))
+        );
+        assert!(
+            spec.environment
+                .contains(&("JBOX_GITHUB_CLI_ACCOUNT".into(), "jbox-skills-bot".into(),))
+        );
     }
 
     #[test]
@@ -4551,10 +4606,7 @@ allowed_operations = ["clone"]
         .unwrap();
         let (config, _) = Config::load(temp.path()).unwrap();
         let app = test_app(temp.path());
-        let profile = app
-            .paths
-            .credentials
-            .join("github/jbox-skills-bot.yml");
+        let profile = app.paths.credentials.join("github/jbox-skills-bot.yml");
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         std::fs::write(
             &profile,
@@ -4572,10 +4624,11 @@ allowed_operations = ["clone"]
 
         let mut brokered_only = config.clone();
         brokered_only.git.repository_grants[0].delivery = GitCredentialDelivery::Brokered;
-        assert!(app
-            .ensure_configured_guest_github_profile(&brokered_only)
-            .unwrap()
-            .is_none());
+        assert!(
+            app.ensure_configured_guest_github_profile(&brokered_only)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -4628,18 +4681,10 @@ allowed_operations = ["clone"]
         });
 
         app.paths
-            .save_last_jcode_session_id(
-                &session.id,
-                &session.repos[0].mount,
-                "session_primary_123",
-            )
+            .save_last_jcode_session_id(&session.id, &session.repos[0].mount, "session_primary_123")
             .unwrap();
         app.paths
-            .save_last_jcode_session_id(
-                &session.id,
-                &session.repos[1].mount,
-                "session_sibling_456",
-            )
+            .save_last_jcode_session_id(&session.id, &session.repos[1].mount, "session_sibling_456")
             .unwrap();
 
         assert_eq!(
@@ -4741,7 +4786,10 @@ allowed_operations = ["clone"]
             )));
         }
         assert!(!hook.contains("out=/home/jbox/.local/share/jcode/last-session-id\n"));
-        assert_eq!(shell_single_quote("/workspace/it's-safe"), "'/workspace/it'\\''s-safe'");
+        assert_eq!(
+            shell_single_quote("/workspace/it's-safe"),
+            "'/workspace/it'\\''s-safe'"
+        );
 
         let mut shell = Command::new("sh")
             .arg("-n")

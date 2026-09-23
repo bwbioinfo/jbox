@@ -227,9 +227,7 @@ enum PolicyCommand {
         reference: Option<String>,
     },
     /// Print durable brokered action dry-runs for a retained session.
-    Plans {
-        session: String,
-    },
+    Plans { session: String },
 }
 
 fn main() -> Result<()> {
@@ -375,7 +373,9 @@ fn main() -> Result<()> {
                     yes,
                     replace,
                 } => app.import_github_cli_profile(&account, yes, replace)?,
-                GithubCredentialCommand::Status { account } => app.github_cli_profile_status(&account)?,
+                GithubCredentialCommand::Status { account } => {
+                    app.github_cli_profile_status(&account)?
+                }
             },
         },
         Command::Policy { command } => match command {
