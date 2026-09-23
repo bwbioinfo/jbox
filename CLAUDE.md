@@ -71,18 +71,27 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+cargo run -- --help
 ```
+
+`rust-toolchain.toml` pins the compiler and supplies the `rustfmt` and Clippy
+components required by these checks.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+- `src/main.rs` parses and dispatches the CLI.
+- `src/lib.rs` orchestrates session lifecycle, Git acceptance, synchronization,
+  and recovery flows.
+- `src/config.rs`, `src/paths.rs`, and `src/state.rs` validate project policy,
+  restrict host data, and store session metadata.
+- `src/git.rs`, `src/image.rs`, and `src/engine.rs` isolate worktrees, build
+  images, and invoke Docker with the Kata runtime.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+Keep host-changing operations explicit and non-interactive. Preserve isolation
+invariants, and add focused unit tests for lifecycle or Git behavior changes.

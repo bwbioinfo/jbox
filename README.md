@@ -11,6 +11,13 @@ the middle component, for example `0.2.0` to `0.3.0`. Compatible fixes and
 documentation-only releases increment `c`, while breaking compatibility changes
 increment `a`.
 
+## Contributing
+
+The repository pins its Rust toolchain and quality components in
+[`rust-toolchain.toml`](rust-toolchain.toml). See the
+[contributor development guide](CLAUDE.md#build--test) for the required local
+formatting, Clippy, test, and CLI checks before submitting changes.
+
 ## Implementation plan and result
 
 1. Resolve a versioned project config, canonicalize every path, and create a branch/worktree for every participating repository.

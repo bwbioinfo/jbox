@@ -102,3 +102,30 @@ bd close <id>         # Complete work
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
+
+## Development
+
+`rust-toolchain.toml` pins the Rust compiler and required `rustfmt` and Clippy
+components. Run the complete local quality gate before committing source changes:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+cargo run -- --help
+```
+
+## Architecture
+
+- `src/main.rs` defines the CLI and dispatches lifecycle commands.
+- `src/lib.rs` coordinates sessions, isolated worktrees, guest startup, and
+  host-side acceptance, synchronization, and recovery flows.
+- `src/config.rs`, `src/paths.rs`, and `src/state.rs` validate project policy,
+  restrict host paths and credentials, and persist session metadata.
+- `src/git.rs`, `src/image.rs`, and `src/engine.rs` isolate Git operations,
+  build guest images, and invoke Docker with the Kata runtime.
+
+## Conventions
+
+Keep host-changing operations explicit and non-interactive, preserve isolation
+invariants, and extend focused unit tests when lifecycle or Git behavior changes.
