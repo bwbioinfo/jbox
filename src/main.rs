@@ -153,6 +153,11 @@ enum Command {
         #[command(subcommand)]
         command: CredentialCommand,
     },
+    /// Inspect non-mutating brokered GitHub action plans against frozen session policy.
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
+    },
     /// Load Kata VSOCK and guest-networking modules for the current boot.
     Prime,
     Doctor,
@@ -174,6 +179,56 @@ enum CredentialCommand {
         /// Replace existing jbox-managed copies. Never affects host source files.
         #[arg(long)]
         replace: bool,
+    },
+    /// Manage isolated, per-account GitHub CLI profiles for repository-scoped grants.
+    Github {
+        #[command(subcommand)]
+        command: GithubCredentialCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum GithubCredentialCommand {
+    /// Copy exactly one authenticated GitHub CLI account into Jbox-managed state.
+    Import {
+        /// GitHub login selected from the host GitHub CLI store.
+        account: String,
+        /// Confirm extracting this account's token into Jbox-managed state.
+        #[arg(long)]
+        yes: bool,
+        /// Replace an existing Jbox-managed profile for this account.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Validate an existing Jbox-managed profile without contacting GitHub.
+    Status {
+        /// GitHub login whose isolated profile should be checked.
+        account: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyCommand {
+    /// Evaluate and durably record a brokered action dry-run. No credential is read and no network request is made.
+    Plan {
+        /// Retained Jbox session whose frozen policy will be checked.
+        session: String,
+        /// Jbox repository name from `jbox status <session>`.
+        #[arg(long)]
+        repository: String,
+        /// Local Git remote name, for example `origin`.
+        #[arg(long)]
+        remote: String,
+        /// Proposed operation: clone, fetch, push-branch, pr-view, pr-status, ci-view, pr-create, or pr-update.
+        #[arg(long)]
+        operation: String,
+        /// Required only for push-branch. Must be a full refs/heads/<branch> ref.
+        #[arg(long = "ref")]
+        reference: Option<String>,
+    },
+    /// Print durable brokered action dry-runs for a retained session.
+    Plans {
+        session: String,
     },
 }
 
@@ -314,6 +369,30 @@ fn main() -> Result<()> {
             CredentialCommand::Import { all, yes, replace } => {
                 app.import_credentials(all, yes, replace)?
             }
+            CredentialCommand::Github { command } => match command {
+                GithubCredentialCommand::Import {
+                    account,
+                    yes,
+                    replace,
+                } => app.import_github_cli_profile(&account, yes, replace)?,
+                GithubCredentialCommand::Status { account } => app.github_cli_profile_status(&account)?,
+            },
+        },
+        Command::Policy { command } => match command {
+            PolicyCommand::Plan {
+                session,
+                repository,
+                remote,
+                operation,
+                reference,
+            } => app.plan_brokered_action(
+                &session,
+                &repository,
+                &remote,
+                &operation,
+                reference.as_deref(),
+            )?,
+            PolicyCommand::Plans { session } => app.list_brokered_plans(&session)?,
         },
         Command::Prime => app.prime()?,
         Command::Doctor => app.doctor()?,
@@ -347,6 +426,7 @@ fn normalized_args() -> Vec<OsString> {
         "resume",
         "clean",
         "credentials",
+        "policy",
         "prime",
         "doctor",
         "expire",
@@ -411,6 +491,66 @@ mod tests {
                 continue_sync: true,
                 abort: false,
             }
+        ));
+    }
+
+    #[test]
+    fn github_profile_import_requires_an_explicit_account_and_confirmation_flag() {
+        let cli = Cli::try_parse_from([
+            "jbox",
+            "credentials",
+            "github",
+            "import",
+            "jbox-project-bot",
+            "--yes",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Credentials {
+                command: CredentialCommand::Github {
+                    command: GithubCredentialCommand::Import {
+                        account,
+                        yes: true,
+                        replace: false,
+                    },
+                },
+            } if account == "jbox-project-bot"
+        ));
+    }
+
+    #[test]
+    fn policy_plan_requires_explicit_session_repository_remote_and_operation() {
+        let cli = Cli::try_parse_from([
+            "jbox",
+            "policy",
+            "plan",
+            "calm-otter-123",
+            "--repository",
+            "jbox",
+            "--remote",
+            "origin",
+            "--operation",
+            "push-branch",
+            "--ref",
+            "refs/heads/jbox/policy",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Policy {
+                command: PolicyCommand::Plan {
+                    session,
+                    repository,
+                    remote,
+                    operation,
+                    reference: Some(reference),
+                },
+            } if session == "calm-otter-123"
+                && repository == "jbox"
+                && remote == "origin"
+                && operation == "push-branch"
+                && reference == "refs/heads/jbox/policy"
         ));
     }
 }

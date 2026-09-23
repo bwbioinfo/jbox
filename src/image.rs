@@ -26,10 +26,11 @@ while [ "$index" -lt "${JBOX_SKILL_COUNT:-0}" ]; do
     skill="$(printenv "JBOX_SKILL_${index}_NAME")"
     pin="$(printenv "JBOX_SKILL_${index}_PIN")"
     hidden="$(printenv "JBOX_SKILL_${index}_ALLOW_HIDDEN")"
+    private="$(printenv "JBOX_SKILL_${index}_PRIVATE")"
     # `gh skill` has no Jcode target. An explicit directory installs the
     # standardized skill layout where Jcode discovers it, instead of silently
     # defaulting to GitHub Copilot. The mounted directory is session-owned.
-    if ! env JBOX_ONE_SKILL_REPOSITORY="$repository" JBOX_ONE_SKILL_NAME="$skill" JBOX_ONE_SKILL_PIN="$pin" JBOX_ONE_SKILL_HIDDEN="$hidden" \
+    if ! env JBOX_ONE_SKILL_REPOSITORY="$repository" JBOX_ONE_SKILL_NAME="$skill" JBOX_ONE_SKILL_PIN="$pin" JBOX_ONE_SKILL_HIDDEN="$hidden" JBOX_ONE_SKILL_PRIVATE="$private" \
         su -s /bin/sh jbox -c '
             set -eu
             mkdir -p /home/jbox/.agents/skills
@@ -46,11 +47,12 @@ while [ "$index" -lt "${JBOX_SKILL_COUNT:-0}" ]; do
         # A session snapshots hosts.yml at launch, so host reauthentication only
         # takes effect after the user launches a new Jbox session.
         echo "jbox: failed to install configured GitHub skill source: ${repository}" >&2
-        echo "jbox: if this source is private, on the host run:" >&2
-        echo "jbox:   gh auth login --hostname github.com --web --scopes repo" >&2
-        echo "jbox: sign in with an account that can read ${repository}, then verify:" >&2
-        echo "jbox:   gh repo view ${repository} --json nameWithOwner" >&2
-        echo "jbox: launch a new Jbox session after that verification succeeds." >&2
+        if [ "$private" = "1" ]; then
+            echo "jbox: this source is configured private and requires guest authentication." >&2
+            echo "jbox: on the host, authenticate an account that can read ${repository}, then retry." >&2
+        else
+            echo "jbox: this source is configured public; check repository visibility, pin, and network access." >&2
+        fi
     fi
     index=$((index + 1))
 done
@@ -89,7 +91,7 @@ su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode &&
 exec /usr/sbin/sshd -D -e
 "#;
 
-const BASE_DOCKERFILE: &str = "FROM debian:bookworm-slim\nARG JBOX_UID=1000\nARG JBOX_GID=1000\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl git gzip openssh-client openssh-server tar && rm -rf /var/lib/apt/lists/*\nRUN mkdir -p -m 0755 /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' > /etc/apt/sources.list.d/github-cli.list && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*\nRUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash && bd version\n# Never inherit a repository's host-managed Dolt server settings in a jbox guest.\nENV BEADS_DOLT_SERVER_MODE=embedded BEADS_DOLT_AUTO_START=true\nRUN groupadd --gid \"$JBOX_GID\" jbox && useradd --uid \"$JBOX_UID\" --gid \"$JBOX_GID\" -m -s /bin/bash jbox && mkdir -p /run/sshd /home/jbox/.jcode /home/jbox/.ssh && chown -R jbox:jbox /home/jbox\nCOPY jcode /usr/local/bin/jcode\nCOPY jcode-linux-x86_64.bin /usr/local/bin/jcode-linux-x86_64.bin\nCOPY jbox-entrypoint /usr/local/bin/jbox-entrypoint\nRUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/local/bin/jbox-entrypoint && printf '%s\\n' 'Port 2222' 'PasswordAuthentication no' 'PermitRootLogin no' 'AllowUsers jbox' 'AuthorizedKeysFile .ssh/authorized_keys' > /etc/ssh/sshd_config.d/jbox.conf\nEXPOSE 2222\n";
+const BASE_DOCKERFILE: &str = "FROM debian:bookworm-slim\nARG JBOX_UID=1000\nARG JBOX_GID=1000\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl git gzip openssh-client openssh-server rustfmt tar && rm -rf /var/lib/apt/lists/*\nRUN mkdir -p -m 0755 /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' > /etc/apt/sources.list.d/github-cli.list && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*\nRUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash && bd version\n# Never inherit a repository's host-managed Dolt server settings in a jbox guest.\nENV BEADS_DOLT_SERVER_MODE=embedded BEADS_DOLT_AUTO_START=true\nRUN groupadd --gid \"$JBOX_GID\" jbox && useradd --uid \"$JBOX_UID\" --gid \"$JBOX_GID\" -m -s /bin/bash jbox && mkdir -p /run/sshd /home/jbox/.jcode /home/jbox/.ssh && chown -R jbox:jbox /home/jbox\nCOPY jcode /usr/local/bin/jcode\nCOPY jcode-linux-x86_64.bin /usr/local/bin/jcode-linux-x86_64.bin\nCOPY jbox-entrypoint /usr/local/bin/jbox-entrypoint\nRUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/local/bin/jbox-entrypoint && printf '%s\\n' 'Port 2222' 'PasswordAuthentication no' 'PermitRootLogin no' 'AllowUsers jbox' 'AuthorizedKeysFile .ssh/authorized_keys' > /etc/ssh/sshd_config.d/jbox.conf\nEXPOSE 2222\n";
 impl<'a> ImageManager<'a> {
     pub fn new(paths: &'a JboxPaths) -> Self {
         Self { paths }
@@ -226,9 +228,9 @@ mod tests {
         assert!(JBOX_ENTRYPOINT.contains("/home/jbox/.agents/skills"));
         assert!(JBOX_ENTRYPOINT.contains("gh skill install"));
         assert!(JBOX_ENTRYPOINT.contains("failed to install configured GitHub skill source"));
-        assert!(JBOX_ENTRYPOINT.contains("gh auth login --hostname github.com --web --scopes repo"));
-        assert!(JBOX_ENTRYPOINT.contains("gh repo view ${repository} --json nameWithOwner"));
-        assert!(JBOX_ENTRYPOINT.contains("launch a new Jbox session"));
+        assert!(JBOX_ENTRYPOINT.contains("JBOX_SKILL_${index}_PRIVATE"));
+        assert!(JBOX_ENTRYPOINT.contains("configured private and requires guest authentication"));
+        assert!(JBOX_ENTRYPOINT.contains("configured public; check repository visibility"));
         assert!(
             JBOX_ENTRYPOINT.find("gh auth setup-git").unwrap()
                 < JBOX_ENTRYPOINT.find("gh skill install").unwrap()
@@ -272,6 +274,11 @@ mod tests {
         assert!(JBOX_ENTRYPOINT.contains("JBOX_GITHUB_CLI_CREDENTIALS"));
         assert!(JBOX_ENTRYPOINT.contains("gh auth setup-git"));
         assert!(JBOX_ENTRYPOINT.contains("timeout 15 gh auth setup-git </dev/null"));
+    }
+
+    #[test]
+    fn base_image_installs_rustfmt() {
+        assert!(BASE_DOCKERFILE.contains("openssh-server rustfmt tar"));
     }
 
     #[test]

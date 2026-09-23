@@ -111,26 +111,36 @@ Every jbox base image includes the Beads CLI (`bd` and its `beads` alias),
 installed by the upstream checksum-verifying installer. Run `bd init` from a
 guest worktree when the project should use Beads issue tracking.
 
+The default Debian guest tooling also includes `rustfmt`, so Rust formatting
+checks can run inside a newly built Jbox image. Existing running guests retain
+their current image and toolchain until they are recreated.
+
 The generated template installs every discoverable skill from
 `bwbioinfo/skills`. Add other GitHub sources with `[[jcode.skills]]`. Jbox runs
 `gh skill install` **inside the guest** before the Jcode daemon starts, placing
-the skills in `~/.agents/skills`, where Jcode discovers them. Sources therefore
-need `network.internet = true`, `git.network = true`, and
-`git.credentials = "github-cli"`. The host GitHub CLI login is mounted only as
-the guest's read-only `hosts.yml`, so private repositories such as
-`bwbioinfo/skills` authenticate without exposing host SSH keys or the rest of
-`~/.config`.
+the skills in `~/.agents/skills`, where Jcode discovers them. Every skill source
+needs `network.internet = true`. Set `private = true` for a source that requires
+authentication. Jbox then requires either legacy `git.credentials =
+"github-cli"` or an exact scoped guest-passthrough clone grant. Public sources
+default to `private = false` and do not require a guest token.
+
+Legacy `github-cli` mode mounts the host login as a guest read-only `hosts.yml`.
+It does not expose host SSH keys or the rest of `~/.config`, but it is broad:
+guest programs can use the bearer token with every permission it has. It is not
+repository-scoped by `.jbox.toml`.
 
 ```toml
 [[jcode.skills]]
 # Omit `skill` to install all discovered skills from this private repository.
 repository = "bwbioinfo/skills"
+private = true
 
 [[jcode.skills]]
 repository = "K-Dense-AI/scientific-agent-skills"
 skill = "scanpy"
 # pin = "v1.2.3"
 # allow_hidden_dirs = true
+# private = false
 ```
 
 Jbox uses `--dir /home/jbox/.agents/skills` rather than a named `--agent`,
@@ -481,7 +491,9 @@ openai_service_tier = "off"
 
 [git]
 network = true
-credentials = "jbox"
+# Prevent the legacy Jbox SSH identity and broad host GH passthrough from
+# bypassing this repository-scoped policy.
+credentials = "none"
 
 [git.author]
 # Uses host global Git user.name and user.email without mounting ~/.gitconfig.
@@ -543,6 +555,105 @@ mount the rest of the GitHub CLI configuration, any Git credential helper store,
 `~/.ssh`, or an SSH agent. In this mode jbox does not create or mount its
 dedicated Git SSH key. The guest can use the bearer token in `hosts.yml`, so
 enable this only for a Kata guest and repository configuration you trust.
+
+### Repository-scoped GitHub profiles and grants
+
+New configurations can describe the intended GitHub account and the exact
+repository operations it may perform with `[[git.credential_profiles]]` and
+`[[git.repository_grants]]`. Profile capability fields are an expectation for
+the externally-issued credential. A grant is constrained to one exact
+`OWNER/REPO`, names its profile, and declares the Git, pull-request, Actions,
+and checks capabilities plus permitted operations. Jbox validates that the
+declarations are internally consistent, including that a grant cannot ask for
+more than its profile declares.
+
+```toml
+[git]
+network = true
+credentials = "none"
+
+[[git.credential_profiles]]
+name = "project-maintainer"
+provider = "github-cli"
+host = "github.com"
+account = "example-maintainer"
+storage = "jbox-managed"
+expected_contents = "write"
+expected_pull_requests = "write"
+expected_actions = "read"
+
+[[git.repository_grants]]
+id = "project"
+repository = "example-org/example-project"
+remote = "origin"
+credential_profile = "project-maintainer"
+delivery = "guest-passthrough"
+git = "write"
+pull_requests = "write"
+actions = "read"
+checks = "read"
+allowed_operations = ["clone", "fetch", "push-branch", "pr-view", "pr-status", "ci-view", "pr-create", "pr-update"]
+allowed_push_ref_prefixes = ["refs/heads/jbox/"]
+protected_refs = ["refs/heads/main"]
+force_push = false
+merge = "deny"
+```
+
+This is a migration path away from `git.credentials = "github-cli"`, not a
+way to downscope its existing host token. `git.credential_profiles` therefore
+requires `git.credentials = "none"`: Jbox will neither mount the legacy
+dedicated SSH identity nor the complete host `gh` token store beside the scoped
+profile.
+
+Authenticate the named account with the host GitHub CLI. On a **new** session,
+Jbox reads only that TOML-selected account through `gh`, writes an isolated
+single-account profile below Jbox-managed state, and mounts it read-only in the
+guest. No manual import command is needed for normal launch:
+
+```bash
+jbox .
+jbox credentials github status example-maintainer
+```
+
+Provisioning asks `gh` for **only** the named account and writes a
+single-account, mode-0600 `hosts.yml`. It never modifies the host GH
+configuration. Existing valid managed profiles are retained, including over
+session resume, so a host credential is never silently refreshed into a
+long-lived guest. Use `jbox credentials github import example-maintainer --yes
+--replace` only when you deliberately want to refresh the managed copy.
+
+A session may select only one guest-passthrough profile, so project and private
+skills grants that need guest access must share a least-privilege account. A
+skill declared with `private = true` additionally needs a matching
+guest-passthrough grant with `git = "read"` and `allowed_operations` including
+`"clone"`. Public skills leave `private` unset or false and need no profile.
+
+A guest-passthrough profile gives guest programs a usable bearer token. Obtain
+a new fine-grained GitHub token restricted to the declared account,
+repositories, and minimum permissions before using it. TOML declarations do
+not reduce the permissions embedded in a token that a guest can read, nor can
+they prevent arbitrary guest `gh` commands that the token itself permits.
+GitHub's actual fine-grained token permissions, repository access, and branch
+protections are the enforcement boundary.
+
+`brokered` delivery is reserved for host-side control-plane work. Brokered
+credentials are never mounted into the guest, and Jbox does not yet execute any
+remote brokered action. It does provide an auditable, no-network preflight that
+checks an exact configured remote, its GitHub `OWNER/REPO` URL, the requested
+operation, and any push-ref restrictions against the session's frozen policy:
+
+```bash
+jbox policy plan SESSION_ID --repository jbox --remote origin --operation push-branch --ref refs/heads/jbox/example
+jbox policy plans SESSION_ID
+```
+
+Each allowed or denied dry run is stored in that session's state journal. It
+does not read a credential, invoke `gh`, push, create a pull request, or query
+GitHub. A future remote brokered merge requires `merge = "user-confirmed"`, a
+brokered delivery grant, and pull-request write capability. It must still
+obtain explicit user confirmation before merging. Jbox freezes the complete
+resolved policy in each session and rejects a resume if `.jbox.toml` changes
+it, preventing a retained guest from silently gaining new policy authority.
 
 ### Explicit local provider import
 

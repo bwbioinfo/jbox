@@ -148,6 +148,19 @@ impl Git {
         Ok(!Self::run(worktree, &["status", "--porcelain"])?.is_empty())
     }
 
+    /// Inspect a configured remote without invoking any network operation.
+    pub fn remote_url(&self, repo: &Path, remote: &str) -> Result<String> {
+        if remote.is_empty()
+            || remote.starts_with('-')
+            || !remote
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            bail!("remote name must contain only letters, digits, `_`, `-`, or `.`");
+        }
+        Self::run(repo, &["remote", "get-url", remote])
+    }
+
     /// A preview needs confirmation before replacement when it has either
     /// uncommitted edits or commits beyond the retained session branch.
     pub fn preview_has_changes(&self, worktree: &Path, session_branch: &str) -> Result<bool> {

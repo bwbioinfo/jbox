@@ -7,13 +7,16 @@ pub mod state;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use config::{Config, ResolvedGitAuthor, ResolvedRepository};
+use config::{
+    Config, GitCredentialDelivery, GitRepositoryOperation, ResolvedGitAuthor, ResolvedRepository,
+};
 use engine::{ContainerSpec, DockerEngine, Engine};
 use git::{Git, Upstream};
 use image::ImageManager;
 use paths::{JboxPaths, safe_target};
 use state::{
-    RepoState, Session, SessionState, StateStore, SyncProgress, SyncRepositoryProgress, SyncStage,
+    BrokeredActionPlan, RepoState, Session, SessionState, StateStore, SyncProgress,
+    SyncRepositoryProgress, SyncStage,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -56,15 +59,17 @@ openai_reasoning_effort = "high"
 openai_service_tier = "off"
 
 # Install all discoverable bwbioinfo skills inside the guest after GitHub CLI
-# authentication. Add more public or private GitHub sources as needed:
+# authentication. Mark private sources explicitly so Jbox validates their auth:
 [[jcode.skills]]
 repository = "bwbioinfo/skills"
+private = true
 
 # [[jcode.skills]]
 # repository = "K-Dense-AI/scientific-agent-skills"
 # skill = "scanpy"
 # pin = "v1.2.3"
 # allow_hidden_dirs = true
+# private = false
 
 [jcode.agent]
 # Session-wide guidance is mounted as ~/AGENTS.md, not written to the worktree.
@@ -380,6 +385,17 @@ impl App {
         if config.git.network && config.git.credentials == "jbox" {
             self.paths.ensure_credentials()?;
         }
+        if let Some(report) = self.ensure_configured_guest_github_profile(&config)? {
+            println!(
+                "{} GitHub CLI profile `{}` for this scoped guest session.",
+                if report.source == report.destination {
+                    "verified retained"
+                } else {
+                    "imported"
+                },
+                report.account
+            );
+        }
         let image = ImageManager::new(&self.paths).ensure(&config, &primary)?;
         let ssh_host = self.next_ssh_host(&session_id)?;
         let session_dir = self.paths.sessions.join(&session_id);
@@ -606,11 +622,25 @@ impl App {
             repos,
             jcode_default_provider: config.jcode.default_provider.clone(),
             jcode_default_model: config.jcode.default_model.clone(),
+            git_access_policy: config.git.resolved_access_policy()?,
+            brokered_plans: Vec::new(),
             sync: None,
         };
         self.state.save(&session)?;
         println!("jbox session {session_id} is running on {ssh_host}:{port}");
         Ok(session_id)
+    }
+
+    /// Provision the one profile explicitly authorized for guest use. This is
+    /// called only while creating a new session, never while resuming one.
+    fn ensure_configured_guest_github_profile(
+        &self,
+        config: &Config,
+    ) -> Result<Option<paths::GithubCliProfileReport>> {
+        let Some(profile) = config.git.guest_passthrough_profile()? else {
+            return Ok(None);
+        };
+        Ok(Some(self.paths.ensure_github_cli_profile(&profile.account)?))
     }
 
     fn container_spec(
@@ -773,6 +803,10 @@ impl App {
                         format!("JBOX_SKILL_{index}_ALLOW_HIDDEN"),
                         if source.allow_hidden_dirs { "1" } else { "0" }.into(),
                     ));
+                    environment.push((
+                        format!("JBOX_SKILL_{index}_PRIVATE"),
+                        if source.private { "1" } else { "0" }.into(),
+                    ));
                 }
             }
         }
@@ -783,7 +817,18 @@ impl App {
                 false,
             ));
         }
-        if config.git.credentials == "github-cli" {
+        if let Some(profile) = config.git.guest_passthrough_profile()? {
+            mounts.push((
+                self.paths.github_cli_profile(&profile.account)?,
+                PathBuf::from("/home/jbox/.config/gh/hosts.yml"),
+                false,
+            ));
+            environment.push(("JBOX_GITHUB_CLI_CREDENTIALS".into(), "scoped".into()));
+            environment.push((
+                "JBOX_GITHUB_CLI_ACCOUNT".into(),
+                profile.account.clone(),
+            ));
+        } else if config.git.credentials == "github-cli" {
             mounts.push((
                 self.paths.github_cli_hosts()?,
                 PathBuf::from("/home/jbox/.config/gh/hosts.yml"),
@@ -1064,6 +1109,168 @@ done | LC_ALL=C sort -r | head -n 20
             "Credentials are stored only under {} and are available to newly created jbox guests.",
             self.paths.credentials.join("jcode").display()
         );
+        Ok(())
+    }
+
+    /// Copy the token for one explicitly named GitHub CLI account into isolated
+    /// Jbox state. This never mounts or modifies the host GH configuration.
+    pub fn import_github_cli_profile(
+        &self,
+        account: &str,
+        confirmed: bool,
+        replace: bool,
+    ) -> Result<()> {
+        if !confirmed {
+            println!(
+                "Nothing was copied. Re-run with `jbox credentials github import {account} --yes` to import only that GitHub CLI account into Jbox-managed state."
+            );
+            return Ok(());
+        }
+        let report = self.paths.import_github_cli_profile(account, replace)?;
+        println!(
+            "Imported GitHub CLI profile `{}` into {}. The token was not displayed.",
+            report.account,
+            report.destination.display()
+        );
+        Ok(())
+    }
+
+    /// Report whether an isolated account profile is suitable for a guest
+    /// mount. This is metadata-only and never contacts GitHub.
+    pub fn github_cli_profile_status(&self, account: &str) -> Result<()> {
+        let report = self.paths.diagnose_github_cli_profile(account)?;
+        println!(
+            "GitHub CLI profile `{}` is ready at {} (token present: {}).",
+            report.account,
+            report.destination.display(),
+            if report.token_present { "yes" } else { "no" }
+        );
+        Ok(())
+    }
+
+    /// Evaluate a future brokered GitHub action using only retained session
+    /// state and local Git configuration. This deliberately performs no GitHub
+    /// request, never reads a credential, and never changes a remote.
+    pub fn plan_brokered_action(
+        &self,
+        id: &str,
+        repository_name: &str,
+        remote: &str,
+        operation_name: &str,
+        reference: Option<&str>,
+    ) -> Result<()> {
+        let operation = GitRepositoryOperation::parse_name(operation_name)?;
+        let mut session = self.load_session(id)?;
+        let repo = session
+            .repos
+            .iter()
+            .find(|repo| repo.name == repository_name)
+            .cloned()
+            .with_context(|| format!("session {id} has no repository named `{repository_name}`"))?;
+        let remote_url = self.git.remote_url(&repo.source, remote).ok();
+        let repository = remote_url
+            .as_deref()
+            .and_then(github_repository_from_remote_url)
+            .unwrap_or_default();
+        let (grant_id, allowed, reason) = match session.git_access_policy.as_ref() {
+            None => (
+                None,
+                false,
+                "session has no frozen repository-scoped Git access policy".into(),
+            ),
+            Some(policy) => match remote_url.as_deref() {
+                None => (
+                    None,
+                    false,
+                    format!(
+                        "could not inspect local remote `{remote}` for repository `{}`",
+                        repo.name
+                    ),
+                ),
+                Some(_) if repository.is_empty() => (
+                    None,
+                    false,
+                    "remote is not an exact github.com OWNER/REPO URL".into(),
+                ),
+                Some(_) => match policy.repository_grants.iter().find(|grant| {
+                    grant.repository == repository
+                        && grant.remote.as_deref() == Some(remote)
+                        && grant.delivery == GitCredentialDelivery::Brokered
+                }) {
+                    None => (
+                        None,
+                        false,
+                        format!(
+                            "no brokered grant authorizes remote `{remote}` for GitHub repository `{repository}`"
+                        ),
+                    ),
+                    Some(grant) if !grant.allowed_operations.contains(&operation) => (
+                        Some(grant.id.clone()),
+                        false,
+                        format!(
+                            "brokered grant `{}` does not allow operation `{}`",
+                            grant.id,
+                            operation.as_str()
+                        ),
+                    ),
+                    Some(grant) => match validate_brokered_plan_reference(grant, operation, reference) {
+                        Ok(()) => (
+                            Some(grant.id.clone()),
+                            true,
+                            format!(
+                                "brokered grant `{}` permits this dry-run plan; no network action was performed",
+                                grant.id
+                            ),
+                        ),
+                        Err(reason) => (Some(grant.id.clone()), false, reason),
+                    },
+                },
+            },
+        };
+        let plan = BrokeredActionPlan {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            created_at: Utc::now(),
+            repository_name: repo.name,
+            repository,
+            remote: remote.to_owned(),
+            remote_url,
+            operation: operation.as_str().into(),
+            reference: reference.map(str::to_owned),
+            grant_id,
+            allowed,
+            reason,
+        };
+        session.brokered_plans.push(plan.clone());
+        self.state.save(&session)?;
+        println!(
+            "Brokered plan {}: {} ({})",
+            plan.id,
+            if plan.allowed { "allowed" } else { "denied" },
+            plan.reason
+        );
+        println!("No credential was read and no network action was performed.");
+        Ok(())
+    }
+
+    /// Print the durable journal of non-mutating brokered action evaluations.
+    pub fn list_brokered_plans(&self, id: &str) -> Result<()> {
+        let session = self.load_session(id)?;
+        if session.brokered_plans.is_empty() {
+            println!("No brokered action plans for session {id}.");
+            return Ok(());
+        }
+        for plan in &session.brokered_plans {
+            println!(
+                "{} {} {} {} {} {}",
+                plan.created_at.to_rfc3339(),
+                if plan.allowed { "allowed" } else { "denied" },
+                plan.repository_name,
+                plan.operation,
+                plan.remote,
+                plan.reference.as_deref().unwrap_or("-")
+            );
+            println!("  plan={} grant={} reason={}", plan.id, plan.grant_id.as_deref().unwrap_or("-"), plan.reason);
+        }
         Ok(())
     }
 
@@ -3123,6 +3330,13 @@ done | LC_ALL=C sort -r | head -n 20
                 session.id
             );
         }
+        let current_policy = config.git.resolved_access_policy()?;
+        if current_policy != session.git_access_policy {
+            bail!(
+                "cannot resume {}: the repository-scoped Git access policy changed since this session was created; inspect or finish the retained session, then create a new session. A future `jbox policy refresh` will provide an explicit reviewed migration path",
+                session.id
+            );
+        }
         Ok(())
     }
 
@@ -3153,6 +3367,84 @@ fn module_loaded(name: &str) -> bool {
                 .any(|line| line.split_whitespace().next() == Some(name))
         })
         .unwrap_or(false)
+}
+
+fn github_repository_from_remote_url(url: &str) -> Option<String> {
+    let path = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| url.strip_prefix("git@github.com:"))?
+        .strip_suffix(".git")
+        .unwrap_or_else(|| {
+            url.strip_prefix("https://github.com/")
+                .or_else(|| url.strip_prefix("http://github.com/"))
+                .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+                .or_else(|| url.strip_prefix("git@github.com:"))
+                .expect("prefix was checked")
+        });
+    let mut components = path.split('/');
+    let owner = components.next()?;
+    let repository = components.next()?;
+    if components.next().is_some()
+        || owner.is_empty()
+        || repository.is_empty()
+        || ![owner, repository].into_iter().all(|component| {
+            component.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+            })
+        })
+    {
+        return None;
+    }
+    Some(format!("{owner}/{repository}"))
+}
+
+fn validate_brokered_plan_reference(
+    grant: &config::GitRepositoryGrant,
+    operation: GitRepositoryOperation,
+    reference: Option<&str>,
+) -> std::result::Result<(), String> {
+    if operation != GitRepositoryOperation::PushBranch {
+        return reference
+            .is_none()
+            .then_some(())
+            .ok_or_else(|| format!("operation `{}` does not accept --ref", operation.as_str()));
+    }
+    let reference = reference.ok_or_else(|| "push-branch requires --ref refs/heads/<branch>".to_owned())?;
+    if !valid_brokered_ref(reference) {
+        return Err("push ref must be a safe refs/heads/<branch> name".into());
+    }
+    if grant
+        .protected_refs
+        .iter()
+        .any(|protected| reference == protected || reference.starts_with(&(protected.clone() + "/")))
+    {
+        return Err(format!("push ref `{reference}` is protected by grant `{}`", grant.id));
+    }
+    if !grant
+        .allowed_push_ref_prefixes
+        .iter()
+        .any(|prefix| reference.starts_with(prefix))
+    {
+        return Err(format!(
+            "push ref `{reference}` is outside grant `{}` allowed_push_ref_prefixes",
+            grant.id
+        ));
+    }
+    Ok(())
+}
+
+fn valid_brokered_ref(reference: &str) -> bool {
+    reference.starts_with("refs/heads/")
+        && reference.len() > "refs/heads/".len()
+        && !reference.contains("..")
+        && !reference.ends_with('.')
+        && !reference.ends_with('/')
+        && !reference.contains("//")
+        && reference.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.')
+        })
 }
 
 fn current_euid_is_root() -> Result<bool> {
@@ -3515,6 +3807,72 @@ mod tests {
         assert!(!prime_confirmation(""));
     }
 
+    #[test]
+    fn resume_config_rejects_changed_frozen_git_access_policy() {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init"]);
+        std::fs::write(
+            root.path().join(".jbox.toml"),
+            r#"
+version = 1
+
+[git]
+network = true
+credentials = "none"
+
+[[git.credential_profiles]]
+name = "project-maintainer"
+account = "jbox-project-bot"
+expected_contents = "write"
+expected_pull_requests = "write"
+expected_actions = "read"
+
+[[git.repository_grants]]
+id = "project-maintainer"
+repository = "bwbioinfo/jbox"
+remote = "origin"
+credential_profile = "project-maintainer"
+git = "write"
+pull_requests = "write"
+actions = "read"
+checks = "read"
+allowed_operations = ["fetch", "push-branch", "pr-create", "pr-update", "ci-view"]
+allowed_push_ref_prefixes = ["refs/heads/jbox/"]
+protected_refs = ["refs/heads/main"]
+merge = "user-confirmed"
+"#,
+        )
+        .unwrap();
+        let (config, primary) = Config::load(root.path()).unwrap();
+        let mut session = test_session("policy", primary.clone());
+        session.config_path = config.path.clone();
+        session.repos[0].name = config.project_name(&primary);
+        session.repos[0].mount = config.workspace.mount.clone();
+        session.git_access_policy = config.git.resolved_access_policy().unwrap();
+
+        let paths = JboxPaths {
+            data: root.path().join("jbox-data"),
+            cache: root.path().join("jbox-cache"),
+            sessions: root.path().join("jbox-data/sessions"),
+            credentials: root.path().join("jbox-data/credentials"),
+        };
+        let app = App {
+            state: StateStore::new(paths.clone()),
+            paths,
+            git: Git,
+            engine: DockerEngine,
+        };
+        assert!(app
+            .validate_resume_config(&session, &config, &primary)
+            .is_ok());
+
+        let mut changed = config.clone();
+        changed.git.repository_grants[0].force_push = true;
+        assert!(app
+            .validate_resume_config(&session, &changed, &primary)
+            .is_err());
+    }
+
     fn test_session(id: &str, source: PathBuf) -> Session {
         let now = Utc::now();
         Session {
@@ -3545,8 +3903,100 @@ mod tests {
             }],
             jcode_default_provider: None,
             jcode_default_model: None,
+            git_access_policy: None,
+            brokered_plans: Vec::new(),
             sync: None,
         }
+    }
+
+    #[test]
+    fn brokered_plan_enforces_exact_remote_operation_and_ref_rules_without_network() {
+        let temp = tempdir().unwrap();
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["remote", "add", "origin", "https://github.com/bwbioinfo/jbox.git"],
+        );
+        let app = test_app(temp.path());
+        let mut session = test_session("brokered", temp.path().to_path_buf());
+        session.repos[0].name = "jbox".into();
+        session.git_access_policy = Some(config::ResolvedGitAccessPolicy {
+            version: 1,
+            digest: "test-policy".into(),
+            credential_profiles: vec![],
+            repository_grants: vec![config::GitRepositoryGrant {
+                id: "maintainer".into(),
+                repository: "bwbioinfo/jbox".into(),
+                remote: Some("origin".into()),
+                credential_profile: "maintainer".into(),
+                delivery: GitCredentialDelivery::Brokered,
+                git: config::GitCapability::Write,
+                pull_requests: config::GitCapability::Write,
+                actions: config::GitCapability::Read,
+                checks: config::GitCapability::Read,
+                allowed_operations: vec![GitRepositoryOperation::PushBranch],
+                allowed_push_ref_prefixes: vec!["refs/heads/jbox/".into()],
+                protected_refs: vec!["refs/heads/main".into()],
+                force_push: false,
+                merge: config::GitMergePolicy::UserConfirmed,
+            }],
+        });
+        app.state.save(&session).unwrap();
+
+        app.plan_brokered_action(
+            "brokered",
+            "jbox",
+            "origin",
+            "push-branch",
+            Some("refs/heads/jbox/feature"),
+        )
+        .unwrap();
+        app.plan_brokered_action(
+            "brokered",
+            "jbox",
+            "origin",
+            "push-branch",
+            Some("refs/heads/main"),
+        )
+        .unwrap();
+        app.plan_brokered_action(
+            "brokered",
+            "jbox",
+            "origin",
+            "pr-create",
+            None,
+        )
+        .unwrap();
+
+        let plans = app.state.load("brokered").unwrap().brokered_plans;
+        assert_eq!(plans.len(), 3);
+        assert!(plans[0].allowed);
+        assert_eq!(plans[0].repository, "bwbioinfo/jbox");
+        assert_eq!(plans[0].remote_url.as_deref(), Some("https://github.com/bwbioinfo/jbox.git"));
+        assert!(!plans[1].allowed);
+        assert!(plans[1].reason.contains("protected"));
+        assert!(!plans[2].allowed);
+        assert!(plans[2].reason.contains("does not allow operation"));
+    }
+
+    #[test]
+    fn brokered_plan_recognizes_only_exact_github_repository_urls() {
+        assert_eq!(
+            github_repository_from_remote_url("git@github.com:bwbioinfo/jbox.git"),
+            Some("bwbioinfo/jbox".into())
+        );
+        assert_eq!(
+            github_repository_from_remote_url("ssh://git@github.com/bwbioinfo/jbox"),
+            Some("bwbioinfo/jbox".into())
+        );
+        assert_eq!(
+            github_repository_from_remote_url("https://github.com/bwbioinfo/jbox/extra"),
+            None
+        );
+        assert_eq!(
+            github_repository_from_remote_url("https://github.example/bwbioinfo/jbox"),
+            None
+        );
     }
 
     fn sync_test_repo(root: &Path, name: &str, session_id: &str) -> RepoState {
@@ -3949,6 +4399,10 @@ mod tests {
                 .contains(&("JBOX_SKILL_0_NAME".into(), String::new(),))
         );
         assert!(
+            spec.environment
+                .contains(&("JBOX_SKILL_0_PRIVATE".into(), "0".into(),))
+        );
+        assert!(
             spec.environment.contains(&(
                 "JBOX_SKILL_1_REPOSITORY".into(),
                 "K-Dense-AI/scientific-agent-skills".into(),
@@ -3957,6 +4411,10 @@ mod tests {
         assert!(
             spec.environment
                 .contains(&("JBOX_SKILL_1_NAME".into(), "scanpy".into(),))
+        );
+        assert!(
+            spec.environment
+                .contains(&("JBOX_SKILL_1_PRIVATE".into(), "0".into(),))
         );
 
         let resumed = test_app(temp.path())
@@ -3983,6 +4441,141 @@ mod tests {
                 .iter()
                 .any(|(name, _)| name.starts_with("JBOX_SKILL_0_"))
         );
+    }
+
+    #[test]
+    fn scoped_github_profile_mounts_only_the_authorized_managed_account() {
+        let temp = tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", temp.path().to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(
+            temp.path().join(".jbox.toml"),
+            r#"version = 1
+[git]
+credentials = "none"
+
+[[git.credential_profiles]]
+name = "skills-reader"
+account = "jbox-skills-bot"
+expected_contents = "read"
+
+[[git.repository_grants]]
+id = "skills-fetch"
+repository = "bwbioinfo/skills"
+credential_profile = "skills-reader"
+delivery = "guest-passthrough"
+git = "read"
+allowed_operations = ["clone"]
+"#,
+        )
+        .unwrap();
+        let (config, _) = Config::load(temp.path()).unwrap();
+        let app = test_app(temp.path());
+        let profile = app
+            .paths
+            .credentials
+            .join("github/jbox-skills-bot.yml");
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(
+            &profile,
+            "github.com:\n    user: \"jbox-skills-bot\"\n    oauth_token: \"test-token\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let ssh = temp.path().join("session/ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+
+        let spec = app
+            .container_spec(
+                &config,
+                &[],
+                "jbox-test",
+                &ssh,
+                SessionLaunch {
+                    image: "test-image".into(),
+                    ssh_host: "127.0.0.2".into(),
+                    reuse_runtime_state: false,
+                },
+            )
+            .unwrap();
+        assert!(spec.mounts.contains(&(
+            profile,
+            PathBuf::from("/home/jbox/.config/gh/hosts.yml"),
+            false,
+        )));
+        assert!(spec.environment.contains(&(
+            "JBOX_GITHUB_CLI_CREDENTIALS".into(),
+            "scoped".into(),
+        )));
+        assert!(spec.environment.contains(&(
+            "JBOX_GITHUB_CLI_ACCOUNT".into(),
+            "jbox-skills-bot".into(),
+        )));
+    }
+
+    #[test]
+    fn new_session_provisions_only_the_configured_guest_profile() {
+        let temp = tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", temp.path().to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(
+            temp.path().join(".jbox.toml"),
+            r#"version = 1
+[git]
+credentials = "none"
+
+[[git.credential_profiles]]
+name = "skills-reader"
+account = "jbox-skills-bot"
+expected_contents = "read"
+
+[[git.repository_grants]]
+id = "skills-fetch"
+repository = "bwbioinfo/skills"
+credential_profile = "skills-reader"
+delivery = "guest-passthrough"
+git = "read"
+allowed_operations = ["clone"]
+"#,
+        )
+        .unwrap();
+        let (config, _) = Config::load(temp.path()).unwrap();
+        let app = test_app(temp.path());
+        let profile = app
+            .paths
+            .credentials
+            .join("github/jbox-skills-bot.yml");
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(
+            &profile,
+            "github.com:\n    user: \"jbox-skills-bot\"\n    oauth_token: \"test-token\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let report = app
+            .ensure_configured_guest_github_profile(&config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.account, "jbox-skills-bot");
+        assert_eq!(report.source, report.destination);
+
+        let mut brokered_only = config.clone();
+        brokered_only.git.repository_grants[0].delivery = GitCredentialDelivery::Brokered;
+        assert!(app
+            .ensure_configured_guest_github_profile(&brokered_only)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

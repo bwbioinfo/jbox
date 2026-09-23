@@ -1,4 +1,4 @@
-use crate::paths::JboxPaths;
+use crate::{config::ResolvedGitAccessPolicy, paths::JboxPaths};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use rand::prelude::IndexedRandom;
@@ -77,11 +77,36 @@ pub struct Session {
     pub jcode_default_provider: Option<String>,
     #[serde(default)]
     pub jcode_default_model: Option<String>,
+    /// The repository-scoped credential policy resolved from `.jbox.toml` when
+    /// this session was created. It contains no credential material. Resume
+    /// compares it with the current configuration before recreating a guest.
+    #[serde(default)]
+    pub git_access_policy: Option<ResolvedGitAccessPolicy>,
+    /// Host-side dry-run evaluations for future brokered GitHub operations.
+    /// These never include credentials and never indicate that a network action
+    /// was performed.
+    #[serde(default)]
+    pub brokered_plans: Vec<BrokeredActionPlan>,
     /// Durable progress for a project-wide host synchronization. A sync can
     /// touch several independent remotes, so this records completed stages for
     /// actionable continuation after a conflict or a rejected later push.
     #[serde(default)]
     pub sync: Option<SyncProgress>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrokeredActionPlan {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub repository_name: String,
+    pub repository: String,
+    pub remote: String,
+    pub remote_url: Option<String>,
+    pub operation: String,
+    pub reference: Option<String>,
+    pub grant_id: Option<String>,
+    pub allowed: bool,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

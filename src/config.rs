@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -188,6 +189,10 @@ pub struct SkillSource {
     pub pin: Option<String>,
     #[serde(default)]
     pub allow_hidden_dirs: bool,
+    /// Private skill sources must have an explicit legacy GitHub CLI mode or a
+    /// scoped guest-passthrough clone grant. Public sources need no token.
+    #[serde(default)]
+    pub private: bool,
 }
 
 fn deserialize_skill_sources<'de, D>(deserializer: D) -> Result<Vec<SkillSource>, D::Error>
@@ -215,6 +220,16 @@ pub struct Git {
     pub credentials: String,
     #[serde(default)]
     pub author: GitAuthor,
+    /// Named GitHub identities and their expected, externally-enforced
+    /// capabilities. Credentials are imported into Jbox-owned state in a later
+    /// lifecycle step. Keeping these declarations separate from grants prevents
+    /// a repository from silently selecting an arbitrary host account.
+    #[serde(default)]
+    pub credential_profiles: Vec<GitCredentialProfile>,
+    /// Exact GitHub repository grants. A grant describes Jbox policy, not a
+    /// substitute for the permissions embedded in the credential itself.
+    #[serde(default)]
+    pub repository_grants: Vec<GitRepositoryGrant>,
 }
 fn git_credentials() -> String {
     "jbox".into()
@@ -225,7 +240,202 @@ impl Default for Git {
             network: true,
             credentials: git_credentials(),
             author: GitAuthor::default(),
+            credential_profiles: Vec::new(),
+            repository_grants: Vec::new(),
         }
+    }
+}
+
+/// Ordered so a grant can be checked against its credential profile's declared
+/// minimum capability without stringly typed comparisons.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum GitCapability {
+    #[default]
+    None,
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitCredentialDelivery {
+    /// The credential remains on the host and future Jbox control-plane
+    /// commands mediate all use of it.
+    #[default]
+    Brokered,
+    /// An explicitly selected profile is available to guest programs. The
+    /// actual token must be least-privilege because configuration alone cannot
+    /// downscope a token a guest can read.
+    GuestPassthrough,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitMergePolicy {
+    #[default]
+    Deny,
+    UserConfirmed,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitRepositoryOperation {
+    Clone,
+    Fetch,
+    PushBranch,
+    PrView,
+    PrStatus,
+    CiView,
+    PrCreate,
+    PrUpdate,
+}
+
+impl GitRepositoryOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clone => "clone",
+            Self::Fetch => "fetch",
+            Self::PushBranch => "push-branch",
+            Self::PrView => "pr-view",
+            Self::PrStatus => "pr-status",
+            Self::CiView => "ci-view",
+            Self::PrCreate => "pr-create",
+            Self::PrUpdate => "pr-update",
+        }
+    }
+
+    pub fn parse_name(value: &str) -> Result<Self> {
+        Ok(match value {
+            "clone" => Self::Clone,
+            "fetch" => Self::Fetch,
+            "push-branch" => Self::PushBranch,
+            "pr-view" => Self::PrView,
+            "pr-status" => Self::PrStatus,
+            "ci-view" => Self::CiView,
+            "pr-create" => Self::PrCreate,
+            "pr-update" => Self::PrUpdate,
+            _ => bail!(
+                "unknown Git repository operation `{value}`; use clone, fetch, push-branch, pr-view, pr-status, ci-view, pr-create, or pr-update"
+            ),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitCredentialProfile {
+    pub name: String,
+    #[serde(default = "github_cli_provider")]
+    pub provider: String,
+    #[serde(default = "github_com_host")]
+    pub host: String,
+    pub account: String,
+    #[serde(default = "jbox_managed_storage")]
+    pub storage: String,
+    #[serde(default)]
+    pub expected_contents: GitCapability,
+    #[serde(default)]
+    pub expected_pull_requests: GitCapability,
+    #[serde(default)]
+    pub expected_actions: GitCapability,
+}
+
+fn github_cli_provider() -> String {
+    "github-cli".into()
+}
+
+fn github_com_host() -> String {
+    "github.com".into()
+}
+
+fn jbox_managed_storage() -> String {
+    "jbox-managed".into()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitRepositoryGrant {
+    pub id: String,
+    /// An exact GitHub OWNER/REPO identifier. The associated profile supplies
+    /// the host, avoiding URL parsing and credential selection based on a
+    /// guest-controlled remote string.
+    pub repository: String,
+    /// A local Git remote, when this grant is used by a checked-out repository.
+    /// Skills grants deliberately omit it because they clone by repository ID.
+    pub remote: Option<String>,
+    pub credential_profile: String,
+    #[serde(default)]
+    pub delivery: GitCredentialDelivery,
+    #[serde(default)]
+    pub git: GitCapability,
+    #[serde(default)]
+    pub pull_requests: GitCapability,
+    #[serde(default)]
+    pub actions: GitCapability,
+    #[serde(default)]
+    pub checks: GitCapability,
+    pub allowed_operations: Vec<GitRepositoryOperation>,
+    #[serde(default)]
+    pub allowed_push_ref_prefixes: Vec<String>,
+    #[serde(default)]
+    pub protected_refs: Vec<String>,
+    #[serde(default)]
+    pub force_push: bool,
+    #[serde(default)]
+    pub merge: GitMergePolicy,
+}
+
+/// The canonical repository-access policy captured at session creation. It is
+/// intentionally made from declarative data only, never credentials. A resume
+/// compares this policy with the current configuration rather than allowing a
+/// guest-edited `.jbox.toml` to broaden a retained session's authority.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ResolvedGitAccessPolicy {
+    pub version: u32,
+    pub digest: String,
+    pub credential_profiles: Vec<GitCredentialProfile>,
+    pub repository_grants: Vec<GitRepositoryGrant>,
+}
+
+impl Git {
+    pub fn resolved_access_policy(&self) -> Result<Option<ResolvedGitAccessPolicy>> {
+        validate_git_access(self)?;
+        if self.credential_profiles.is_empty() {
+            return Ok(None);
+        }
+        let mut credential_profiles = self.credential_profiles.clone();
+        credential_profiles.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut repository_grants = self.repository_grants.clone();
+        repository_grants.sort_by(|left, right| left.id.cmp(&right.id));
+        let canonical = serde_json::to_vec(&(&credential_profiles, &repository_grants))
+            .context("could not serialize Git access policy")?;
+        let digest = format!("{:x}", Sha256::digest(canonical));
+        Ok(Some(ResolvedGitAccessPolicy {
+            version: 1,
+            digest,
+            credential_profiles,
+            repository_grants,
+        }))
+    }
+
+    /// Return the one GitHub CLI profile that may enter the guest. A guest can
+    /// use every capability embedded in a mounted token, so the configuration
+    /// validator permits only one explicitly selected profile per session.
+    pub fn guest_passthrough_profile(&self) -> Result<Option<&GitCredentialProfile>> {
+        validate_git_access(self)?;
+        let Some(profile_name) = self
+            .repository_grants
+            .iter()
+            .find(|grant| grant.delivery == GitCredentialDelivery::GuestPassthrough)
+            .map(|grant| grant.credential_profile.as_str())
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .credential_profiles
+            .iter()
+            .find(|profile| profile.name == profile_name))
     }
 }
 
@@ -317,12 +527,13 @@ impl Config {
         if !config.network.internet && config.git.network {
             bail!("git.network=true requires network.internet=true");
         }
-        if !matches!(config.git.credentials.as_str(), "jbox" | "github-cli") {
-            bail!("git.credentials must be `jbox` or `github-cli`");
+        if !matches!(config.git.credentials.as_str(), "jbox" | "github-cli" | "none") {
+            bail!("git.credentials must be `jbox`, `github-cli`, or `none`");
         }
         if config.git.credentials == "github-cli" && !config.git.network {
             bail!("git.credentials=`github-cli` requires git.network=true");
         }
+        validate_git_access(&config.git)?;
         if !config.jcode.skills.is_empty() {
             validate_skills(&config.jcode.skills, &config.network, &config.git)?;
         }
@@ -516,11 +727,6 @@ fn validate_skills(skills: &[SkillSource], network: &Network, git: &Git) -> Resu
     if !network.internet {
         bail!("jcode.skills requires network.internet=true for `gh skill install`");
     }
-    if !git.network || git.credentials != "github-cli" {
-        bail!(
-            "jcode.skills requires git.network=true and git.credentials=`github-cli` so the guest `gh` command can authenticate"
-        );
-    }
     for source in skills {
         if !valid_github_repository(&source.repository) {
             bail!(
@@ -544,8 +750,310 @@ fn validate_skills(skills: &[SkillSource], network: &Network, git: &Git) -> Resu
                 );
             }
         }
+        if source.private {
+            if !git.network {
+                bail!(
+                    "private jcode.skills.repository `{}` requires git.network=true",
+                    source.repository
+                );
+            }
+            if git.credential_profiles.is_empty() {
+                if git.credentials != "github-cli" {
+                    bail!(
+                        "private jcode.skills.repository `{}` requires git.credentials=`github-cli`, or a repository-scoped guest-passthrough grant",
+                        source.repository
+                    );
+                }
+            } else if !git.repository_grants.iter().any(|grant| {
+                grant.repository == source.repository
+                    && grant.delivery == GitCredentialDelivery::GuestPassthrough
+                    && grant.git >= GitCapability::Read
+                    && grant
+                        .allowed_operations
+                        .contains(&GitRepositoryOperation::Clone)
+            }) {
+                bail!(
+                    "private jcode.skills.repository `{}` requires a guest-passthrough repository grant with git = `read` and allowed_operations including `clone`",
+                    source.repository
+                );
+            }
+        }
     }
     Ok(())
+}
+
+/// Validate the declarative GitHub policy before any credential is imported or
+/// mounted. This deliberately checks only configuration consistency. The
+/// credential import and broker layers must separately verify the account and
+/// the actual privileges granted by GitHub.
+fn validate_git_access(git: &Git) -> Result<()> {
+    if git.credential_profiles.is_empty() {
+        if !git.repository_grants.is_empty() {
+            bail!("git.repository_grants requires at least one git.credential_profiles entry");
+        }
+        return Ok(());
+    }
+    if git.credentials != "none" {
+        bail!(
+            "git.credential_profiles requires git.credentials = `none` so legacy host Git credentials cannot bypass repository-scoped policy"
+        );
+    }
+
+    let mut profiles = HashMap::new();
+    for profile in &git.credential_profiles {
+        if !valid_config_identifier(&profile.name) {
+            bail!(
+                "git.credential_profiles.name must contain only letters, digits, `_`, `-`, or `.`: {}",
+                profile.name
+            );
+        }
+        if profiles.insert(profile.name.as_str(), profile).is_some() {
+            bail!("duplicate git credential profile `{}`", profile.name);
+        }
+        if profile.provider != "github-cli" {
+            bail!(
+                "git credential profile `{}` has unsupported provider `{}`; only `github-cli` is currently supported",
+                profile.name,
+                profile.provider
+            );
+        }
+        if profile.host != "github.com" {
+            bail!(
+                "git credential profile `{}` currently supports only host `github.com`, not `{}`",
+                profile.name, profile.host
+            );
+        }
+        if !valid_github_account(&profile.account) {
+            bail!(
+                "git credential profile `{}` has invalid GitHub account `{}`",
+                profile.name,
+                profile.account
+            );
+        }
+        if profile.storage != "jbox-managed" {
+            bail!(
+                "git credential profile `{}` must use storage = `jbox-managed`",
+                profile.name
+            );
+        }
+    }
+
+    let mut grant_ids = HashSet::new();
+    let mut guest_profiles = HashSet::new();
+    for grant in &git.repository_grants {
+        if !valid_config_identifier(&grant.id) {
+            bail!(
+                "git repository grant id must contain only letters, digits, `_`, `-`, or `.`: {}",
+                grant.id
+            );
+        }
+        if !grant_ids.insert(&grant.id) {
+            bail!("duplicate git repository grant `{}`", grant.id);
+        }
+        if !valid_github_repository(&grant.repository) {
+            bail!(
+                "git repository grant `{}` must use an exact GitHub OWNER/REPO identifier: {}",
+                grant.id,
+                grant.repository
+            );
+        }
+        if let Some(remote) = &grant.remote
+            && !valid_config_identifier(remote)
+        {
+            bail!(
+                "git repository grant `{}` has invalid remote `{remote}`",
+                grant.id
+            );
+        }
+        let profile = profiles.get(grant.credential_profile.as_str()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "git repository grant `{}` refers to unknown credential profile `{}`",
+                grant.id,
+                grant.credential_profile
+            )
+        })?;
+        if grant.delivery == GitCredentialDelivery::GuestPassthrough {
+            guest_profiles.insert(profile.name.as_str());
+        }
+        if grant.git > profile.expected_contents {
+            bail!(
+                "git repository grant `{}` requires {} Git contents access, but profile `{}` declares {}",
+                grant.id,
+                capability_name(grant.git),
+                profile.name,
+                capability_name(profile.expected_contents)
+            );
+        }
+        if grant.pull_requests > profile.expected_pull_requests {
+            bail!(
+                "git repository grant `{}` requires {} pull-request access, but profile `{}` declares {}",
+                grant.id,
+                capability_name(grant.pull_requests),
+                profile.name,
+                capability_name(profile.expected_pull_requests)
+            );
+        }
+        if grant.actions > profile.expected_actions || grant.checks > profile.expected_actions {
+            bail!(
+                "git repository grant `{}` requires Actions or checks access beyond profile `{}`'s declared Actions capability",
+                grant.id,
+                profile.name
+            );
+        }
+        validate_grant_operations(grant)?;
+        if grant.merge == GitMergePolicy::UserConfirmed {
+            if grant.delivery != GitCredentialDelivery::Brokered {
+                bail!(
+                    "git repository grant `{}` may allow merge only with delivery = `brokered`",
+                    grant.id
+                );
+            }
+            if grant.pull_requests != GitCapability::Write {
+                bail!(
+                    "git repository grant `{}` requires pull_requests = `write` for user-confirmed merge",
+                    grant.id
+                );
+            }
+        }
+    }
+    if guest_profiles.len() > 1 {
+        bail!(
+            "only one credential profile may use delivery = `guest-passthrough` in a session; use one least-privilege account or keep additional grants brokered"
+        );
+    }
+    Ok(())
+}
+
+fn validate_grant_operations(grant: &GitRepositoryGrant) -> Result<()> {
+    if grant.allowed_operations.is_empty() {
+        bail!(
+            "git repository grant `{}` must declare at least one allowed operation",
+            grant.id
+        );
+    }
+    let mut operations = HashSet::new();
+    for operation in &grant.allowed_operations {
+        if !operations.insert(*operation) {
+            bail!(
+                "git repository grant `{}` repeats operation `{}`",
+                grant.id,
+                operation_name(*operation)
+            );
+        }
+        match operation {
+            GitRepositoryOperation::Clone | GitRepositoryOperation::Fetch
+                if grant.git < GitCapability::Read =>
+            {
+                bail!(
+                    "git repository grant `{}` requires git = `read` for `{}`",
+                    grant.id,
+                    operation_name(*operation)
+                );
+            }
+            GitRepositoryOperation::PushBranch if grant.git != GitCapability::Write => {
+                bail!(
+                    "git repository grant `{}` requires git = `write` for `push-branch`",
+                    grant.id
+                );
+            }
+            GitRepositoryOperation::PrView | GitRepositoryOperation::PrStatus
+                if grant.pull_requests < GitCapability::Read =>
+            {
+                bail!(
+                    "git repository grant `{}` requires pull_requests = `read` for `{}`",
+                    grant.id,
+                    operation_name(*operation)
+                );
+            }
+            GitRepositoryOperation::CiView
+                if grant.actions < GitCapability::Read && grant.checks < GitCapability::Read =>
+            {
+                bail!(
+                    "git repository grant `{}` requires actions or checks = `read` for `ci-view`",
+                    grant.id
+                );
+            }
+            GitRepositoryOperation::PrCreate | GitRepositoryOperation::PrUpdate
+                if grant.pull_requests != GitCapability::Write =>
+            {
+                bail!(
+                    "git repository grant `{}` requires pull_requests = `write` for `{}`",
+                    grant.id,
+                    operation_name(*operation)
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let allows_push = operations.contains(&GitRepositoryOperation::PushBranch);
+    if allows_push && grant.allowed_push_ref_prefixes.is_empty() {
+        bail!(
+            "git repository grant `{}` must restrict push-branch with allowed_push_ref_prefixes",
+            grant.id
+        );
+    }
+    if grant.force_push && !allows_push {
+        bail!(
+            "git repository grant `{}` cannot allow force_push without `push-branch`",
+            grant.id
+        );
+    }
+    for reference in grant
+        .allowed_push_ref_prefixes
+        .iter()
+        .chain(grant.protected_refs.iter())
+    {
+        if !valid_ref_rule(reference) {
+            bail!(
+                "git repository grant `{}` has invalid reference rule `{reference}`",
+                grant.id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn valid_config_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+        })
+}
+
+fn valid_github_account(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 39
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn valid_ref_rule(value: &str) -> bool {
+    value.starts_with("refs/")
+        && !value.contains('\0')
+        && !value.contains("..")
+        && !value.contains("//")
+        && !value.contains("@{")
+        && !value.ends_with('.')
+        && !value.ends_with(".lock")
+        && value
+            .bytes()
+            .all(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\'))
+}
+
+fn capability_name(capability: GitCapability) -> &'static str {
+    match capability {
+        GitCapability::None => "none",
+        GitCapability::Read => "read",
+        GitCapability::Write => "write",
+    }
+}
+
+fn operation_name(operation: GitRepositoryOperation) -> &'static str {
+    operation.as_str()
 }
 
 fn valid_github_repository(repository: &str) -> bool {
@@ -636,12 +1144,14 @@ mod tests {
                 skill: None,
                 pin: None,
                 allow_hidden_dirs: false,
+                private: true,
             },
             SkillSource {
                 repository: "K-Dense-AI/scientific-agent-skills".into(),
                 skill: Some("scanpy".into()),
                 pin: Some("v1.2.3".into()),
                 allow_hidden_dirs: true,
+                private: false,
             },
         ];
         let network = Network::default();
@@ -668,6 +1178,7 @@ mod tests {
                     skill: None,
                     pin: None,
                     allow_hidden_dirs: false,
+                    private: false,
                 }],
                 &network,
                 &git,
@@ -681,6 +1192,7 @@ mod tests {
                     skill: Some("--all".into()),
                     pin: None,
                     allow_hidden_dirs: false,
+                    private: true,
                 }],
                 &network,
                 &git,
@@ -730,6 +1242,255 @@ mod tests {
         )
         .unwrap();
         assert!(Config::load(temp.path()).is_ok());
+    }
+
+    fn profile(name: &str, contents: GitCapability, pull_requests: GitCapability) -> GitCredentialProfile {
+        GitCredentialProfile {
+            name: name.into(),
+            provider: "github-cli".into(),
+            host: "github.com".into(),
+            account: "jbox-project-bot".into(),
+            storage: "jbox-managed".into(),
+            expected_contents: contents,
+            expected_pull_requests: pull_requests,
+            expected_actions: GitCapability::Read,
+        }
+    }
+
+    fn grant(profile: &str) -> GitRepositoryGrant {
+        GitRepositoryGrant {
+            id: "project-maintainer".into(),
+            repository: "bwbioinfo/jbox".into(),
+            remote: Some("origin".into()),
+            credential_profile: profile.into(),
+            delivery: GitCredentialDelivery::Brokered,
+            git: GitCapability::Write,
+            pull_requests: GitCapability::Write,
+            actions: GitCapability::Read,
+            checks: GitCapability::Read,
+            allowed_operations: vec![
+                GitRepositoryOperation::Fetch,
+                GitRepositoryOperation::PushBranch,
+                GitRepositoryOperation::PrCreate,
+                GitRepositoryOperation::PrUpdate,
+                GitRepositoryOperation::CiView,
+            ],
+            allowed_push_ref_prefixes: vec!["refs/heads/jbox/".into()],
+            protected_refs: vec!["refs/heads/main".into()],
+            force_push: false,
+            merge: GitMergePolicy::UserConfirmed,
+        }
+    }
+
+    #[test]
+    fn validates_typed_repository_scoped_git_access() {
+        let git = Git {
+            credentials: "none".into(),
+            credential_profiles: vec![profile(
+                "project-maintainer",
+                GitCapability::Write,
+                GitCapability::Write,
+            )],
+            repository_grants: vec![grant("project-maintainer")],
+            ..Git::default()
+        };
+        assert!(validate_git_access(&git).is_ok());
+
+        let parsed: Git = toml::from_str(
+            r#"
+network = true
+credentials = "none"
+
+[[credential_profiles]]
+name = "skills-reader"
+account = "jbox-skills-bot"
+expected_contents = "read"
+
+[[repository_grants]]
+id = "skills-fetch"
+repository = "bwbioinfo/skills"
+credential_profile = "skills-reader"
+delivery = "guest-passthrough"
+git = "read"
+allowed_operations = ["clone", "fetch"]
+"#,
+        )
+        .unwrap();
+        assert!(validate_git_access(&parsed).is_ok());
+        assert_eq!(
+            parsed.repository_grants[0].delivery,
+            GitCredentialDelivery::GuestPassthrough
+        );
+        assert_eq!(
+            parsed
+                .guest_passthrough_profile()
+                .unwrap()
+                .unwrap()
+                .account,
+            "jbox-skills-bot"
+        );
+    }
+
+    #[test]
+    fn scoped_skills_require_a_guest_clone_grant() {
+        let skills = vec![SkillSource {
+            repository: "bwbioinfo/skills".into(),
+            skill: None,
+            pin: None,
+            allow_hidden_dirs: false,
+            private: true,
+        }];
+        let mut skills_grant = grant("skills-reader");
+        skills_grant.id = "skills-fetch".into();
+        skills_grant.repository = "bwbioinfo/skills".into();
+        skills_grant.remote = None;
+        skills_grant.delivery = GitCredentialDelivery::GuestPassthrough;
+        skills_grant.git = GitCapability::Read;
+        skills_grant.pull_requests = GitCapability::None;
+        skills_grant.actions = GitCapability::None;
+        skills_grant.checks = GitCapability::None;
+        skills_grant.allowed_operations = vec![GitRepositoryOperation::Clone];
+        skills_grant.allowed_push_ref_prefixes.clear();
+        skills_grant.protected_refs.clear();
+        skills_grant.merge = GitMergePolicy::Deny;
+        let git = Git {
+            credentials: "none".into(),
+            credential_profiles: vec![profile(
+                "skills-reader",
+                GitCapability::Read,
+                GitCapability::None,
+            )],
+            repository_grants: vec![skills_grant],
+            ..Git::default()
+        };
+        assert!(validate_skills(&skills, &Network::default(), &git).is_ok());
+
+        let mut missing_clone = git.clone();
+        missing_clone.repository_grants[0].allowed_operations = vec![GitRepositoryOperation::Fetch];
+        assert!(validate_skills(&skills, &Network::default(), &missing_clone).is_err());
+    }
+
+    #[test]
+    fn public_skills_do_not_require_guest_git_credentials() {
+        let public_skill = SkillSource {
+            repository: "K-Dense-AI/scientific-agent-skills".into(),
+            skill: Some("scanpy".into()),
+            pin: None,
+            allow_hidden_dirs: false,
+            private: false,
+        };
+        let git = Git {
+            network: false,
+            credentials: "none".into(),
+            ..Git::default()
+        };
+        assert!(validate_skills(&[public_skill], &Network::default(), &git).is_ok());
+    }
+
+    #[test]
+    fn rejects_more_than_one_guest_passthrough_profile() {
+        let mut first = grant("one");
+        first.delivery = GitCredentialDelivery::GuestPassthrough;
+        first.merge = GitMergePolicy::Deny;
+        let mut second = grant("two");
+        second.id = "second".into();
+        second.repository = "bwbioinfo/skills".into();
+        second.remote = None;
+        second.delivery = GitCredentialDelivery::GuestPassthrough;
+        second.merge = GitMergePolicy::Deny;
+        let git = Git {
+            credentials: "none".into(),
+            credential_profiles: vec![
+                profile("one", GitCapability::Write, GitCapability::Write),
+                profile("two", GitCapability::Write, GitCapability::Write),
+            ],
+            repository_grants: vec![first, second],
+            ..Git::default()
+        };
+        assert!(validate_git_access(&git).is_err());
+    }
+
+    #[test]
+    fn rejects_inconsistent_repository_scoped_git_access() {
+        let read_only = Git {
+            credentials: "none".into(),
+            credential_profiles: vec![profile(
+                "observer",
+                GitCapability::Read,
+                GitCapability::Read,
+            )],
+            repository_grants: vec![grant("observer")],
+            ..Git::default()
+        };
+        assert!(validate_git_access(&read_only).is_err());
+
+        let mut missing_push_rule = grant("writer");
+        missing_push_rule.allowed_push_ref_prefixes.clear();
+        let missing_push_rule = Git {
+            credentials: "none".into(),
+            credential_profiles: vec![profile(
+                "writer",
+                GitCapability::Write,
+                GitCapability::Write,
+            )],
+            repository_grants: vec![missing_push_rule],
+            ..Git::default()
+        };
+        assert!(validate_git_access(&missing_push_rule).is_err());
+
+        let mut guest_merge = grant("writer");
+        guest_merge.delivery = GitCredentialDelivery::GuestPassthrough;
+        let guest_merge = Git {
+            credentials: "none".into(),
+            credential_profiles: vec![profile(
+                "writer",
+                GitCapability::Write,
+                GitCapability::Write,
+            )],
+            repository_grants: vec![guest_merge],
+            ..Git::default()
+        };
+        assert!(validate_git_access(&guest_merge).is_err());
+    }
+
+    #[test]
+    fn resolved_git_access_policy_is_canonical_and_detects_changes() {
+        let git = Git {
+            credentials: "none".into(),
+            credential_profiles: vec![profile(
+                "project-maintainer",
+                GitCapability::Write,
+                GitCapability::Write,
+            )],
+            repository_grants: vec![grant("project-maintainer")],
+            ..Git::default()
+        };
+        let first = git.resolved_access_policy().unwrap().unwrap();
+        let second = git.resolved_access_policy().unwrap().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.digest.len(), 64);
+
+        let mut changed = git.clone();
+        changed.repository_grants[0].force_push = true;
+        let changed = changed.resolved_access_policy().unwrap().unwrap();
+        assert_ne!(first.digest, changed.digest);
+        assert!(Git::default().resolved_access_policy().unwrap().is_none());
+    }
+
+    #[test]
+    fn repository_scoped_git_access_rejects_unknown_toml_fields() {
+        let parsed = toml::from_str::<Git>(
+            r#"
+network = true
+credentials = "jbox"
+
+[[credential_profiles]]
+name = "skills-reader"
+account = "jbox-skills-bot"
+unexpected = true
+"#,
+        );
+        assert!(parsed.is_err());
     }
 
     #[test]

@@ -23,6 +23,14 @@ pub struct CredentialImportReport {
     pub retained: Vec<LocalCredential>,
 }
 
+#[derive(Debug, Clone)]
+pub struct GithubCliProfileReport {
+    pub account: String,
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    pub token_present: bool,
+}
+
 #[derive(Clone)]
 pub struct JboxPaths {
     pub data: PathBuf,
@@ -104,7 +112,120 @@ impl JboxPaths {
                 hosts.display()
             );
         }
+        let metadata = fs::metadata(&hosts)?;
+        if metadata.permissions().mode() & 0o022 != 0 {
+            bail!("GitHub CLI credential file is writable by group or other users: {}", hosts.display());
+        }
         Ok(hosts)
+    }
+
+    /// Import exactly one account from the host gh store. The resulting file
+    /// contains only that account and is always kept beneath Jbox-owned state.
+    pub fn import_github_cli_profile(
+        &self,
+        account: &str,
+        replace: bool,
+    ) -> Result<GithubCliProfileReport> {
+        let config = BaseDirs::new()
+            .context("could not determine XDG configuration directory")?
+            .config_dir()
+            .to_path_buf();
+        self.import_github_cli_profile_from(&config, account, replace)
+    }
+
+    /// Ensure a valid isolated profile exists for an explicitly configured
+    /// guest-passthrough account. Existing profiles are retained so a resumed
+    /// session never silently refreshes host credentials. A missing profile is
+    /// imported from the named account through the host `gh` CLI.
+    pub fn ensure_github_cli_profile(&self, account: &str) -> Result<GithubCliProfileReport> {
+        if !valid_github_account(account) {
+            bail!("GitHub account must be a valid GitHub login");
+        }
+        let destination = self.credentials.join("github").join(format!("{account}.yml"));
+        if destination.exists() {
+            return self.diagnose_github_cli_profile(account);
+        }
+        self.import_github_cli_profile(account, false)
+    }
+
+    fn import_github_cli_profile_from(
+        &self,
+        config: &Path,
+        account: &str,
+        replace: bool,
+    ) -> Result<GithubCliProfileReport> {
+        if !valid_github_account(account) {
+            bail!("GitHub account must be a valid GitHub login");
+        }
+        let source = Self::github_cli_hosts_from(config)?;
+        let selected = github_cli_profile_contents(account)?;
+        self.store_github_cli_profile(account, &source, &selected, replace)
+    }
+
+    fn store_github_cli_profile(
+        &self,
+        account: &str,
+        source: &Path,
+        contents: &str,
+        replace: bool,
+    ) -> Result<GithubCliProfileReport> {
+        let destination = self.credentials.join("github").join(format!("{account}.yml"));
+        let parent = destination.parent().context("profile destination lacks a parent")?;
+        fs::create_dir_all(parent)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        if destination.exists() && !replace {
+            bail!("Jbox GitHub profile already exists: {}; use --replace to replace it", destination.display());
+        }
+        if destination.exists() && fs::symlink_metadata(&destination)?.file_type().is_symlink() {
+            bail!("refusing to replace symlinked Jbox GitHub profile");
+        }
+        let temporary = destination.with_extension("yml.jbox-importing");
+        let _ = fs::remove_file(&temporary);
+        fs::write(&temporary, contents)?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+        fs::rename(&temporary, &destination)?;
+        Ok(GithubCliProfileReport {
+            account: account.to_owned(),
+            source: source.to_path_buf(),
+            destination,
+            token_present: contents
+                .lines()
+                .any(|line| line.trim_start().starts_with("oauth_token:")),
+        })
+    }
+
+    /// Read-only validation for a Jbox-managed profile. It never invokes gh or
+    /// contacts GitHub, and deliberately reports only metadata, never secrets.
+    pub fn diagnose_github_cli_profile(&self, account: &str) -> Result<GithubCliProfileReport> {
+        if !valid_github_account(account) {
+            bail!("GitHub account must be a valid GitHub login");
+        }
+        let destination = self.credentials.join("github").join(format!("{account}.yml"));
+        let metadata = fs::symlink_metadata(&destination)
+            .with_context(|| format!("Jbox GitHub profile is missing: {}", destination.display()))?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            bail!("Jbox GitHub profile is not a regular file");
+        }
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            bail!("Jbox GitHub profile has unsafe permissions; expected 0600");
+        }
+        if metadata.len() > CREDENTIAL_FILE_LIMIT {
+            bail!("Jbox GitHub profile is too large");
+        }
+        let contents = fs::read_to_string(&destination)?;
+        Ok(GithubCliProfileReport {
+            account: account.to_owned(),
+            source: destination.clone(),
+            destination,
+            token_present: contents.lines().any(|line| line.trim_start().starts_with("oauth_token:")),
+        })
+    }
+
+    /// Return a verified, Jbox-managed single-account profile for a read-only
+    /// guest mount. Callers must authorize the account through the frozen
+    /// repository policy before using this path.
+    pub fn github_cli_profile(&self, account: &str) -> Result<PathBuf> {
+        Ok(self.diagnose_github_cli_profile(account)?.destination)
     }
     /// The only credential locations that may be exposed to the guest. They
     /// live below jbox-owned state, never beneath the user's normal home.
@@ -521,6 +642,60 @@ fn is_safe_credential_file(path: &Path) -> Result<bool> {
         && !metadata.file_type().is_symlink()
         && metadata.len() <= CREDENTIAL_FILE_LIMIT)
 }
+
+fn valid_github_account(account: &str) -> bool {
+    (1..=39).contains(&account.len())
+        && !account.starts_with('-')
+        && !account.ends_with('-')
+        && account
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// Ask GitHub CLI for exactly the requested account's token, then create a
+/// standalone single-account GH_CONFIG_DIR profile. Parsing `hosts.yml` is not
+/// safe here: its internal multi-account representation is CLI-version
+/// dependent, and copying it can carry tokens for other accounts.
+fn github_cli_profile_contents(account: &str) -> Result<String> {
+    let output = Command::new("gh")
+        .args(["auth", "token", "--hostname", "github.com", "--user", account])
+        .output()
+        .context("GitHub CLI (`gh`) is required to import a GitHub profile")?;
+    if !output.status.success() {
+        bail!(
+            "GitHub CLI could not retrieve credentials for account `{account}` on github.com; authenticate that account with `gh auth login` first"
+        );
+    }
+    let token = String::from_utf8(output.stdout)
+        .context("GitHub CLI returned a non-UTF-8 credential token")?
+        .trim()
+        .to_owned();
+    if token.is_empty() || token.chars().any(char::is_control) {
+        bail!("GitHub CLI returned an invalid credential token");
+    }
+    Ok(format!(
+        "github.com:\n    user: {}\n    oauth_token: {}\n    git_protocol: https\n",
+        yaml_double_quoted(account),
+        yaml_double_quoted(&token),
+    ))
+}
+
+fn yaml_double_quoted(value: &str) -> String {
+    let mut result = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => result.push_str("\\\\"),
+            '\"' => result.push_str("\\\""),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            control if control.is_control() => result.push_str(&format!("\\u{:04x}", control as u32)),
+            character => result.push(character),
+        }
+    }
+    result.push('\"');
+    result
+}
 fn shell_quote(value: &Path) -> String {
     format!("'{}'", value.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -640,6 +815,44 @@ mod tests {
         fs::remove_file(&hosts).unwrap();
         std::os::unix::fs::symlink("/etc/passwd", &hosts).unwrap();
         assert!(JboxPaths::github_cli_hosts_from(&config).is_err());
+    }
+
+    #[test]
+    fn stores_one_github_account_without_exposing_other_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let hosts = config.join("gh/hosts.yml");
+        fs::create_dir_all(hosts.parent().unwrap()).unwrap();
+        fs::write(&hosts, "github.com:\n    user: alice\n    oauth_token: alice-secret\n").unwrap();
+        let paths = JboxPaths { data: tmp.path().join("data"), cache: tmp.path().join("cache"), sessions: tmp.path().join("sessions"), credentials: tmp.path().join("credentials") };
+        let report = paths.store_github_cli_profile(
+            "alice",
+            &hosts,
+            "github.com:\n    user: \"alice\"\n    oauth_token: \"alice-secret\"\n    git_protocol: https\n",
+            false,
+        ).unwrap();
+        let imported = fs::read_to_string(report.destination).unwrap();
+        assert!(imported.contains("alice-secret"));
+        assert!(!imported.contains("bob-secret"));
+        assert_eq!(fs::metadata(paths.credentials.join("github/alice.yml")).unwrap().permissions().mode() & 0o777, 0o600);
+        let retained = paths.ensure_github_cli_profile("alice").unwrap();
+        assert_eq!(retained.source, retained.destination);
+        assert_eq!(retained.account, "alice");
+        assert!(paths.store_github_cli_profile(
+            "bob",
+            &hosts,
+            "github.com:\n    user: \"bob\"\n    oauth_token: \"bob-secret\"\n    git_protocol: https\n",
+            false,
+        ).is_ok());
+    }
+
+    #[test]
+    fn github_profile_account_names_cannot_escape_profile_storage() {
+        assert!(valid_github_account("jbox-bot"));
+        assert!(!valid_github_account("../jbox-bot"));
+        assert!(!valid_github_account("jbox/bot"));
+        assert!(!valid_github_account("-jbox-bot"));
+        assert!(!valid_github_account("jbox-bot-"));
     }
 
     #[test]
