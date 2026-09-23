@@ -1,10 +1,30 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
+This project uses **bd** (beads) for issue tracking.
+
+## First-run Beads safety
+
+In a fresh clone, run `bd bootstrap --yes` **before** `bd prime` or any other
+Beads command. Bootstrap non-destructively imports the tracked
+`.beads/issues.jsonl` when no local database exists, and validates an existing
+database without overwriting it. Then run `bd prime` for full workflow context.
+
+If an existing local database is missing issues that are present in the tracked
+JSONL export, recover it from the repository root with:
+
+```bash
+bd import --dry-run
+bd import
+bd stats
+```
+
+`bd import` upserts the tracked export and does not delete database-only issues.
+Do not use `bd init --force` as a recovery command.
 
 ## Quick Reference
 
 ```bash
+bd bootstrap --yes     # Once in a fresh clone, before any other bd command
 bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --claim  # Claim work atomically
