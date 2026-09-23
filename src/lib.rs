@@ -4421,7 +4421,7 @@ merge = "user-confirmed"
         );
         std::fs::write(
             temp.path().join(".jbox.toml"),
-            "version = 1\n[git]\ncredentials = 'github-cli'\n[[jcode.skills]]\nrepository = 'example/skills'\n[[jcode.skills]]\nrepository = 'K-Dense-AI/scientific-agent-skills'\nskill = 'scanpy'\n",
+            "version = 1\n[git]\ncredentials = 'none'\n[[jcode.skills]]\nrepository = 'example/skills'\n[[jcode.skills]]\nrepository = 'K-Dense-AI/scientific-agent-skills'\nskill = 'scanpy'\n",
         )
         .unwrap();
         let (config, _) = Config::load(temp.path()).unwrap();
@@ -4445,6 +4445,12 @@ merge = "user-confirmed"
             spec.mounts
                 .iter()
                 .any(|(_, target, _)| { target == Path::new("/home/jbox/.agents") })
+        );
+        assert!(
+            !spec
+                .mounts
+                .iter()
+                .any(|(_, target, _)| { target == Path::new("/home/jbox/.config/gh/hosts.yml") })
         );
         assert!(
             spec.environment
