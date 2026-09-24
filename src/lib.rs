@@ -215,13 +215,16 @@ impl App {
     /// This deliberately has no persistence side effects under `/etc`.
     pub fn prime(&self) -> Result<()> {
         println!("Loading Kata VSOCK and guest-networking modules for this boot...");
-        let status = prime_module_command(current_euid_is_root()?)
-            .status()
-            .context("could not invoke modprobe; install sudo or run this command as root")?;
-        if !status.success() {
-            bail!(
-                "could not load Kata networking modules; run `sudo modprobe vhost_vsock vhost_net` and inspect the error above"
-            );
+        let is_root = current_euid_is_root()?;
+        for module in ["vhost_vsock", "vhost_net"] {
+            let status = prime_module_command(is_root, module)
+                .status()
+                .context("could not invoke modprobe; install sudo or run this command as root")?;
+            if !status.success() {
+                bail!(
+                    "could not load Kata module `{module}`; run `sudo modprobe {module}` and inspect the error above"
+                );
+            }
         }
         if !Path::new("/dev/vhost-vsock").exists() || !module_loaded("vhost_net") {
             bail!(
@@ -3490,12 +3493,12 @@ fn current_euid_is_root() -> Result<bool> {
     Ok(effective_uid == "0")
 }
 
-fn prime_module_command(is_root: bool) -> Command {
+fn prime_module_command(is_root: bool, module: &str) -> Command {
     let mut command = Command::new(if is_root { "modprobe" } else { "sudo" });
     if !is_root {
         command.arg("modprobe");
     }
-    command.args(["vhost_vsock", "vhost_net"]);
+    command.arg(module);
     command
 }
 
@@ -3802,24 +3805,26 @@ mod tests {
     }
 
     #[test]
-    fn prime_uses_fixed_module_arguments_with_or_without_sudo() {
-        let root = prime_module_command(true);
-        assert_eq!(root.get_program(), "modprobe");
-        assert_eq!(
-            root.get_args()
-                .map(|arg| arg.to_string_lossy())
-                .collect::<Vec<_>>(),
-            ["vhost_vsock", "vhost_net"]
-        );
-
-        let user = prime_module_command(false);
-        assert_eq!(user.get_program(), "sudo");
-        assert_eq!(
-            user.get_args()
-                .map(|arg| arg.to_string_lossy())
-                .collect::<Vec<_>>(),
-            ["modprobe", "vhost_vsock", "vhost_net"]
-        );
+    fn prime_invokes_each_module_separately_with_or_without_sudo() {
+        for (is_root, program, prefix) in [
+            (true, "modprobe", Vec::<&str>::new()),
+            (false, "sudo", vec!["modprobe"]),
+        ] {
+            for module in ["vhost_vsock", "vhost_net"] {
+                let command = prime_module_command(is_root, module);
+                assert_eq!(command.get_program(), program);
+                let arguments = command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                let expected = prefix
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(module))
+                    .collect::<Vec<_>>();
+                assert_eq!(arguments, expected);
+            }
+        }
     }
 
     #[test]

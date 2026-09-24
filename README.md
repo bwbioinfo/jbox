@@ -45,8 +45,9 @@ yay -S kata-all-bin
 jbox prime
 ```
 
-`jbox prime` explicitly invokes `sudo modprobe vhost_vsock vhost_net`, verifies
-the result with `jbox doctor`, and never changes persistent host configuration.
+`jbox prime` explicitly invokes `sudo modprobe vhost_vsock` and `sudo modprobe
+vhost_net`, verifies the result with `jbox doctor`, and never changes persistent
+host configuration.
 `/dev/kvm` and `/dev/vhost-vsock` must be available. Persist the loaded modules
 after a successful smoke test with a root-owned
 `/etc/modules-load.d/kata-containers.conf` containing `vhost_vsock` and
