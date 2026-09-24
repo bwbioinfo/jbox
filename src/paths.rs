@@ -744,44 +744,140 @@ pub fn safe_target(target: &str) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 pub fn validate_extra_mount(source: &Path, repos: &[PathBuf]) -> Result<()> {
-    if sensitive(source) {
-        bail!("refusing sensitive host mount: {}", source.display());
+    let base = BaseDirs::new().context("could not determine XDG directories")?;
+    let paths = JboxPaths::discover()?;
+    let cwd = std::env::current_dir()?;
+    let runtime_paths = ["XDG_RUNTIME_DIR", "SSH_AUTH_SOCK"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        })
+        .chain(
+            ["DOCKER_HOST", "CONTAINER_HOST"]
+                .into_iter()
+                .filter_map(|key| std::env::var(key).ok())
+                .filter_map(|value| value.strip_prefix("unix://").map(PathBuf::from))
+                .filter(|path| path.is_absolute()),
+        )
+        .collect::<Vec<_>>();
+    validate_extra_mount_with_paths(
+        source,
+        repos,
+        &paths,
+        base.home_dir(),
+        base.config_dir(),
+        &runtime_paths,
+    )
+}
+
+/// Extra mounts are user-configured, unlike jbox's narrowly scoped internal
+/// worktree and credential mounts. Check both containment directions so a
+/// parent directory cannot bypass a protected checkout or credential root.
+fn validate_extra_mount_with_paths(
+    source: &Path,
+    repos: &[PathBuf],
+    paths: &JboxPaths,
+    home: &Path,
+    config_dir: &Path,
+    runtime_paths: &[PathBuf],
+) -> Result<()> {
+    let source = source
+        .canonicalize()
+        .with_context(|| format!("cannot resolve extra mount {}", source.display()))?;
+    let kind = fs::metadata(&source)?.file_type();
+    if !kind.is_dir() && !kind.is_file() {
+        bail!(
+            "refusing extra mount of special host file: {}",
+            source.display()
+        );
     }
-    for repo in repos {
-        if source.starts_with(repo) {
+
+    let mut protected = vec![
+        paths.data.clone(),
+        paths.cache.clone(),
+        config_dir.to_path_buf(),
+        PathBuf::from("/run/user"),
+        PathBuf::from("/var/run/docker.sock"),
+        PathBuf::from("/run/docker.sock"),
+        PathBuf::from("/var/run/podman/podman.sock"),
+        PathBuf::from("/run/podman/podman.sock"),
+        PathBuf::from("/dev"),
+        PathBuf::from("/proc"),
+        PathBuf::from("/sys"),
+        PathBuf::from("/etc"),
+    ];
+    for relative in [
+        ".ssh",
+        ".aws",
+        ".config",
+        ".jcode",
+        ".codex",
+        ".claude",
+        ".kube",
+        ".gnupg",
+        ".docker",
+        ".azure",
+        ".pi",
+        ".openclaw",
+        ".hermes",
+        ".terraform.d",
+        ".local/share/jbox",
+        ".local/share/jcode",
+        ".local/share/opencode",
+        ".gitconfig",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".bashrc",
+        ".zshrc",
+        ".profile",
+        ".bash_history",
+    ] {
+        protected.push(home.join(relative));
+    }
+    protected.extend_from_slice(runtime_paths);
+
+    for path in repos.iter().chain(protected.iter()) {
+        let path = canonicalize_existing_ancestor(path)?;
+        if source.starts_with(&path) || path.starts_with(&source) {
             bail!(
-                "refusing extra mount {} because it exposes an original Git checkout {}",
+                "refusing extra mount {} because it overlaps an original checkout or protected host path {}",
                 source.display(),
-                repo.display()
+                path.display()
             );
         }
     }
     Ok(())
 }
-fn sensitive(path: &Path) -> bool {
-    let home = BaseDirs::new().map(|b| b.home_dir().to_path_buf());
-    let blocked = [
-        PathBuf::from("/"),
-        PathBuf::from("/var/run/docker.sock"),
-        PathBuf::from("/run/podman/podman.sock"),
-        PathBuf::from("/var/run/podman/podman.sock"),
-    ];
-    if blocked.iter().any(|p| path == p) {
-        return true;
+
+/// Socket and XDG roots may not exist yet. Resolve their nearest existing
+/// ancestor to account for aliases such as /var/run -> /run without creating
+/// anything on the host.
+fn canonicalize_existing_ancestor(path: &Path) -> Result<PathBuf> {
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    while !ancestor.exists() {
+        missing.push(
+            ancestor
+                .file_name()
+                .with_context(|| format!("cannot resolve protected host path {}", path.display()))?
+                .to_os_string(),
+        );
+        ancestor = ancestor
+            .parent()
+            .with_context(|| format!("protected host path has no parent: {}", path.display()))?;
     }
-    if let Some(home) = home {
-        let exact = [
-            home.join(".ssh"),
-            home.join(".aws"),
-            home.join(".config"),
-            home.join(".local/share/jbox"),
-        ];
-        if exact.iter().any(|p| path.starts_with(p)) {
-            return true;
-        }
+    let mut canonical = ancestor.canonicalize()?;
+    for component in missing.into_iter().rev() {
+        canonical.push(component);
     }
-    path.to_string_lossy().contains("/run/user/")
-        || path.to_string_lossy().contains("SSH_AUTH_SOCK")
+    Ok(canonical)
 }
 
 #[cfg(test)]
@@ -792,6 +888,95 @@ mod tests {
         assert!(safe_target("/workspace/project").is_ok());
         assert!(safe_target("/workspace/../etc").is_err());
         assert!(safe_target("relative").is_err());
+    }
+
+    #[test]
+    fn extra_mounts_reject_sensitive_ancestors_and_nondefault_xdg_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("host-home");
+        let config = temp.path().join("external-config");
+        let data = temp.path().join("external-data/jbox");
+        let cache = temp.path().join("external-cache/jbox");
+        let runtime = temp.path().join("runtime");
+        let safe = temp.path().join("safe-artifacts");
+        let paths = JboxPaths {
+            sessions: data.join("sessions"),
+            credentials: data.join("credentials"),
+            data,
+            cache,
+        };
+        for directory in [
+            &home,
+            &home.join(".ssh"),
+            &config,
+            &paths.data,
+            &paths.cache,
+            &runtime,
+            &safe,
+        ] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        let runtime_paths = vec![runtime.clone()];
+        let check = |source: &Path| {
+            validate_extra_mount_with_paths(source, &[], &paths, &home, &config, &runtime_paths)
+        };
+        for source in [
+            home.as_path(),
+            home.join(".ssh").as_path(),
+            config.as_path(),
+            config.parent().unwrap(),
+            paths.data.as_path(),
+            paths.data.parent().unwrap(),
+            paths.cache.as_path(),
+            paths.cache.parent().unwrap(),
+            runtime.as_path(),
+        ] {
+            assert!(
+                check(source).is_err(),
+                "unsafe source: {}",
+                source.display()
+            );
+        }
+        let alias = temp.path().join("data-alias");
+        std::os::unix::fs::symlink(&paths.data, &alias).unwrap();
+        assert!(check(&alias).is_err());
+        // /var/run is commonly a symlink to /run, and both socket spellings
+        // must reject their containing directory as well as the socket.
+        assert!(check(Path::new("/var/run")).is_err());
+        assert!(check(Path::new("/run")).is_err());
+        assert!(check(&safe).is_ok());
+    }
+
+    #[test]
+    fn extra_mounts_reject_sockets_even_outside_protected_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let safe = temp.path().join("safe");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&safe).unwrap();
+        let socket = safe.join("agent.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let paths = JboxPaths {
+            data: home.join("xdg-data/jbox"),
+            cache: home.join("xdg-cache/jbox"),
+            sessions: home.join("xdg-data/jbox/sessions"),
+            credentials: home.join("xdg-data/jbox/credentials"),
+        };
+        assert!(
+            validate_extra_mount_with_paths(
+                &socket,
+                &[],
+                &paths,
+                &home,
+                &home.join(".config"),
+                &[]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_extra_mount_with_paths(&safe, &[], &paths, &home, &home.join(".config"), &[])
+                .is_ok()
+        );
     }
 
     #[test]

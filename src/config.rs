@@ -1540,4 +1540,86 @@ unexpected = true
         }];
         assert!(config.validate_repositories(&repos).is_err());
     }
+
+    fn init_test_repository(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q", path.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    fn create_primary_and_original_repositories(temp: &tempfile::TempDir) -> PathBuf {
+        let primary = temp.path().join("primary");
+        init_test_repository(&primary);
+        init_test_repository(&temp.path().join("original"));
+        primary
+    }
+
+    fn write_config_with_declared_original_repository(
+        primary: &Path,
+        mount_source: &str,
+        writable: bool,
+    ) {
+        std::fs::write(
+            primary.join(".jbox.toml"),
+            format!(
+                "version = 1\n[[repos]]\npath = '../original'\nmount = '/workspace/original'\n[[mounts]]\nsource = '{mount_source}'\ntarget = '/data'\nwritable = {writable}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn resolved_repositories_with_primary(
+        config: &Config,
+        primary: &Path,
+    ) -> Vec<ResolvedRepository> {
+        let mut repos = vec![ResolvedRepository {
+            source: primary.to_path_buf(),
+            mount: "/workspace/project".into(),
+            name: "primary".into(),
+        }];
+        repos.extend(config.resolve_repositories(primary).unwrap());
+        repos
+    }
+
+    #[test]
+    fn rejects_extra_mount_ancestor_of_declared_original_repository() {
+        let temp = tempfile::tempdir_in("/var/tmp").unwrap();
+        let primary = create_primary_and_original_repositories(&temp);
+        for writable in [false, true] {
+            write_config_with_declared_original_repository(&primary, "..", writable);
+            let (config, resolved_primary) = Config::load(&primary).unwrap();
+            let repos = resolved_repositories_with_primary(&config, &resolved_primary);
+
+            assert!(config.validate_repositories(&repos).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_symlink_alias_of_extra_mount_ancestor_of_declared_original_repository() {
+        let temp = tempfile::tempdir_in("/var/tmp").unwrap();
+        let primary = create_primary_and_original_repositories(&temp);
+        std::os::unix::fs::symlink("..", primary.join("ancestor-alias")).unwrap();
+        write_config_with_declared_original_repository(&primary, "ancestor-alias", false);
+        let (config, primary) = Config::load(&primary).unwrap();
+        let repos = resolved_repositories_with_primary(&config, &primary);
+
+        assert!(config.validate_repositories(&repos).is_err());
+    }
+
+    #[test]
+    fn allows_disjoint_extra_mount_alongside_declared_original_repository() {
+        let temp = tempfile::tempdir_in("/var/tmp").unwrap();
+        let primary = create_primary_and_original_repositories(&temp);
+        std::fs::create_dir_all(temp.path().join("safe")).unwrap();
+        write_config_with_declared_original_repository(&primary, "../safe", false);
+        let (config, primary) = Config::load(&primary).unwrap();
+        let repos = resolved_repositories_with_primary(&config, &primary);
+
+        assert!(config.validate_repositories(&repos).is_ok());
+    }
 }
