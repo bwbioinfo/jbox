@@ -123,6 +123,18 @@ pub struct App {
     engine: DockerEngine,
 }
 
+/// Keep the TTL watcher alive after a fresh launch or a reboot-time reconnect
+/// of a stopped guest. Running guests already have the watcher from launch.
+pub fn start_expiry_watch() -> Result<()> {
+    Command::new(std::env::current_exe()?)
+        .arg("watch-expiry")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
 /// Explicit opt-ins for accepting work that is not a simple clean,
 /// fast-forward snapshot. Every mode is off by default so normal acceptance
 /// remains non-destructive.
@@ -2682,6 +2694,15 @@ done | LC_ALL=C sort -r | head -n 20
         }
         let (config, primary) = Config::load(&session.config_path)?;
         self.validate_resume_config(&session, &config, &primary)?;
+        if !config.jcode.persistent_credentials {
+            // The old guest home lived on a tmpfs, so its Jcode session IDs
+            // cannot be resumed. Retain worktrees but start fresh conversations.
+            for repo in &session.repos {
+                self.paths
+                    .forget_jcode_session_id(&session.id, &repo.mount)?;
+            }
+            self.paths.forget_legacy_jcode_session_id(&session.id)?;
+        }
         self.engine.check()?;
         self.offer_priming_if_needed(config.network.internet)?;
         // A guest can be stopped outside Jbox, for example by a Docker daemon
@@ -2857,6 +2878,53 @@ done | LC_ALL=C sort -r | head -n 20
             return Ok(());
         }
         self.resume(&session.id)
+    }
+
+    /// Reconnect the most recently active retained workspace for the requested
+    /// original repository. The recorded Jcode ID is already scoped to the
+    /// selected repository mount, so another repository's conversation cannot
+    /// be picked merely because the same VM contains both worktrees.
+    /// Returning false allows a first launch to create a new workspace.
+    pub fn reconnect_latest_from_repository(&self, input: &Path, attach: bool) -> Result<bool> {
+        let repository = Config::repository_root(input)?;
+        let Some((selected, repo)) = latest_repository_session(self.state.list()?, &repository)
+        else {
+            return Ok(false);
+        };
+        // Reconcile only the selected VM. Launching one repository must not
+        // stop or mutate an unrelated project whose Docker daemon restarted.
+        let mut session = self.load_session(&selected.id)?;
+        if session.sync.is_some() {
+            bail!(
+                "latest jbox session {} has an unfinished sync; resolve it with `jbox sync --continue` or `jbox sync --abort`, or use `jbox run --new` to create a separate workspace",
+                session.id
+            );
+        }
+        match session.state {
+            SessionState::Running => {
+                println!(
+                    "Reusing running jbox session {} for {}.",
+                    session.id,
+                    repo.source.display()
+                );
+            }
+            SessionState::Stopped => {
+                println!(
+                    "Restarting retained jbox session {} for {}.",
+                    session.id,
+                    repo.source.display()
+                );
+                self.resume(&session.id)?;
+                session = self.load_session(&session.id)?;
+                start_expiry_watch()?;
+            }
+        }
+        if attach {
+            self.attach_session(&mut session, &repo.mount)?;
+        } else {
+            println!("Use `jbox attach {}` to reconnect to Jcode.", session.id);
+        }
+        Ok(true)
     }
 
     fn sessions_for_repository(&self, repository: &Path) -> Result<Vec<(Session, RepoState)>> {
@@ -3614,6 +3682,23 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// StateStore::list returns newest activity first. Keep that order while
+/// matching the canonical original repository, not a guest worktree or a
+/// similarly named project in another directory.
+fn latest_repository_session(
+    sessions: Vec<Session>,
+    repository: &Path,
+) -> Option<(Session, RepoState)> {
+    sessions.into_iter().find_map(|session| {
+        session
+            .repos
+            .iter()
+            .find(|repo| repo.source == repository)
+            .cloned()
+            .map(|repo| (session, repo))
+    })
+}
+
 /// An explicit session ID remains convenient after a session-wide operation,
 /// but it must not discard the repository context of the invoking terminal.
 /// Outside a participating Git repository, retain the historic primary-mount
@@ -3946,6 +4031,100 @@ merge = "user-confirmed"
             brokered_plans: Vec::new(),
             sync: None,
         }
+    }
+
+    #[test]
+    fn reconnect_selects_latest_retained_conversation_only_for_its_repository() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let third = temp.path().join("third");
+        std::fs::create_dir_all(first.join("nested")).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::create_dir_all(&third).unwrap();
+        git(&first, &["init", "-q"]);
+        git(&second, &["init", "-q"]);
+        git(&third, &["init", "-q"]);
+
+        let mut older = test_session("older", first.clone());
+        older.last_activity_at = Utc::now() - chrono::Duration::minutes(10);
+        let mut recent = test_session("recent", first.clone());
+        recent.state = SessionState::Running;
+        recent.last_activity_at = Utc::now() - chrono::Duration::minutes(2);
+        let mut unrelated = test_session("unrelated", second.clone());
+        unrelated.last_activity_at = Utc::now();
+        for session in [&older, &recent, &unrelated] {
+            app.state.save(session).unwrap();
+        }
+        app.paths
+            .save_last_jcode_session_id("older", "/workspace/repo", "session_older_123")
+            .unwrap();
+        app.paths
+            .save_last_jcode_session_id("recent", "/workspace/repo", "session_recent_456")
+            .unwrap();
+        app.paths
+            .save_last_jcode_session_id("unrelated", "/workspace/repo", "session_other_789")
+            .unwrap();
+
+        let root = Config::repository_root(&first.join("nested")).unwrap();
+        let (chosen, repo) = latest_repository_session(app.state.list().unwrap(), &root).unwrap();
+        assert_eq!(chosen.id, "recent");
+        assert_eq!(chosen.state, SessionState::Running);
+        assert_eq!(repo.source, first);
+        assert_eq!(
+            app.repository_jcode_session_id(&chosen, &repo.mount)
+                .as_deref(),
+            Some("session_recent_456")
+        );
+        assert_eq!(
+            jcode_attach_args(
+                "127.0.0.2",
+                &repo.mount,
+                app.repository_jcode_session_id(&chosen, &repo.mount)
+                    .as_deref()
+            )
+            .last()
+            .map(String::as_str),
+            Some("session_recent_456")
+        );
+        let (other, _) = latest_repository_session(app.state.list().unwrap(), &second).unwrap();
+        assert_eq!(other.id, "unrelated");
+        let (stopped, stopped_repo) = latest_repository_session(vec![older], &root).unwrap();
+        assert_eq!(stopped.state, SessionState::Stopped);
+        assert_eq!(
+            app.repository_jcode_session_id(&stopped, &stopped_repo.mount),
+            Some("session_older_123".into())
+        );
+        assert!(latest_repository_session(app.state.list().unwrap(), temp.path()).is_none());
+        assert!(!app.reconnect_latest_from_repository(&third, false).unwrap());
+        assert_eq!(app.state.list().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn reconnect_uses_the_selected_repository_mount_in_a_shared_vm() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let primary = temp.path().join("primary");
+        let sibling = temp.path().join("sibling");
+        let mut session = test_session("shared", primary);
+        let mut sibling_repo = session.repos[0].clone();
+        sibling_repo.source = sibling.clone();
+        sibling_repo.mount = "/workspace/sibling".into();
+        session.repos.push(sibling_repo);
+        app.paths
+            .save_last_jcode_session_id(&session.id, "/workspace/repo", "session_primary_123")
+            .unwrap();
+        app.paths
+            .save_last_jcode_session_id(&session.id, "/workspace/sibling", "session_sibling_456")
+            .unwrap();
+
+        let (selected, repo) = latest_repository_session(vec![session], &sibling).unwrap();
+        assert_eq!(repo.mount, "/workspace/sibling");
+        assert_eq!(
+            app.repository_jcode_session_id(&selected, &repo.mount),
+            Some("session_sibling_456".into())
+        );
     }
 
     #[test]

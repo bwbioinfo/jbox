@@ -2,7 +2,6 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::{Command as ProcessCommand, Stdio};
 
 #[derive(Parser)]
 #[command(
@@ -21,8 +20,11 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Start the guest from a non-mutating snapshot of staged, unstaged, and nonignored untracked host files.
-        #[arg(long)]
+        #[arg(long, requires = "new")]
         include_host_changes: bool,
+        /// Create a fresh workspace instead of reconnecting the latest retained session for this repository.
+        #[arg(long)]
+        new: bool,
         #[arg(long)]
         no_attach: bool,
     },
@@ -237,11 +239,15 @@ fn main() -> Result<()> {
         Command::Run {
             path,
             include_host_changes,
+            new,
             no_attach,
         } => {
+            if !new && app.reconnect_latest_from_repository(&path, !no_attach)? {
+                return Ok(());
+            }
             let launch_directory = std::env::current_dir()?;
             let id = app.create(&path, include_host_changes, &launch_directory)?;
-            start_expiry_watch()?;
+            jbox::start_expiry_watch()?;
             if !no_attach {
                 app.attach(&id)?;
             }
@@ -446,17 +452,6 @@ fn normalized_args() -> Vec<OsString> {
     args
 }
 
-fn start_expiry_watch() -> Result<()> {
-    let exe = std::env::current_exe()?;
-    ProcessCommand::new(exe)
-        .arg("watch-expiry")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +460,37 @@ mod tests {
         let args = [OsString::from("jbox"), OsString::from(".")];
         // Keep the parsing behavior covered without altering the real process args.
         assert_eq!(args[1], ".");
+    }
+
+    #[test]
+    fn run_reconnects_by_default_and_requires_new_for_host_snapshot() {
+        let cli = Cli::try_parse_from(["jbox", "run", "some-repo", "--no-attach"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                path,
+                new: false,
+                no_attach: true,
+                include_host_changes: false,
+            } if path == std::path::Path::new("some-repo")
+        ));
+        assert!(Cli::try_parse_from(["jbox", "run", "--include-host-changes"]).is_err());
+        let cli = Cli::try_parse_from([
+            "jbox",
+            "run",
+            "--new",
+            "--include-host-changes",
+            "some-repo",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                new: true,
+                include_host_changes: true,
+                ..
+            }
+        ));
     }
 
     #[test]

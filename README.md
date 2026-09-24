@@ -210,9 +210,24 @@ Remove any of these keys to inherit that individual value from the host Jcode
 client. The generated guest `config.toml` is session-scoped and contains no
 credentials.
 
-`jbox .` creates a session, prints each worktree branch and base commit, starts
-the guest, and opens the local jcode TUI. The VM remains alive after the TUI
-disconnects. Run each of the following complete commands from a participating
+`jbox .` creates a session on first use, prints each worktree branch and base
+commit, starts the guest, and opens the local jcode TUI. On subsequent launches
+from the same original Git repository (including its subdirectories), it
+reconnects to the most recently active retained jbox session instead of creating
+another one. A running guest is attached directly; a stopped guest is restarted
+from its retained worktree, then attached. Jbox resumes the Jcode conversation
+recorded for that repository mount, not a sibling repository in the same VM.
+Jcode's saved conversation survives a guest restart when
+`jcode.persistent_credentials = true` (the default). If no conversation has
+been recorded yet, Jcode starts a new one. With persistence disabled, a
+stopped guest retains its worktrees but starts a new Jcode conversation on
+restart because its previous Jcode home was ephemeral. The VM remains
+alive after the TUI disconnects. Use `jbox --new .` (or `jbox run --new PATH`)
+to create a separate fresh workspace. `--include-host-changes` requires `--new`
+so it cannot be silently ignored during reconnection. `--no-attach` reuses or
+restarts the guest without opening Jcode. Cleaning a session removes its
+worktree and continuity marker, so it is not eligible for automatic reconnection.
+Run each of the following complete commands from a participating
 host repository. Jbox selects its only matching session or presents a picker:
 
 ```bash

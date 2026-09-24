@@ -426,6 +426,28 @@ impl JboxPaths {
         Self::valid_jcode_session_id(value).then_some(value.to_owned())
     }
 
+    /// A guest without persistent Jcode state loses its saved conversations
+    /// when stopped. Remove only its own marker, not another repository's.
+    pub fn forget_jcode_session_id(&self, id: &str, mount: &str) -> Result<()> {
+        validate_session_marker_component(id)?;
+        let marker = self.jcode_session_marker(id, mount);
+        match fs::remove_file(marker) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn forget_legacy_jcode_session_id(&self, id: &str) -> Result<()> {
+        validate_session_marker_component(id)?;
+        let marker = self.sessions.join(id).join("runtime/jcode/last-session-id");
+        match fs::remove_file(marker) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// A current Jbox session has the session-start hook installed before its
     /// first attach. Its missing `last-session-id` therefore means "start a
     /// new conversation", not "recover a legacy conversation".
@@ -650,6 +672,16 @@ fn valid_jcode_session_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn validate_session_marker_component(id: &str) -> Result<()> {
+    if !matches!(
+        Path::new(id).components().collect::<Vec<_>>().as_slice(),
+        [Component::Normal(_)]
+    ) {
+        bail!("refusing unsafe jbox session ID for marker cleanup");
+    }
+    Ok(())
 }
 
 fn is_safe_credential_file(path: &Path) -> Result<bool> {
@@ -1139,5 +1171,51 @@ mod tests {
         )
         .unwrap();
         assert!(paths.has_repository_scoped_jcode_continuity("calm-otter"));
+    }
+
+    #[test]
+    fn ephemeral_restart_forgets_only_its_old_conversation_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = JboxPaths {
+            data: tmp.path().join("data"),
+            cache: tmp.path().join("cache"),
+            sessions: tmp.path().join("data/sessions"),
+            credentials: tmp.path().join("data/credentials"),
+        };
+        for mount in ["/workspace/first", "/workspace/second"] {
+            paths
+                .save_last_jcode_session_id("calm-otter", mount, "session_fox_123")
+                .unwrap();
+        }
+        let legacy = paths
+            .sessions
+            .join("calm-otter/runtime/jcode/last-session-id");
+        fs::write(&legacy, "session_legacy_456\n").unwrap();
+        assert!(
+            paths
+                .forget_jcode_session_id("../calm-otter", "/workspace/first")
+                .is_err()
+        );
+        assert!(
+            paths
+                .forget_legacy_jcode_session_id("../calm-otter")
+                .is_err()
+        );
+        paths
+            .forget_jcode_session_id("calm-otter", "/workspace/first")
+            .unwrap();
+        paths
+            .forget_jcode_session_id("calm-otter", "/workspace/first")
+            .unwrap();
+        assert_eq!(
+            paths.last_jcode_session_id("calm-otter", "/workspace/first"),
+            None
+        );
+        assert_eq!(
+            paths.last_jcode_session_id("calm-otter", "/workspace/second"),
+            Some("session_fox_123".into())
+        );
+        paths.forget_legacy_jcode_session_id("calm-otter").unwrap();
+        assert_eq!(paths.legacy_jcode_session_id("calm-otter"), None);
     }
 }
