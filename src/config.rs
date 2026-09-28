@@ -664,6 +664,7 @@ impl Config {
                     .source_path
                     .as_deref()
                     .context("configured mount source was not resolved")?,
+                mount.writable,
                 &repo_sources,
             )?;
         }
@@ -1588,7 +1589,7 @@ unexpected = true
 
     #[test]
     fn rejects_extra_mount_ancestor_of_declared_original_repository() {
-        let temp = tempfile::tempdir_in("/var/tmp").unwrap();
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
         let primary = create_primary_and_original_repositories(&temp);
         for writable in [false, true] {
             write_config_with_declared_original_repository(&primary, "..", writable);
@@ -1601,7 +1602,7 @@ unexpected = true
 
     #[test]
     fn rejects_symlink_alias_of_extra_mount_ancestor_of_declared_original_repository() {
-        let temp = tempfile::tempdir_in("/var/tmp").unwrap();
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
         let primary = create_primary_and_original_repositories(&temp);
         std::os::unix::fs::symlink("..", primary.join("ancestor-alias")).unwrap();
         write_config_with_declared_original_repository(&primary, "ancestor-alias", false);
@@ -1612,8 +1613,68 @@ unexpected = true
     }
 
     #[test]
+    fn allows_read_only_artifact_directory_within_declared_original_repository() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let primary = create_primary_and_original_repositories(&temp);
+        let reference = temp.path().join("original/reference");
+        std::fs::create_dir_all(&reference).unwrap();
+        write_config_with_declared_original_repository(&primary, "../original/reference", false);
+        let (config, primary) = Config::load(&primary).unwrap();
+        let repos = resolved_repositories_with_primary(&config, &primary);
+
+        assert!(config.validate_repositories(&repos).is_ok());
+        assert!(!config.mounts[0].writable);
+        assert_eq!(
+            config.mounts[0].source_path.as_deref(),
+            Some(reference.as_path())
+        );
+    }
+
+    #[test]
+    fn rejects_writable_or_git_metadata_mount_within_original_repository() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let primary = create_primary_and_original_repositories(&temp);
+        std::fs::create_dir_all(temp.path().join("original/reference")).unwrap();
+        let alias = primary.join("reference-alias");
+        std::os::unix::fs::symlink("../original/reference", &alias).unwrap();
+        for (source, writable) in [
+            ("../original/reference", true),
+            ("reference-alias", true),
+            ("../original/.git", false),
+            ("../original/.git/objects", false),
+        ] {
+            write_config_with_declared_original_repository(&primary, source, writable);
+            let (config, primary) = Config::load(&primary).unwrap();
+            let repos = resolved_repositories_with_primary(&config, &primary);
+            assert!(
+                config.validate_repositories(&repos).is_err(),
+                "source: {source}"
+            );
+        }
+        write_config_with_declared_original_repository(&primary, "reference-alias", false);
+        let (config, primary) = Config::load(&primary).unwrap();
+        let repos = resolved_repositories_with_primary(&config, &primary);
+        assert!(config.validate_repositories(&repos).is_ok());
+    }
+
+    #[test]
+    fn allows_read_only_artifact_directory_within_primary_repository() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        init_test_repository(temp.path());
+        std::fs::create_dir_all(temp.path().join("reference")).unwrap();
+        std::fs::write(
+            temp.path().join(".jbox.toml"),
+            "version = 1\n[[mounts]]\nsource = 'reference'\ntarget = '/data'\n",
+        )
+        .unwrap();
+        let (config, primary) = Config::load(temp.path()).unwrap();
+        let repos = resolved_repositories_with_primary(&config, &primary);
+        assert!(config.validate_repositories(&repos).is_ok());
+    }
+
+    #[test]
     fn allows_disjoint_extra_mount_alongside_declared_original_repository() {
-        let temp = tempfile::tempdir_in("/var/tmp").unwrap();
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
         let primary = create_primary_and_original_repositories(&temp);
         std::fs::create_dir_all(temp.path().join("safe")).unwrap();
         write_config_with_declared_original_repository(&primary, "../safe", false);

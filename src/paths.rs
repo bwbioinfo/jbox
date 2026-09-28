@@ -775,7 +775,7 @@ pub fn safe_target(target: &str) -> Result<PathBuf> {
     }
     Ok(path.to_path_buf())
 }
-pub fn validate_extra_mount(source: &Path, repos: &[PathBuf]) -> Result<()> {
+pub fn validate_extra_mount(source: &Path, writable: bool, repos: &[PathBuf]) -> Result<()> {
     let base = BaseDirs::new().context("could not determine XDG directories")?;
     let paths = JboxPaths::discover()?;
     let cwd = std::env::current_dir()?;
@@ -800,6 +800,7 @@ pub fn validate_extra_mount(source: &Path, repos: &[PathBuf]) -> Result<()> {
         .collect::<Vec<_>>();
     validate_extra_mount_with_paths(
         source,
+        writable,
         repos,
         &paths,
         base.home_dir(),
@@ -809,10 +810,12 @@ pub fn validate_extra_mount(source: &Path, repos: &[PathBuf]) -> Result<()> {
 }
 
 /// Extra mounts are user-configured, unlike jbox's narrowly scoped internal
-/// worktree and credential mounts. Check both containment directions so a
-/// parent directory cannot bypass a protected checkout or credential root.
+/// worktree and credential mounts. Read-only descendants of original checkouts
+/// may expose artifact data, but never mount the checkout root or Git metadata.
+/// Check both containment directions for every other protected path.
 fn validate_extra_mount_with_paths(
     source: &Path,
+    writable: bool,
     repos: &[PathBuf],
     paths: &JboxPaths,
     home: &Path,
@@ -875,11 +878,28 @@ fn validate_extra_mount_with_paths(
     }
     protected.extend_from_slice(runtime_paths);
 
-    for path in repos.iter().chain(protected.iter()) {
+    for repo in repos {
+        let repo = canonicalize_existing_ancestor(repo)?;
+        if repo.starts_with(&source)
+            || (source.starts_with(&repo)
+                && (writable
+                    || source
+                        .strip_prefix(&repo)?
+                        .components()
+                        .any(|component| component.as_os_str() == ".git")))
+        {
+            bail!(
+                "refusing extra mount {} because it overlaps an original checkout {}",
+                source.display(),
+                repo.display()
+            );
+        }
+    }
+    for path in &protected {
         let path = canonicalize_existing_ancestor(path)?;
         if source.starts_with(&path) || path.starts_with(&source) {
             bail!(
-                "refusing extra mount {} because it overlaps an original checkout or protected host path {}",
+                "refusing extra mount {} because it overlaps a protected host path {}",
                 source.display(),
                 path.display()
             );
@@ -950,7 +970,15 @@ mod tests {
         }
         let runtime_paths = vec![runtime.clone()];
         let check = |source: &Path| {
-            validate_extra_mount_with_paths(source, &[], &paths, &home, &config, &runtime_paths)
+            validate_extra_mount_with_paths(
+                source,
+                false,
+                &[],
+                &paths,
+                &home,
+                &config,
+                &runtime_paths,
+            )
         };
         for source in [
             home.as_path(),
@@ -997,6 +1025,7 @@ mod tests {
         assert!(
             validate_extra_mount_with_paths(
                 &socket,
+                false,
                 &[],
                 &paths,
                 &home,
@@ -1006,8 +1035,16 @@ mod tests {
             .is_err()
         );
         assert!(
-            validate_extra_mount_with_paths(&safe, &[], &paths, &home, &home.join(".config"), &[])
-                .is_ok()
+            validate_extra_mount_with_paths(
+                &safe,
+                false,
+                &[],
+                &paths,
+                &home,
+                &home.join(".config"),
+                &[]
+            )
+            .is_ok()
         );
     }
 
