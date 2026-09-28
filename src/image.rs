@@ -65,23 +65,56 @@ while [ "$index" -lt "${JBOX_BEADS_WORKSPACE_COUNT:-0}" ]; do
     # host Beads Dolt database, locks, sockets, or credentials.
     env BEADS_DOLT_SERVER_MODE=embedded BEADS_DOLT_AUTO_START=true JBOX_ONE_BEADS_WORKSPACE="$workspace" JBOX_ONE_BEADS_PREFIX="$prefix" su -s /bin/sh jbox -c '
         set -eu
-        if [ -f "$JBOX_ONE_BEADS_WORKSPACE/.beads/issues.jsonl" ] \
-            && [ ! -d "$JBOX_ONE_BEADS_WORKSPACE/.beads/embeddeddolt" ] \
-            && [ ! -d "$JBOX_ONE_BEADS_WORKSPACE/.beads/dolt" ]; then
+        if [ -f "$JBOX_ONE_BEADS_WORKSPACE/.beads/issues.jsonl" ]; then
             cd "$JBOX_ONE_BEADS_WORKSPACE"
-            # `bd init --stealth` removes a root .gitignore containing only
-            # Beads rules because it moves those rules to global Git config.
-            # A generated Jbox worktree may legitimately track that file, so
-            # preserve tracked project content through guest setup.
-            tracked_gitignore=
-            if git ls-files --error-unmatch .gitignore >/dev/null 2>&1; then
-                tracked_gitignore="$(mktemp)"
-                trap "rm -f \"\$tracked_gitignore\"" EXIT
-                cp .gitignore "$tracked_gitignore"
+            if [ ! -s .beads/issues.jsonl ]; then
+                echo "jbox: refusing empty Beads JSONL in $JBOX_ONE_BEADS_WORKSPACE" >&2
+                exit 1
             fi
-            bd init --sandbox --stealth --from-jsonl --prefix "$JBOX_ONE_BEADS_PREFIX" --non-interactive --skip-agents --skip-hooks
-            if [ -n "$tracked_gitignore" ]; then
-                cat "$tracked_gitignore" > .gitignore
+            original="$(mktemp)"
+            cp .beads/issues.jsonl "$original"
+            trap "rm -f \"\$original\"" EXIT
+            if [ -d .beads/embeddeddolt ] || [ -d .beads/dolt ]; then
+                # A retained guest can contain newer issues absent from the
+                # portable snapshot. Import upserts instead of resetting it.
+                current_prefix="$(bd config get issue_prefix)"
+                if [ -z "$current_prefix" ] || [ "$current_prefix" != "$JBOX_ONE_BEADS_PREFIX" ]; then
+                    echo "jbox: refusing Beads database without expected issue_prefix $JBOX_ONE_BEADS_PREFIX" >&2
+                    exit 1
+                fi
+                bd import --dry-run >/dev/null
+                bd import >/dev/null
+            else
+                # `bd init --stealth` can remove a tracked root .gitignore.
+                tracked_gitignore=
+                if git ls-files --error-unmatch .gitignore >/dev/null 2>&1; then
+                    tracked_gitignore="$(mktemp)"
+                    cp .gitignore "$tracked_gitignore"
+                fi
+                bd init --sandbox --stealth --from-jsonl --prefix "$JBOX_ONE_BEADS_PREFIX" --non-interactive --skip-agents --skip-hooks
+                if [ -n "$tracked_gitignore" ]; then
+                    cat "$tracked_gitignore" > .gitignore
+                    rm -f "$tracked_gitignore"
+                fi
+            fi
+            current_prefix="$(bd config get issue_prefix)"
+            if [ -z "$current_prefix" ] || [ "$current_prefix" != "$JBOX_ONE_BEADS_PREFIX" ]; then
+                echo "jbox: refusing Beads database without expected issue_prefix $JBOX_ONE_BEADS_PREFIX" >&2
+                exit 1
+            fi
+            # Compare portable record IDs, not just counts. Preserve memories
+            # as well as issues and reject any failed or incomplete import.
+            exported="$(mktemp)"
+            expected="$(mktemp)"
+            actual="$(mktemp)"
+            trap "rm -f \"\$original\" \"\$exported\" \"\$expected\" \"\$actual\"" EXIT
+            bd export --include-memories > "$exported"
+            awk -F\" '\''{ for (i=1; i<NF; i++) if ($i=="id") { print $(i+2); break } }'\'' "$original" | sort -u > "$expected"
+            awk -F\" '\''{ for (i=1; i<NF; i++) if ($i=="id") { print $(i+2); break } }'\'' "$exported" | sort -u > "$actual"
+            missing="$(comm -23 "$expected" "$actual")"
+            if [ ! -s "$actual" ] || [ ! -s "$expected" ] || [ -n "$missing" ]; then
+                echo "jbox: refusing Beads database missing JSONL records in $JBOX_ONE_BEADS_WORKSPACE" >&2
+                exit 1
             fi
         fi
     '
@@ -221,6 +254,8 @@ fn hash_file_with_context(path: &Path, context: &[u8]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn guest_entrypoint_installs_skills_with_gh_before_starting_jcode() {
@@ -265,6 +300,101 @@ mod tests {
                 .unwrap()
                 < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
         );
+    }
+
+    #[test]
+    fn guest_entrypoint_refuses_unreconciled_beads_before_jcode() {
+        assert!(Command::new("sh")
+            .arg("-n")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(JBOX_ENTRYPOINT.as_bytes())?;
+                child.wait()
+            })
+            .unwrap()
+            .success());
+        for required in [
+            "refusing empty Beads JSONL",
+            "bd config get issue_prefix",
+            "bd import --dry-run",
+            "bd import >/dev/null",
+            "bd export --include-memories",
+            "comm -23",
+        ] {
+            assert!(JBOX_ENTRYPOINT.contains(required), "missing {required}");
+        }
+        assert!(JBOX_ENTRYPOINT.find("bd import >/dev/null").unwrap()
+            < JBOX_ENTRYPOINT.find("bd export --include-memories").unwrap());
+    }
+
+    #[test]
+    fn existing_guest_database_imports_historical_records_without_losing_new_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("classy");
+        let beads = workspace.join(".beads");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(beads.join("embeddeddolt")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let original = "{\"id\":\"classy-old\",\"title\":\"historical\"}\n{\"id\":\"mem-1\",\"_type\":\"memory\"}\n";
+        fs::write(beads.join("issues.jsonl"), original).unwrap();
+        let db_export = temp.path().join("database.jsonl");
+        fs::write(&db_export, "{\"id\":\"classy-new\",\"title\":\"new\"}\n").unwrap();
+        let prefix = temp.path().join("prefix");
+        fs::write(&prefix, "classy\n").unwrap();
+        let su = bin.join("su");
+        fs::write(&su, "#!/bin/sh\nshift 4\nexec sh -c \"$1\"\n").unwrap();
+        let bd = bin.join("bd");
+        fs::write(
+            &bd,
+            "#!/bin/sh\ncase \"$1\" in\n config) cat \"$MOCK_PREFIX\";;\n import) if [ \"${2:-}\" != --dry-run ] && [ \"${MOCK_SKIP_IMPORT:-}\" != 1 ]; then cat .beads/issues.jsonl >> \"$MOCK_EXPORT\"; fi;;\n export) cat \"$MOCK_EXPORT\";;\n *) exit 1;;\nesac\n",
+        )
+        .unwrap();
+        for executable in [&su, &bd] {
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let start = JBOX_ENTRYPOINT
+            .find("    env BEADS_DOLT_SERVER_MODE=embedded")
+            .unwrap();
+        let end = JBOX_ENTRYPOINT[start..]
+            .find("    index=$((index + 1))")
+            .unwrap()
+            + start;
+        let bootstrap = &JBOX_ENTRYPOINT[start..end];
+        let run = |skip_import: bool| {
+            Command::new("sh")
+                .arg("-c")
+                .arg(bootstrap)
+                .env("workspace", &workspace)
+                .env("prefix", "classy")
+                .env("JBOX_ONE_BEADS_WORKSPACE", &workspace)
+                .env("JBOX_ONE_BEADS_PREFIX", "classy")
+                .env("MOCK_PREFIX", &prefix)
+                .env("MOCK_EXPORT", &db_export)
+                .env("MOCK_SKIP_IMPORT", if skip_import { "1" } else { "0" })
+                .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
+                .output()
+                .unwrap()
+        };
+        let result = run(false);
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        let exported = fs::read_to_string(&db_export).unwrap();
+        for id in ["classy-old", "classy-new", "mem-1"] {
+            assert!(exported.contains(id), "missing {id} in {exported:?}");
+        }
+        assert_eq!(fs::read_to_string(beads.join("issues.jsonl")).unwrap(), original);
+
+        fs::write(&db_export, "").unwrap();
+        assert!(run(false).status.success(), "empty database must import JSONL");
+        assert!(fs::read_to_string(&db_export).unwrap().contains("classy-old"));
+        fs::write(&db_export, "").unwrap();
+        assert!(!run(true).status.success(), "failed import must not start Jcode");
+        fs::write(&prefix, "\n").unwrap();
+        assert!(!run(false).status.success(), "missing issue_prefix must fail closed");
+        fs::write(&prefix, "classy\n").unwrap();
+        fs::write(beads.join("issues.jsonl"), "").unwrap();
+        assert!(!run(false).status.success(), "empty JSONL must fail closed");
     }
 
     #[test]

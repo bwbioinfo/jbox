@@ -425,6 +425,15 @@ impl Git {
                 BEADS_EXPORT_LIMIT / (1024 * 1024)
             );
         }
+        // Refuse to snapshot an empty export. An uninitialized or wiped Beads
+        // database produces a zero-byte file and must never replace a working
+        // guest database with an empty one.
+        if !content.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            bail!(
+                "refusing to snapshot empty Beads export {}; the database may be uninitialized",
+                export.display()
+            );
+        }
 
         let beads_dir = worktree.join(".beads");
         if let Ok(metadata) = fs::symlink_metadata(&beads_dir)
@@ -446,6 +455,29 @@ impl Git {
                 "refusing to write Beads export through symlink {}",
                 destination.display()
             );
+        }
+        if destination.is_file() {
+            let previous = fs::read(&destination)?;
+            let issue_count = |bytes: &[u8]| {
+                bytes
+                    .split(|byte| *byte == b'\n')
+                    .filter(|line| line.iter().any(|byte| !byte.is_ascii_whitespace()))
+                    .filter(|line| {
+                        serde_json::from_slice::<serde_json::Value>(line).map_or(true, |record| {
+                            record.get("_type").and_then(|value| value.as_str()) != Some("memory")
+                        })
+                    })
+                    .count()
+            };
+            if issue_count(&previous) > issue_count(&content) {
+                bail!(
+                    "refusing Beads snapshot from {}: {} issues would replace {} issues in {}",
+                    export.display(),
+                    issue_count(&content),
+                    issue_count(&previous),
+                    destination.display()
+                );
+            }
         }
         let temporary = beads_dir.join(".issues.jsonl.jbox-importing");
         let mut temporary_file = OpenOptions::new()
@@ -1893,6 +1925,45 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn refuses_empty_beads_export_without_replacing_guest_snapshot() {
+        let source = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source.path().join(".beads")).unwrap();
+        fs::create_dir_all(worktree.path().join(".beads")).unwrap();
+        let source_export = source.path().join(".beads/issues.jsonl");
+        let guest_export = worktree.path().join(".beads/issues.jsonl");
+        fs::write(&guest_export, "{\"id\":\"classy-1\"}\n").unwrap();
+        for empty in ["", " \n\r\t"] {
+            fs::write(&source_export, empty).unwrap();
+            assert!(Git.snapshot_beads_export(source.path(), worktree.path()).is_err());
+            assert_eq!(
+                fs::read_to_string(&guest_export).unwrap(),
+                "{\"id\":\"classy-1\"}\n"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_snapshot_that_drops_historical_issues() {
+        let source = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source.path().join(".beads")).unwrap();
+        fs::create_dir_all(worktree.path().join(".beads")).unwrap();
+        let source_export = source.path().join(".beads/issues.jsonl");
+        let guest_export = worktree.path().join(".beads/issues.jsonl");
+        let history = "{\"id\":\"classy-1\"}\n{\"id\":\"classy-2\"}\n{\"_type\":\"memory\",\"id\":\"memory-1\"}\n";
+        let newer = "{\"id\":\"classy-new\"}\n{\"_type\":\"memory\",\"id\":\"m2\"}\n{\"_type\":\"memory\",\"id\":\"m3\"}\n{\"_type\":\"memory\",\"id\":\"m4\"}\n";
+        fs::write(&source_export, newer).unwrap();
+        fs::write(&guest_export, history).unwrap();
+        let error = Git
+            .snapshot_beads_export(source.path(), worktree.path())
+            .unwrap_err();
+        assert!(error.to_string().contains("refusing Beads snapshot"));
+        assert_eq!(fs::read_to_string(&guest_export).unwrap(), history);
+        assert_eq!(fs::read_to_string(&source_export).unwrap(), newer);
     }
 
     #[test]
