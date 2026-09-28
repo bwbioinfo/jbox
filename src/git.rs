@@ -1938,7 +1938,10 @@ mod tests {
         fs::write(&guest_export, "{\"id\":\"classy-1\"}\n").unwrap();
         for empty in ["", " \n\r\t"] {
             fs::write(&source_export, empty).unwrap();
-            assert!(Git.snapshot_beads_export(source.path(), worktree.path()).is_err());
+            assert!(
+                Git.snapshot_beads_export(source.path(), worktree.path())
+                    .is_err()
+            );
             assert_eq!(
                 fs::read_to_string(&guest_export).unwrap(),
                 "{\"id\":\"classy-1\"}\n"

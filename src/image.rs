@@ -8,6 +8,47 @@ pub struct ImageManager<'a> {
     paths: &'a JboxPaths,
 }
 
+const JBOX_BEADS_PRE_COMMIT: &str = r#"#!/bin/sh
+set -eu
+jsonl=.beads/issues.jsonl
+prefix="$(bd config get issue_prefix)"
+if [ -z "$prefix" ] || [ ! -s "$jsonl" ]; then
+    echo "jbox: refusing Beads hook without issue_prefix or nonempty JSONL" >&2
+    exit 1
+fi
+backup="$(mktemp)"
+candidate="$(mktemp)"
+expected="$(mktemp)"
+actual="$(mktemp)"
+trap 'status=$?; if [ "$status" -ne 0 ] && [ -s "$backup" ]; then cp -f "$backup" "$jsonl"; fi; rm -f "$backup" "$candidate" "$expected" "$actual"; exit "$status"' EXIT
+cp "$jsonl" "$backup"
+ids() {
+    awk -F '"' '{ for (i=1; i<NF; i++) if ($i=="id") { print $(i+2); break } }' "$1" | sort -u
+}
+safe_export() {
+    ids "$backup" > "$expected"
+    ids "$candidate" > "$actual"
+    [ -s "$expected" ] && [ -s "$actual" ] || return 1
+    missing="$(comm -23 "$expected" "$actual")"
+    [ -z "$missing" ] || return 1
+    old_memories="$(grep -c '"_type"[[:space:]]*:[[:space:]]*"memory"' "$backup" || :)"
+    new_memories="$(grep -c '"_type"[[:space:]]*:[[:space:]]*"memory"' "$candidate" || :)"
+    [ "$new_memories" -ge "$old_memories" ]
+}
+bd export --include-memories > "$candidate"
+if ! safe_export; then
+    echo "jbox: refusing Beads hook: database would lose JSONL issues or memories" >&2
+    exit 1
+fi
+export BD_GIT_HOOK=1
+bd hooks run pre-commit "$@"
+cp "$jsonl" "$candidate"
+if ! safe_export; then
+    echo "jbox: restored JSONL after unsafe Beads hook export" >&2
+    exit 1
+fi
+"#;
+
 const JBOX_ENTRYPOINT: &str = r#"#!/bin/sh
 set -eu
 mkdir -p /run/sshd
@@ -116,6 +157,19 @@ while [ "$index" -lt "${JBOX_BEADS_WORKSPACE_COUNT:-0}" ]; do
                 echo "jbox: refusing Beads database missing JSONL records in $JBOX_ONE_BEADS_WORKSPACE" >&2
                 exit 1
             fi
+            # The isolated Git metadata belongs only to this guest. Never
+            # replace an existing custom hook rather than bypassing it.
+            if git config --get core.hooksPath >/dev/null 2>&1; then
+                echo "jbox: refusing Beads hook setup with custom core.hooksPath" >&2
+                exit 1
+            fi
+            hook="$(git rev-parse --git-path hooks/pre-commit)"
+            if [ -L "$hook" ] || { [ -e "$hook" ] && ! cmp -s "$hook" /usr/local/bin/jbox-beads-pre-commit; }; then
+                echo "jbox: refusing to replace existing pre-commit hook $hook" >&2
+                exit 1
+            fi
+            cp /usr/local/bin/jbox-beads-pre-commit "$hook"
+            chmod 0700 "$hook"
         fi
     '
     index=$((index + 1))
@@ -124,7 +178,7 @@ su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode &&
 exec /usr/sbin/sshd -D -e
 "#;
 
-const BASE_DOCKERFILE: &str = "FROM debian:bookworm-slim\nARG JBOX_UID=1000\nARG JBOX_GID=1000\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl git gzip openssh-client openssh-server rustfmt tar && rm -rf /var/lib/apt/lists/*\nRUN mkdir -p -m 0755 /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' > /etc/apt/sources.list.d/github-cli.list && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*\nRUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash && bd version\n# Never inherit a repository's host-managed Dolt server settings in a jbox guest.\nENV BEADS_DOLT_SERVER_MODE=embedded BEADS_DOLT_AUTO_START=true\nRUN groupadd --gid \"$JBOX_GID\" jbox && useradd --uid \"$JBOX_UID\" --gid \"$JBOX_GID\" -m -s /bin/bash jbox && mkdir -p /run/sshd /home/jbox/.jcode /home/jbox/.ssh && chown -R jbox:jbox /home/jbox\nCOPY jcode /usr/local/bin/jcode\nCOPY jcode-linux-x86_64.bin /usr/local/bin/jcode-linux-x86_64.bin\nCOPY jbox-entrypoint /usr/local/bin/jbox-entrypoint\nRUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/local/bin/jbox-entrypoint && printf '%s\\n' 'Port 2222' 'PasswordAuthentication no' 'PermitRootLogin no' 'AllowUsers jbox' 'AuthorizedKeysFile .ssh/authorized_keys' > /etc/ssh/sshd_config.d/jbox.conf\nEXPOSE 2222\n";
+const BASE_DOCKERFILE: &str = "FROM debian:bookworm-slim\nARG JBOX_UID=1000\nARG JBOX_GID=1000\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl git gzip openssh-client openssh-server rustfmt tar && rm -rf /var/lib/apt/lists/*\nRUN mkdir -p -m 0755 /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' > /etc/apt/sources.list.d/github-cli.list && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*\nRUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash && bd version\n# Never inherit a repository's host-managed Dolt server settings in a jbox guest.\nENV BEADS_DOLT_SERVER_MODE=embedded BEADS_DOLT_AUTO_START=true\nRUN groupadd --gid \"$JBOX_GID\" jbox && useradd --uid \"$JBOX_UID\" --gid \"$JBOX_GID\" -m -s /bin/bash jbox && mkdir -p /run/sshd /home/jbox/.jcode /home/jbox/.ssh && chown -R jbox:jbox /home/jbox\nCOPY jcode /usr/local/bin/jcode\nCOPY jcode-linux-x86_64.bin /usr/local/bin/jcode-linux-x86_64.bin\nCOPY jbox-entrypoint /usr/local/bin/jbox-entrypoint\nCOPY jbox-beads-pre-commit /usr/local/bin/jbox-beads-pre-commit\nRUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/local/bin/jbox-entrypoint /usr/local/bin/jbox-beads-pre-commit && printf '%s\\n' 'Port 2222' 'PasswordAuthentication no' 'PermitRootLogin no' 'AllowUsers jbox' 'AuthorizedKeysFile .ssh/authorized_keys' > /etc/ssh/sshd_config.d/jbox.conf\nEXPOSE 2222\n";
 impl<'a> ImageManager<'a> {
     pub fn new(paths: &'a JboxPaths) -> Self {
         Self { paths }
@@ -174,6 +228,7 @@ impl<'a> ImageManager<'a> {
         let mut hasher = Sha256::new();
         hasher.update(BASE_DOCKERFILE.as_bytes());
         hasher.update(JBOX_ENTRYPOINT.as_bytes());
+        hasher.update(JBOX_BEADS_PRE_COMMIT.as_bytes());
         let fingerprint = format!("{:x}", hasher.finalize());
         let tag = format!("jbox/jcode:local-v10-{uid}-{gid}-{}", &fingerprint[..16]);
         if self.exists(&tag) {
@@ -205,6 +260,7 @@ impl<'a> ImageManager<'a> {
         std::fs::copy(&jcode_binary, context.join("jcode-linux-x86_64.bin"))?;
         std::fs::write(context.join("Dockerfile"), BASE_DOCKERFILE)?;
         std::fs::write(context.join("jbox-entrypoint"), JBOX_ENTRYPOINT)?;
+        std::fs::write(context.join("jbox-beads-pre-commit"), JBOX_BEADS_PRE_COMMIT)?;
         run_build(
             &context,
             &context.join("Dockerfile"),
@@ -304,17 +360,23 @@ mod tests {
 
     #[test]
     fn guest_entrypoint_refuses_unreconciled_beads_before_jcode() {
-        assert!(Command::new("sh")
-            .arg("-n")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                child.stdin.take().unwrap().write_all(JBOX_ENTRYPOINT.as_bytes())?;
-                child.wait()
-            })
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("sh")
+                .arg("-n")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write;
+                    child
+                        .stdin
+                        .take()
+                        .unwrap()
+                        .write_all(JBOX_ENTRYPOINT.as_bytes())?;
+                    child.wait()
+                })
+                .unwrap()
+                .success()
+        );
         for required in [
             "refusing empty Beads JSONL",
             "bd config get issue_prefix",
@@ -325,8 +387,32 @@ mod tests {
         ] {
             assert!(JBOX_ENTRYPOINT.contains(required), "missing {required}");
         }
-        assert!(JBOX_ENTRYPOINT.find("bd import >/dev/null").unwrap()
-            < JBOX_ENTRYPOINT.find("bd export --include-memories").unwrap());
+        assert!(
+            JBOX_ENTRYPOINT.find("bd import >/dev/null").unwrap()
+                < JBOX_ENTRYPOINT
+                    .find("bd export --include-memories")
+                    .unwrap()
+        );
+        assert!(BASE_DOCKERFILE.contains("COPY jbox-beads-pre-commit"));
+        assert!(JBOX_ENTRYPOINT.contains("git rev-parse --git-path hooks/pre-commit"));
+        assert!(JBOX_ENTRYPOINT.contains("refusing to replace existing pre-commit hook"));
+        assert!(
+            Command::new("sh")
+                .arg("-n")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write;
+                    child
+                        .stdin
+                        .take()
+                        .unwrap()
+                        .write_all(JBOX_BEADS_PRE_COMMIT.as_bytes())?;
+                    child.wait()
+                })
+                .unwrap()
+                .success()
+        );
     }
 
     #[test]
@@ -358,14 +444,14 @@ mod tests {
             .find("    env BEADS_DOLT_SERVER_MODE=embedded")
             .unwrap();
         let end = JBOX_ENTRYPOINT[start..]
-            .find("    index=$((index + 1))")
+            .find("            # The isolated Git metadata")
             .unwrap()
             + start;
-        let bootstrap = &JBOX_ENTRYPOINT[start..end];
+        let bootstrap = format!("{}\n        fi\n    '\n", &JBOX_ENTRYPOINT[start..end]);
         let run = |skip_import: bool| {
             Command::new("sh")
                 .arg("-c")
-                .arg(bootstrap)
+                .arg(&bootstrap)
                 .env("workspace", &workspace)
                 .env("prefix", "classy")
                 .env("JBOX_ONE_BEADS_WORKSPACE", &workspace)
@@ -373,28 +459,132 @@ mod tests {
                 .env("MOCK_PREFIX", &prefix)
                 .env("MOCK_EXPORT", &db_export)
                 .env("MOCK_SKIP_IMPORT", if skip_import { "1" } else { "0" })
-                .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
+                .env(
+                    "PATH",
+                    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+                )
                 .output()
                 .unwrap()
         };
         let result = run(false);
-        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         let exported = fs::read_to_string(&db_export).unwrap();
         for id in ["classy-old", "classy-new", "mem-1"] {
             assert!(exported.contains(id), "missing {id} in {exported:?}");
         }
-        assert_eq!(fs::read_to_string(beads.join("issues.jsonl")).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(beads.join("issues.jsonl")).unwrap(),
+            original
+        );
 
         fs::write(&db_export, "").unwrap();
-        assert!(run(false).status.success(), "empty database must import JSONL");
-        assert!(fs::read_to_string(&db_export).unwrap().contains("classy-old"));
+        assert!(
+            run(false).status.success(),
+            "empty database must import JSONL"
+        );
+        assert!(
+            fs::read_to_string(&db_export)
+                .unwrap()
+                .contains("classy-old")
+        );
         fs::write(&db_export, "").unwrap();
-        assert!(!run(true).status.success(), "failed import must not start Jcode");
+        assert!(
+            !run(true).status.success(),
+            "failed import must not start Jcode"
+        );
         fs::write(&prefix, "\n").unwrap();
-        assert!(!run(false).status.success(), "missing issue_prefix must fail closed");
+        assert!(
+            !run(false).status.success(),
+            "missing issue_prefix must fail closed"
+        );
         fs::write(&prefix, "classy\n").unwrap();
         fs::write(beads.join("issues.jsonl"), "").unwrap();
         assert!(!run(false).status.success(), "empty JSONL must fail closed");
+    }
+
+    #[test]
+    fn guarded_git_hook_rejects_empty_db_missing_prefix_and_destructive_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("classy");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(repo.join(".beads")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&repo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.org"]);
+        let hook = repo.join(".git/hooks/pre-commit");
+        fs::write(&hook, JBOX_BEADS_PRE_COMMIT).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+        let historical = "{\"id\":\"classy-old\"}\n{\"_type\":\"memory\",\"id\":\"memory-1\"}\n";
+        fs::write(repo.join(".beads/issues.jsonl"), historical).unwrap();
+        fs::write(repo.join("change"), "new work\n").unwrap();
+        git(&["add", "change"]);
+        let database = temp.path().join("database.jsonl");
+        let hook_output = temp.path().join("hook-output.jsonl");
+        let prefix = temp.path().join("prefix");
+        let bd = bin.join("bd");
+        fs::write(&bd, "#!/bin/sh\ncase \"$1\" in\n config) cat \"$MOCK_PREFIX\";;\n export) cat \"$MOCK_DATABASE\";;\n hooks) cp \"$MOCK_HOOK_OUTPUT\" .beads/issues.jsonl;;\n *) exit 1;;\nesac\n").unwrap();
+        fs::set_permissions(&bd, fs::Permissions::from_mode(0o700)).unwrap();
+        let commit = || {
+            Command::new("git")
+                .args(["commit", "-m", "checked"])
+                .current_dir(&repo)
+                .env("MOCK_DATABASE", &database)
+                .env("MOCK_HOOK_OUTPUT", &hook_output)
+                .env("MOCK_PREFIX", &prefix)
+                .env(
+                    "PATH",
+                    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+                )
+                .output()
+                .unwrap()
+        };
+        fs::write(&prefix, "classy\n").unwrap();
+        fs::write(&database, "").unwrap();
+        fs::write(&hook_output, "").unwrap();
+        assert!(!commit().status.success());
+        assert_eq!(
+            fs::read_to_string(repo.join(".beads/issues.jsonl")).unwrap(),
+            historical
+        );
+        fs::write(&database, "{\"id\":\"classy-new\"}\n").unwrap();
+        assert!(
+            !commit().status.success(),
+            "new-only database must not erase history"
+        );
+
+        fs::write(&database, historical).unwrap();
+        fs::write(&prefix, "\n").unwrap();
+        assert!(!commit().status.success());
+        fs::write(&prefix, "classy\n").unwrap();
+        assert!(
+            !commit().status.success(),
+            "hook export that erases JSONL must fail"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join(".beads/issues.jsonl")).unwrap(),
+            historical
+        );
+
+        fs::write(&hook_output, historical).unwrap();
+        assert!(
+            commit().status.success(),
+            "healthy hook should allow Git commit"
+        );
     }
 
     #[test]
