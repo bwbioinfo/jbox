@@ -379,6 +379,7 @@ impl App {
             )
         })?;
         let (config, primary) = Config::load(input)?;
+        engine::validate_ssh_network(&config.network)?;
         let git_author = config.git.author.resolve()?;
         if git_author.name.is_none() || git_author.email.is_none() {
             println!(
@@ -2698,6 +2699,7 @@ done | LC_ALL=C sort -r | head -n 20
             );
         }
         let (config, primary) = Config::load(&session.config_path)?;
+        engine::validate_ssh_network(&config.network)?;
         self.validate_resume_config(&session, &config, &primary)?;
         if !config.jcode.persistent_credentials {
             // The old guest home lived on a tmpfs, so its Jcode session IDs

@@ -291,19 +291,23 @@ fn current_user_ids() -> Result<(String, String)> {
 }
 fn run_build(context: &Path, dockerfile: &Path, tag: &str, build_args: &[String]) -> Result<()> {
     let mut command = Command::new("docker");
-    command.args(["build", "--tag", tag, "--file"]);
+    // --progress=plain streams each build step incrementally so the user can
+    // see where a long build is without waiting for the whole thing to finish.
+    // Stdout/stderr are inherited rather than captured so progress flows to the
+    // terminal in real time and nothing is buffered in process memory.
+    command.args(["build", "--progress=plain", "--tag", tag, "--file"]);
     command.arg(dockerfile);
     for build_arg in build_args {
         command.args(["--build-arg", build_arg]);
     }
-    let output = command
+    let status = command
         .arg(context)
-        .output()
+        .status()
         .context("could not execute docker build")?;
-    if !output.status.success() {
+    if !status.success() {
         bail!(
-            "image build failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "image build failed (exit {}); see docker output above",
+            status.code().unwrap_or(-1)
         );
     }
     Ok(())
@@ -662,5 +666,30 @@ mod tests {
     #[test]
     fn base_image_creates_jcode_config_mount_parent() {
         assert!(BASE_DOCKERFILE.contains("/home/jbox/.jcode"));
+    }
+
+    #[test]
+    fn image_build_streams_progress_and_reports_exit_code_on_failure() {
+        // run_build must pass --progress=plain so docker emits each build step
+        // to the inherited terminal rather than buffering everything silently.
+        // The error message must reference the exit code rather than captured
+        // stderr, because output is no longer captured.
+        let src = std::fs::read_to_string("src/image.rs").unwrap();
+        assert!(
+            src.contains("--progress=plain"),
+            "run_build must pass --progress=plain"
+        );
+        assert!(
+            src.contains(".status()"),
+            "run_build must use .status() not .output() to stream progress"
+        );
+        assert!(
+            src.contains("see docker output above"),
+            "failure message must direct the user to the streamed docker output"
+        );
+        assert!(
+            !src.contains(".output()\n        .context(\"could not execute docker build\")"),
+            "run_build must not use .output() which buffers and hides progress"
+        );
     }
 }

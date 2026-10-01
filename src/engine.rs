@@ -37,6 +37,19 @@ pub trait Engine {
     fn is_running(&self, name: &str) -> Result<bool>;
 }
 
+/// Docker discards published ports on `--network none`. Jbox cannot attach over
+/// SSH in that mode, so reject it before any worktree or container is created.
+/// Do not silently substitute bridge networking: that would grant egress the
+/// project explicitly disabled.
+pub fn validate_ssh_network(network: &Network) -> Result<()> {
+    if !network.internet {
+        bail!(
+            "network.internet=false cannot launch a Jbox SSH guest: Docker --network none discards published ports. No guest was started. Use an explicitly permitted network only after reviewing its egress policy; offline SSH transport is not yet supported"
+        );
+    }
+    Ok(())
+}
+
 /// Execute `cmd` with a hard wall-clock `timeout`.
 ///
 /// On timeout the child is killed and reaped before returning.  The label
@@ -175,6 +188,7 @@ impl Engine for DockerEngine {
     }
 
     fn start(&self, spec: &ContainerSpec) -> Result<u16> {
+        validate_ssh_network(&spec.network)?;
         Self::check_host_prerequisites(spec.network.internet)?;
         let cpus = spec.cpus.to_string();
         let uid = current_id("-u")?;
@@ -385,6 +399,28 @@ fn current_id(flag: &str) -> Result<String> {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn offline_docker_network_is_rejected_before_launch() {
+        let offline = Network {
+            internet: false,
+            host: false,
+            lan: false,
+        };
+        let error = validate_ssh_network(&offline).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Docker --network none discards published ports")
+        );
+        assert!(
+            validate_ssh_network(&Network {
+                internet: true,
+                ..offline
+            })
+            .is_ok()
+        );
+    }
 
     // --- run_timed_raw -------------------------------------------------------
 

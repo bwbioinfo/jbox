@@ -6,6 +6,57 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
+fn offline_network_fails_before_creating_a_workspace_or_guest() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("project");
+    fs::create_dir(&repository).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(
+        repository.join(".jbox.toml"),
+        "version = 1\n[network]\ninternet = false\n[git]\nnetwork = false\ncredentials = 'none'\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_jbox"))
+        .args(["run", "--new", "--no-attach", "."])
+        .current_dir(&repository)
+        .env("XDG_DATA_HOME", temp.path().join("data"))
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("Docker --network none discards published ports"),
+        "{error}"
+    );
+    assert!(error.contains("No guest was started"), "{error}");
+    let sessions = temp.path().join("data/jbox/sessions");
+    assert!(
+        !sessions.exists() || fs::read_dir(&sessions).unwrap().next().is_none(),
+        "no guest session should be recorded"
+    );
+    let branches = Command::new("git")
+        .args(["branch", "--list", "jbox/*"])
+        .current_dir(&repository)
+        .output()
+        .unwrap();
+    assert!(branches.status.success());
+    assert!(
+        branches.stdout.is_empty(),
+        "no sandbox branch should be created"
+    );
+}
+
+#[test]
 fn repeated_run_reuses_the_recorded_workspace_without_starting_another_vm() {
     let temp = tempfile::tempdir().unwrap();
     let repository = temp.path().join("project");
