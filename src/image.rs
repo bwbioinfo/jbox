@@ -125,8 +125,11 @@ while [ "$index" -lt "${JBOX_BEADS_WORKSPACE_COUNT:-0}" ]; do
                     echo "jbox: refusing Beads database without expected issue_prefix $JBOX_ONE_BEADS_PREFIX" >&2
                     exit 1
                 fi
-                bd import --dry-run >/dev/null
-                bd import >/dev/null
+                # `su -c` inherits redirected stdin during non-interactive
+                # starts. Beads refuses a default import in that case unless
+                # the JSONL path is passed explicitly.
+                bd import .beads/issues.jsonl --dry-run >/dev/null
+                bd import .beads/issues.jsonl >/dev/null
             else
                 # `bd init --stealth` can remove a tracked root .gitignore.
                 tracked_gitignore=
@@ -439,15 +442,17 @@ mod tests {
         for required in [
             "refusing empty Beads JSONL",
             "bd config get issue_prefix",
-            "bd import --dry-run",
-            "bd import >/dev/null",
+            "bd import .beads/issues.jsonl --dry-run",
+            "bd import .beads/issues.jsonl >/dev/null",
             "bd export --include-memories",
             "comm -23",
         ] {
             assert!(JBOX_ENTRYPOINT.contains(required), "missing {required}");
         }
         assert!(
-            JBOX_ENTRYPOINT.find("bd import >/dev/null").unwrap()
+            JBOX_ENTRYPOINT
+                .find("bd import .beads/issues.jsonl >/dev/null")
+                .unwrap()
                 < JBOX_ENTRYPOINT
                     .find("bd export --include-memories")
                     .unwrap()
@@ -493,7 +498,7 @@ mod tests {
         let bd = bin.join("bd");
         fs::write(
             &bd,
-            "#!/bin/sh\ncase \"$1\" in\n config) cat \"$MOCK_PREFIX\";;\n import) if [ \"${2:-}\" != --dry-run ] && [ \"${MOCK_SKIP_IMPORT:-}\" != 1 ]; then cat .beads/issues.jsonl >> \"$MOCK_EXPORT\"; fi;;\n export) cat \"$MOCK_EXPORT\";;\n *) exit 1;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n config) cat \"$MOCK_PREFIX\";;\n import) [ \"${2:-}\" = .beads/issues.jsonl ] || { echo 'explicit JSONL operand required' >&2; exit 2; }; if [ \"${3:-}\" != --dry-run ] && [ \"${MOCK_SKIP_IMPORT:-}\" != 1 ]; then cat \"$2\" >> \"$MOCK_EXPORT\"; fi;;\n export) cat \"$MOCK_EXPORT\";;\n *) exit 1;;\nesac\n",
         )
         .unwrap();
         for executable in [&su, &bd] {
@@ -521,6 +526,7 @@ mod tests {
                 .env("MOCK_PREFIX", &prefix)
                 .env("MOCK_EXPORT", &db_export)
                 .env("MOCK_SKIP_IMPORT", if skip_import { "1" } else { "0" })
+                .stdin(std::process::Stdio::null())
                 .env(
                     "PATH",
                     format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),

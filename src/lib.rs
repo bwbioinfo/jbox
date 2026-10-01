@@ -2673,6 +2673,10 @@ done | LC_ALL=C sort -r | head -n 20
     /// worktree gets an explicit checkpoint offer before recreating its
     /// isolated guest Git metadata.
     pub fn resume(&self, id: &str) -> Result<()> {
+        self.resume_with_image_refresh(id, false)
+    }
+
+    pub fn resume_with_image_refresh(&self, id: &str, refresh_image: bool) -> Result<()> {
         let mut session = self.load_session(id)?;
         if session.sync.is_some() {
             bail!(
@@ -2680,6 +2684,9 @@ done | LC_ALL=C sort -r | head -n 20
             );
         }
         if session.state == SessionState::Running {
+            if refresh_image {
+                bail!("cannot refresh the image of running session {id}; stop it first");
+            }
             let mount = session.repos[0].mount.clone();
             println!("jbox session {id} is already running. Attaching to it.");
             return self.attach_session(&mut session, &mount);
@@ -2701,6 +2708,13 @@ done | LC_ALL=C sort -r | head -n 20
         let (config, primary) = Config::load(&session.config_path)?;
         engine::validate_ssh_network(&config.network)?;
         self.validate_resume_config(&session, &config, &primary)?;
+        // Images are normally pinned to the session. Opt in to rebuilding after
+        // a guest startup fix, without replacing the pinned image on failure.
+        let image = if refresh_image {
+            ImageManager::new(&self.paths).ensure(&config, &primary)?
+        } else {
+            session.image.clone()
+        };
         if !config.jcode.persistent_credentials {
             // The old guest home lived on a tmpfs, so its Jcode session IDs
             // cannot be resumed. Retain worktrees but start fresh conversations.
@@ -2759,7 +2773,7 @@ done | LC_ALL=C sort -r | head -n 20
             &session.container_name,
             &ssh,
             SessionLaunch {
-                image: session.image.clone(),
+                image: image.clone(),
                 ssh_host: session.ssh_host.clone(),
                 reuse_runtime_state: true,
             },
@@ -2797,6 +2811,7 @@ done | LC_ALL=C sort -r | head -n 20
         session.ssh_port = port;
         session.ssh_agent_pid = ssh_agent_pid;
         session.known_hosts_tag = known_hosts_tag;
+        session.image = image;
         self.touch(&mut session)?;
         println!(
             "jbox session {} resumed on {}:{}",
@@ -2866,12 +2881,26 @@ done | LC_ALL=C sort -r | head -n 20
     /// stopped guest is restarted, while a running one is attached directly.
     /// This makes `jbox resume` useful as an idempotent reconnect command.
     pub fn resume_from_repository(&self, input: &Path) -> Result<()> {
+        self.resume_from_repository_with_image_refresh(input, false)
+    }
+
+    pub fn resume_from_repository_with_image_refresh(
+        &self,
+        input: &Path,
+        refresh_image: bool,
+    ) -> Result<()> {
         let Some((mut session, repo)) =
             self.select_repository_worktree(input, "resume or attach to", None)?
         else {
             return Ok(());
         };
         if session.state == SessionState::Running {
+            if refresh_image {
+                bail!(
+                    "cannot refresh the image of running session {}; stop it first",
+                    session.id
+                );
+            }
             println!(
                 "jbox session {} is already running. Attaching to {}.",
                 session.id, repo.mount
@@ -2886,7 +2915,7 @@ done | LC_ALL=C sort -r | head -n 20
             println!("resume cancelled.");
             return Ok(());
         }
-        self.resume(&session.id)
+        self.resume_with_image_refresh(&session.id, refresh_image)
     }
 
     /// Reconnect the most recently active retained workspace for the requested

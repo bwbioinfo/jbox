@@ -141,6 +141,9 @@ enum Command {
     /// Restart a retained stopped session, or attach when it is already running. Omit the session to select one for the current repository.
     Resume {
         session: Option<String>,
+        /// Rebuild the guest image from the current jbox code before restarting a stopped session.
+        #[arg(long)]
+        refresh_image: bool,
     },
     Clean {
         /// Session to clean. Omit it to select a workspace for the current repository.
@@ -356,9 +359,15 @@ fn main() -> Result<()> {
             Some(session) => app.resolve(&session, &std::env::current_dir()?)?,
             None => app.resolve_from_repository(&std::env::current_dir()?)?,
         },
-        Command::Resume { session } => match session {
-            Some(session) => app.resume(&session)?,
-            None => app.resume_from_repository(&std::env::current_dir()?)?,
+        Command::Resume {
+            session,
+            refresh_image,
+        } => match session {
+            Some(session) => app.resume_with_image_refresh(&session, refresh_image)?,
+            None => app.resume_from_repository_with_image_refresh(
+                &std::env::current_dir()?,
+                refresh_image,
+            )?,
         },
         Command::Clean {
             session,
@@ -516,6 +525,27 @@ mod tests {
                 yes: false,
                 continue_sync: true,
                 abort: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn resume_refreshes_pinned_image_only_when_requested() {
+        let cli = Cli::try_parse_from(["jbox", "resume", "calm-fox-123"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Resume {
+                session: Some(_),
+                refresh_image: false
+            }
+        ));
+        let cli =
+            Cli::try_parse_from(["jbox", "resume", "calm-fox-123", "--refresh-image"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Resume {
+                session: Some(_),
+                refresh_image: true
             }
         ));
     }

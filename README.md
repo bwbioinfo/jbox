@@ -368,9 +368,13 @@ many sibling repository worktrees they affect. `jbox clean --all` retains the
 previous all-session maintenance workflow.
 
 `jbox resume` considers stopped retained sessions containing the current
-repository, then starts the selected session with its existing worktrees and image. It
-creates fresh per-session SSH credentials, reuses completed session-local
-skills, and never rebuilds the image. To preserve data, resume refuses a
+repository, then starts the selected session with its existing worktrees and pinned
+image. It creates fresh per-session SSH credentials and reuses completed
+session-local skills. To recover from a guest image startup bug after upgrading
+jbox, run `jbox resume <session> --refresh-image`. This explicitly rebuilds the
+image from the current configuration and jbox code, and changes the session's
+pinned image only after startup succeeds. Without the flag, resume never rebuilds
+the image. To preserve data, resume refuses a
 retained worktree with uncommitted changes because recreating guest-only Git
 metadata requires a hard reset. In an interactive terminal, jbox lists those
 worktrees and offers to checkpoint their changes onto only their session
