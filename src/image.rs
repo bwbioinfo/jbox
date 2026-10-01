@@ -117,7 +117,20 @@ while [ "$index" -lt "${JBOX_BEADS_WORKSPACE_COUNT:-0}" ]; do
             original="$(mktemp)"
             cp .beads/issues.jsonl "$original"
             trap "rm -f \"\$original\"" EXIT
-            if [ -d .beads/embeddeddolt ] || [ -d .beads/dolt ]; then
+            # A repository can track server-mode Beads metadata for its host.
+            # The guest must use only its own embedded database, never start a
+            # server against a stale port or another mounted repository.
+            if [ -f .beads/metadata.json ] && grep -Eq '"'"'"dolt_mode"[[:space:]]*:[[:space:]]*"server"'"'"' .beads/metadata.json; then
+                if [ -L .beads/metadata.json ]; then
+                    echo "jbox: refusing symlinked Beads metadata in $JBOX_ONE_BEADS_WORKSPACE" >&2
+                    exit 1
+                fi
+                normalized="$(mktemp)"
+                sed -E '"'"'s/("dolt_mode"[[:space:]]*:[[:space:]]*)"server"/\1"embedded"/'"'"' .beads/metadata.json > "$normalized"
+                cat "$normalized" > .beads/metadata.json
+                rm -f "$normalized"
+            fi
+            if [ -d .beads/embeddeddolt ]; then
                 # A retained guest can contain newer issues absent from the
                 # portable snapshot. Import upserts instead of resetting it.
                 current_prefix="$(bd config get issue_prefix)"
@@ -375,7 +388,7 @@ mod tests {
         );
         assert!(BASE_DOCKERFILE.contains("ENV BEADS_DOLT_SERVER_MODE=embedded"));
         assert!(JBOX_ENTRYPOINT.contains(".beads/embeddeddolt"));
-        assert!(JBOX_ENTRYPOINT.contains(".beads/dolt"));
+        assert!(JBOX_ENTRYPOINT.contains("if [ -d .beads/embeddeddolt ]; then"));
         assert!(!JBOX_ENTRYPOINT.contains("--reinit-local"));
         assert!(
             JBOX_ENTRYPOINT
@@ -570,6 +583,37 @@ mod tests {
             "missing issue_prefix must fail closed"
         );
         fs::write(&prefix, "classy\n").unwrap();
+        let metadata = beads.join("metadata.json");
+        fs::write(
+            &metadata,
+            "{\"dolt_mode\":\"server\",\"dolt_database\":\"classy\"}\n",
+        )
+        .unwrap();
+        let result = run(false);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            fs::read_to_string(&metadata)
+                .unwrap()
+                .contains("\"dolt_mode\":\"embedded\"")
+        );
+        fs::remove_file(&metadata).unwrap();
+        let external = temp.path().join("external-metadata.json");
+        fs::write(&external, "{\"dolt_mode\":\"server\"}\n").unwrap();
+        std::os::unix::fs::symlink(&external, &metadata).unwrap();
+        assert!(
+            !run(false).status.success(),
+            "symlinked metadata must fail closed"
+        );
+        assert!(
+            fs::read_to_string(&external)
+                .unwrap()
+                .contains("\"server\"")
+        );
+        fs::remove_file(&metadata).unwrap();
         fs::write(beads.join("issues.jsonl"), "").unwrap();
         assert!(!run(false).status.success(), "empty JSONL must fail closed");
     }

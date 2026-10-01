@@ -2812,6 +2812,14 @@ done | LC_ALL=C sort -r | head -n 20
         session.ssh_agent_pid = ssh_agent_pid;
         session.known_hosts_tag = known_hosts_tag;
         session.image = image;
+        // Guest-only Beads initialization may rewrite tracked metadata after
+        // an existing session is resumed. Refresh the narrowly scoped
+        // post-bootstrap baseline before exposing the guest to a client.
+        for repo in &mut session.repos {
+            if repo.beads_snapshot.is_some() || !repo.beads_bootstrap.is_empty() {
+                repo.beads_bootstrap = self.git.capture_beads_bootstrap(&repo.worktree);
+            }
+        }
         self.touch(&mut session)?;
         println!(
             "jbox session {} resumed on {}:{}",

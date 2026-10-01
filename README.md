@@ -233,8 +233,11 @@ waiting for the full readiness deadline. A Docker command that stops responding
 also fails with an explicit timeout instead of leaving reconnection silent.
 Newly built guest images bound Beads hydration to 60 seconds per workspace and
 report a bootstrap failure before SSH starts. Retained sessions reuse their saved
-image, so an older session does not acquire the new guest-entrypoint timeout
-until a fresh workspace is created with `--new`.
+image unless explicitly restarted with `jbox resume SESSION --refresh-image`.
+If a repository tracks server-mode Beads metadata for the host, jbox rewrites
+only the isolated guest worktree's copy to embedded mode before importing the
+portable JSONL. A stale server database is left intact, not mounted from the
+host or mistaken for an initialized embedded guest database.
 Run each of the following complete commands from a participating
 host repository. Jbox selects its only matching session or presents a picker:
 
