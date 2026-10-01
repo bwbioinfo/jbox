@@ -1,7 +1,22 @@
 use crate::config::Network;
 use anyhow::{Context, Result, bail};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// Per-invocation wall-clock limit for any single Docker CLI call.
+const CMD_TIMEOUT: Duration = Duration::from_secs(10);
+const RUN_TIMEOUT: Duration = Duration::from_secs(120);
+const STOP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Wall-clock budget for the container to publish its SSH port after `docker run -d`.
+const PORT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long to sleep between consecutive port-readiness polls.
+const PORT_POLL: Duration = Duration::from_millis(200);
 
 pub struct ContainerSpec {
     pub name: String,
@@ -22,6 +37,87 @@ pub trait Engine {
     fn is_running(&self, name: &str) -> Result<bool>;
 }
 
+/// Execute `cmd` with a hard wall-clock `timeout`.
+///
+/// On timeout the child is killed and reaped before returning.  The label
+/// appears in every error message so callers get actionable diagnostics.
+///
+/// Returns `(success, stdout, stderr)` without bailing on a non-zero exit so
+/// callers that treat a failed exit as a data signal (e.g. `docker port` when
+/// the port is not yet published) can inspect the result themselves.
+fn run_timed_raw(
+    mut cmd: Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<(bool, String, String)> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("could not launch `{label}`"))?;
+
+    // Drain both pipes in background threads to prevent buffer-full deadlock.
+    let mut raw_out = child.stdout.take().expect("stdout was piped");
+    let mut raw_err = child.stderr.take().expect("stderr was piped");
+    let (tx_out, rx_out) = mpsc::channel::<Vec<u8>>();
+    let (tx_err, rx_err) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = raw_out.read_to_end(&mut v);
+        let _ = tx_out.send(v);
+    });
+    thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = raw_err.read_to_end(&mut v);
+        let _ = tx_err.send(v);
+    });
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child
+            .try_wait()
+            .with_context(|| format!("could not poll `{label}`"))?
+        {
+            Some(status) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let out = rx_out
+                    .recv_timeout(remaining.max(Duration::from_millis(500)))
+                    .with_context(|| format!("`{label}` timed out reading stdout"))?;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let err = rx_err
+                    .recv_timeout(remaining.max(Duration::from_millis(500)))
+                    .with_context(|| format!("`{label}` timed out reading stderr"))?;
+                let stdout = String::from_utf8_lossy(&out).trim().to_owned();
+                let stderr = String::from_utf8_lossy(&err).trim().to_owned();
+                return Ok((status.success(), stdout, stderr));
+            }
+            None => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    let _ = child.kill();
+                    let _ = child.wait(); // reap zombie so no fd/pid leak
+                    bail!(
+                        "`{label}` timed out after {}s; is the Docker daemon responsive? \
+                         Run `docker info` to check.",
+                        timeout.as_secs()
+                    );
+                }
+                thread::sleep(Duration::from_millis(50).min(remaining));
+            }
+        }
+    }
+}
+
+/// Convenience wrapper: like `run_timed_raw` but bails on a non-zero exit.
+fn run_timed(cmd: Command, timeout: Duration, label: &str) -> Result<String> {
+    let (ok, stdout, stderr) = run_timed_raw(cmd, timeout, label)?;
+    if !ok {
+        bail!("`{label}` failed: {stderr}");
+    }
+    Ok(stdout)
+}
+
 /// Docker is selected for the MVP because Kata on current Arch-based hosts is a
 /// rootful deployment. Podman's stronger rootless network defaults cannot be
 /// combined with Kata there. The sandbox never receives Docker's socket.
@@ -29,16 +125,6 @@ pub struct DockerEngine;
 impl DockerEngine {
     fn command() -> Command {
         Command::new("docker")
-    }
-    fn run_checked(mut command: Command) -> Result<String> {
-        let output = command.output().context("could not execute docker")?;
-        if !output.status.success() {
-            bail!(
-                "docker failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        Ok(String::from_utf8(output.stdout)?.trim().into())
     }
 
     fn check_host_prerequisites(needs_network: bool) -> Result<()> {
@@ -67,21 +153,22 @@ fn module_loaded(name: &str) -> Result<bool> {
 
 impl Engine for DockerEngine {
     fn check(&self) -> Result<()> {
-        let output = Self::command()
-            .args(["info", "--format", "{{json .Runtimes}}"])
-            .output()
+        let mut cmd = Self::command();
+        cmd.args(["info", "--format", "{{json .Runtimes}}"]);
+        let (ok, stdout, stderr) = run_timed_raw(cmd, CMD_TIMEOUT, "docker info")
             .context("Docker is required. Install Kata and register its runtime with Docker.")?;
-        if !output.status.success() {
+        if !ok {
             bail!(
-                "Docker is unusable: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                "Docker is unusable: {}. Verify Docker is running with `docker info`.",
+                stderr
             );
         }
-        let runtimes: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .context("Docker returned invalid runtime metadata")?;
+        let runtimes: serde_json::Value =
+            serde_json::from_str(&stdout).context("Docker returned invalid runtime metadata")?;
         if runtimes.get("kata").is_none() {
             bail!(
-                "Docker has no runtime named `kata`. Register Kata in /etc/docker/daemon.json, restart Docker, and verify `docker info` reports it."
+                "Docker has no runtime named `kata`. Register Kata in /etc/docker/daemon.json, \
+                 restart Docker, and verify `docker info` reports it."
             );
         }
         Ok(())
@@ -170,70 +257,225 @@ impl Engine for DockerEngine {
         command
             .arg(&spec.image)
             .arg("/usr/local/bin/jbox-entrypoint");
-        Self::run_checked(command).context("could not start Jbox Kata session")?;
+        eprintln!("Starting Kata guest {} (up to 120s)...", spec.name);
+        run_timed(command, RUN_TIMEOUT, "docker run")
+            .context("could not start Jbox Kata session")?;
 
         // A successful `docker run -d` merely means the runtime accepted the
-        // process. Verify that it survives long enough to expose SSH before
-        // publishing session state to the caller.
-        for _ in 0..25 {
-            if !self.is_running(&spec.name)? {
-                let mut logs = Self::command();
-                logs.args(["logs", &spec.name]);
-                let output = logs.output()?;
+        // process. Poll until the container publishes its SSH port or the
+        // wall-clock deadline expires -- whichever comes first.
+        eprintln!(
+            "Waiting for Kata guest {} SSH port (up to 30s)...",
+            spec.name
+        );
+        let port_deadline = Instant::now() + PORT_DEADLINE;
+        loop {
+            let remaining = port_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let _ = self.stop(&spec.name);
+                bail!("Kata session did not publish its SSH port within 30 seconds");
+            }
+            let mut inspect = Self::command();
+            inspect.args(["inspect", "--format", "{{.State.Running}}", &spec.name]);
+            let (inspected, running, _) =
+                run_timed_raw(inspect, CMD_TIMEOUT.min(remaining), "docker inspect")?;
+            if !inspected || running != "true" {
+                // Container exited during startup: grab logs and report them.
+                let logs = self
+                    .startup_logs(&spec.name)
+                    .unwrap_or_else(|error| format!("could not retrieve guest logs: {error:#}"));
                 let _ = self.stop(&spec.name);
                 bail!(
-                    "Kata session exited during startup: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
+                    "Kata session exited during startup.\nContainer logs:\n{logs}\n\
+                     Check that the guest image has a valid entrypoint."
                 );
             }
-            let mut port_command = Self::command();
-            port_command.args(["port", &spec.name, "2222/tcp"]);
-            let output = port_command.output()?;
-            if output.status.success() && !output.stdout.is_empty() {
-                let port = String::from_utf8(output.stdout)?;
-                return port
+
+            let mut port_cmd = Self::command();
+            port_cmd.args(["port", &spec.name, "2222/tcp"]);
+            let remaining = port_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let _ = self.stop(&spec.name);
+                bail!("Kata session did not publish its SSH port within 30 seconds");
+            }
+            let (ok, port_out, _) =
+                run_timed_raw(port_cmd, CMD_TIMEOUT.min(remaining), "docker port")?;
+            if ok && !port_out.is_empty() {
+                return port_out
                     .rsplit(':')
                     .next()
-                    .context("Docker did not report SSH port")?
+                    .context("Docker did not report an SSH port")?
                     .trim()
                     .parse()
-                    .context("invalid SSH port from Docker");
+                    .context("Docker reported an invalid SSH port number");
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+
+            let remaining = port_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let _ = self.stop(&spec.name);
+                bail!(
+                    "Kata session did not publish its SSH port within {}s. \
+                     Check that the guest image entrypoint starts sshd on port 2222 \
+                     and that the kata runtime is installed correctly.",
+                    PORT_DEADLINE.as_secs()
+                );
+            }
+            thread::sleep(PORT_POLL.min(remaining));
         }
-        let _ = self.stop(&spec.name);
-        bail!("Kata session did not publish its SSH port within five seconds")
     }
 
     fn stop(&self, name: &str) -> Result<()> {
-        let mut command = Self::command();
-        command.args(["rm", "-f", name]);
-        let output = command.output()?;
-        if output.status.success() {
-            return Ok(());
+        let mut cmd = Self::command();
+        cmd.args(["rm", "-f", name]);
+        match run_timed(cmd, STOP_TIMEOUT, "docker rm") {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                // Docker may report this while another jbox invocation is already
+                // stopping the same disposable machine. Both desired end states are
+                // equivalent, so cleanup remains idempotent.
+                if msg.contains("No such container") || msg.contains("removal of container") {
+                    return Ok(());
+                }
+                Err(e).with_context(|| {
+                    format!(
+                        "could not remove container '{name}'; \
+                         try `docker rm -f {name}` to remove it manually"
+                    )
+                })
+            }
         }
-        let error = String::from_utf8_lossy(&output.stderr);
-        // Docker may report this while another jbox invocation is already
-        // stopping the same disposable machine. Both desired end states are
-        // equivalent, so cleanup remains idempotent.
-        if error.contains("No such container") || error.contains("removal of container") {
-            return Ok(());
-        }
-        bail!("docker failed: {}", error.trim());
     }
 
     fn is_running(&self, name: &str) -> Result<bool> {
-        let out = Self::command()
-            .args(["inspect", "--format", "{{.State.Running}}", name])
-            .output()?;
-        Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true")
+        let mut cmd = Self::command();
+        cmd.args(["inspect", "--format", "{{.State.Running}}", name]);
+        let (ok, stdout, _) = run_timed_raw(cmd, CMD_TIMEOUT, "docker inspect")?;
+        Ok(ok && stdout == "true")
+    }
+}
+
+impl DockerEngine {
+    /// Retrieve the most recent container log lines for post-mortem diagnostics.
+    pub fn startup_logs(&self, name: &str) -> Result<String> {
+        let mut cmd = Self::command();
+        cmd.args(["logs", "--tail", "50", "--", name]);
+        let (ok, stdout, stderr) = run_timed_raw(cmd, CMD_TIMEOUT, "docker logs")?;
+        if !ok {
+            bail!("docker logs failed: {stderr}");
+        }
+        let combined = format!("{stdout}\n{stderr}");
+        Ok(combined.trim().to_owned())
     }
 }
 
 fn current_id(flag: &str) -> Result<String> {
-    let output = Command::new("id").arg(flag).output()?;
-    if !output.status.success() {
-        bail!("could not determine the current user identity")
+    let mut cmd = Command::new("id");
+    cmd.arg(flag);
+    // `id(1)` is a local process; 5 s is generous but bounded.
+    run_timed(cmd, Duration::from_secs(5), &format!("id {flag}"))
+        .context("could not determine the current user identity")
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    // --- run_timed_raw -------------------------------------------------------
+
+    #[test]
+    fn raw_success_captures_stdout_and_stderr() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo out; echo err >&2"]);
+        let (ok, stdout, stderr) = run_timed_raw(cmd, Duration::from_secs(5), "sh").unwrap();
+        assert!(ok);
+        assert_eq!(stdout, "out");
+        assert_eq!(stderr, "err");
     }
-    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+
+    #[test]
+    fn raw_non_zero_exit_does_not_bail() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo body; exit 2"]);
+        let (ok, stdout, _stderr) = run_timed_raw(cmd, Duration::from_secs(5), "sh-fail").unwrap();
+        assert!(!ok);
+        assert_eq!(stdout, "body");
+    }
+
+    #[test]
+    fn raw_timeout_kills_and_returns_error() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60");
+        let timeout = Duration::from_millis(300);
+        let start = Instant::now();
+        let err = run_timed_raw(cmd, timeout, "sleep-long").unwrap_err();
+        let elapsed = start.elapsed();
+        // Should return well under 2 s; the 60-second sleep must be killed.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "timeout not enforced; elapsed {elapsed:?}"
+        );
+        assert!(
+            err.to_string().contains("timed out"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn raw_timeout_message_contains_label() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60");
+        let err = run_timed_raw(cmd, Duration::from_millis(200), "MY_LABEL").unwrap_err();
+        assert!(
+            err.to_string().contains("MY_LABEL"),
+            "label missing from error: {err}"
+        );
+    }
+
+    // --- run_timed -----------------------------------------------------------
+
+    #[test]
+    fn timed_success_returns_trimmed_stdout() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hello");
+        let out = run_timed(cmd, Duration::from_secs(5), "echo").unwrap();
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn timed_non_zero_exit_bails() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo problem >&2; exit 1"]);
+        let err = run_timed(cmd, Duration::from_secs(5), "sh-err").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("problem"), "stderr missing from error: {msg}");
+    }
+
+    #[test]
+    fn timed_multiline_output_trimmed() {
+        let mut cmd = Command::new("printf");
+        cmd.arg("line1\nline2");
+        let out = run_timed(cmd, Duration::from_secs(5), "printf").unwrap();
+        assert_eq!(out, "line1\nline2");
+    }
+
+    #[test]
+    fn timed_timeout_kills_process() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60");
+        let timeout = Duration::from_millis(300);
+        let start = Instant::now();
+        let err = run_timed(cmd, timeout, "sleep-timed").unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "kill too slow: {:?}",
+            start.elapsed()
+        );
+        assert!(err.to_string().contains("timed out"), "unexpected: {err}");
+    }
 }

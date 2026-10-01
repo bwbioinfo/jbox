@@ -104,7 +104,9 @@ while [ "$index" -lt "${JBOX_BEADS_WORKSPACE_COUNT:-0}" ]; do
     # Import only the portable JSONL task snapshot staged in the generated
     # worktree. This initializes a guest-local database without mounting the
     # host Beads Dolt database, locks, sockets, or credentials.
-    env BEADS_DOLT_SERVER_MODE=embedded BEADS_DOLT_AUTO_START=true JBOX_ONE_BEADS_WORKSPACE="$workspace" JBOX_ONE_BEADS_PREFIX="$prefix" su -s /bin/sh jbox -c '
+    # A stalled Dolt command must not keep SSH unavailable indefinitely. Fail
+    # closed on timeout instead of exposing an incompletely hydrated workspace.
+    if timeout -k 5s 60s env BEADS_DOLT_SERVER_MODE=embedded BEADS_DOLT_AUTO_START=true JBOX_ONE_BEADS_WORKSPACE="$workspace" JBOX_ONE_BEADS_PREFIX="$prefix" su -s /bin/sh jbox -c '
         set -eu
         if [ -f "$JBOX_ONE_BEADS_WORKSPACE/.beads/issues.jsonl" ]; then
             cd "$JBOX_ONE_BEADS_WORKSPACE"
@@ -171,7 +173,13 @@ while [ "$index" -lt "${JBOX_BEADS_WORKSPACE_COUNT:-0}" ]; do
             cp /usr/local/bin/jbox-beads-pre-commit "$hook"
             chmod 0700 "$hook"
         fi
-    '
+    '; then
+        :
+    else
+        result=$?
+        echo "jbox: Beads bootstrap failed for $workspace (exit $result; 124 means 60-second timeout)" >&2
+        exit "$result"
+    fi
     index=$((index + 1))
 done
 su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode && jcode serve --server-name jbox --socket /home/jbox/.local/share/jcode/jbox.sock >/tmp/jcode-serve.log 2>&1 &'
@@ -346,6 +354,18 @@ mod tests {
         assert!(JBOX_ENTRYPOINT.contains("git ls-files --error-unmatch .gitignore"));
         assert!(JBOX_ENTRYPOINT.contains("cat \"$tracked_gitignore\" > .gitignore"));
         assert!(JBOX_ENTRYPOINT.contains("BEADS_DOLT_SERVER_MODE=embedded"));
+        assert!(JBOX_ENTRYPOINT.contains("timeout -k 5s 60s env BEADS_DOLT_SERVER_MODE=embedded"));
+        assert!(JBOX_ENTRYPOINT.contains("Beads bootstrap failed for $workspace"));
+        assert!(
+            JBOX_ENTRYPOINT.find("timeout -k 5s 60s env").unwrap()
+                < JBOX_ENTRYPOINT.find("bd init --sandbox").unwrap()
+        );
+        assert!(
+            JBOX_ENTRYPOINT
+                .find("Beads bootstrap failed for $workspace")
+                .unwrap()
+                < JBOX_ENTRYPOINT.find("exec /usr/sbin/sshd").unwrap()
+        );
         assert!(BASE_DOCKERFILE.contains("ENV BEADS_DOLT_SERVER_MODE=embedded"));
         assert!(JBOX_ENTRYPOINT.contains(".beads/embeddeddolt"));
         assert!(JBOX_ENTRYPOINT.contains(".beads/dolt"));
@@ -356,6 +376,41 @@ mod tests {
                 .unwrap()
                 < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
         );
+    }
+
+    #[test]
+    fn stalled_guest_bootstrap_fails_before_ssh_starts() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let su = bin.join("su");
+        fs::write(&su, "#!/bin/sh\nexec sleep 5\n").unwrap();
+        fs::set_permissions(&su, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let start = JBOX_ENTRYPOINT
+            .find("    if timeout -k 5s 60s env BEADS_DOLT_SERVER_MODE")
+            .unwrap();
+        let end = JBOX_ENTRYPOINT[start..]
+            .find("    index=$((index + 1))")
+            .unwrap()
+            + start;
+        let script = JBOX_ENTRYPOINT[start..end].replace("timeout -k 5s 60s", "timeout -k 1s 0.1s");
+        let started = std::time::Instant::now();
+        let output = Command::new("sh")
+            .args(["-c", &script])
+            .env("workspace", temp.path())
+            .env("prefix", "test")
+            .env("JBOX_ONE_BEADS_WORKSPACE", temp.path())
+            .env("JBOX_ONE_BEADS_PREFIX", "test")
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(124));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Beads bootstrap failed"));
     }
 
     #[test]
@@ -441,13 +496,16 @@ mod tests {
             fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
         }
         let start = JBOX_ENTRYPOINT
-            .find("    env BEADS_DOLT_SERVER_MODE=embedded")
+            .find("    if timeout -k 5s 60s env BEADS_DOLT_SERVER_MODE=embedded")
             .unwrap();
         let end = JBOX_ENTRYPOINT[start..]
             .find("            # The isolated Git metadata")
             .unwrap()
             + start;
-        let bootstrap = format!("{}\n        fi\n    '\n", &JBOX_ENTRYPOINT[start..end]);
+        let bootstrap = format!(
+            "{}\n        fi\n    '; then\n        :\n    else\n        exit 1\n    fi\n",
+            &JBOX_ENTRYPOINT[start..end]
+        );
         let run = |skip_import: bool| {
             Command::new("sh")
                 .arg("-c")

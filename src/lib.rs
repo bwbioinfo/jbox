@@ -601,16 +601,21 @@ impl App {
                 return Err(error);
             }
         };
-        let known_hosts_tag = match self.paths.trust_session_host(&ssh_host, &session_id) {
-            Ok(tag) => tag,
-            Err(error) => {
-                let _ = self.engine.stop(&container_name);
-                self.paths.stop_session_ssh_agent(ssh_agent_pid);
-                self.cleanup_worktrees(&repos);
-                let _ = std::fs::remove_dir_all(&session_dir);
-                return Err(error);
-            }
-        };
+        let known_hosts_tag =
+            match self
+                .paths
+                .trust_session_host(&ssh_host, &session_id, repos.len(), || {
+                    self.guest_running_for_ssh(&container_name)
+                }) {
+                Ok(tag) => tag,
+                Err(error) => {
+                    let _ = self.engine.stop(&container_name);
+                    self.paths.stop_session_ssh_agent(ssh_agent_pid);
+                    self.cleanup_worktrees(&repos);
+                    let _ = std::fs::remove_dir_all(&session_dir);
+                    return Err(error);
+                }
+            };
         // Capture the host-visible result of trusted bootstrap before a local
         // TUI can connect. Those files are jbox infrastructure, not agent
         // edits, and their exact digests remain the safety boundary.
@@ -2772,10 +2777,12 @@ done | LC_ALL=C sort -r | head -n 20
                 return Err(error);
             }
         };
-        let known_hosts_tag = match self
-            .paths
-            .trust_session_host(&session.ssh_host, &session.id)
-        {
+        let known_hosts_tag = match self.paths.trust_session_host(
+            &session.ssh_host,
+            &session.id,
+            session.repos.len(),
+            || self.guest_running_for_ssh(&session.container_name),
+        ) {
             Ok(tag) => tag,
             Err(error) => {
                 let _ = self.engine.stop(&session.container_name);
@@ -3088,6 +3095,17 @@ done | LC_ALL=C sort -r | head -n 20
             }
         }
         Ok(())
+    }
+
+    fn guest_running_for_ssh(&self, container_name: &str) -> Result<bool> {
+        if !self.engine.is_running(container_name)? {
+            let logs = self
+                .engine
+                .startup_logs(container_name)
+                .unwrap_or_else(|error| format!("could not retrieve guest logs: {error:#}"));
+            bail!("guest exited before SSH was ready: {logs}");
+        }
+        Ok(true)
     }
 
     fn require_running(&self, session: &Session) -> Result<()> {

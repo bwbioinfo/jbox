@@ -227,6 +227,14 @@ to create a separate fresh workspace. `--include-host-changes` requires `--new`
 so it cannot be silently ignored during reconnection. `--no-attach` reuses or
 restarts the guest without opening Jcode. Cleaning a session removes its
 worktree and continuity marker, so it is not eligible for automatic reconnection.
+On a cold guest, Jbox reports SSH readiness progress while the guest prepares its
+workspaces. If the guest exits before SSH starts, startup fails rather than
+waiting for the full readiness deadline. A Docker command that stops responding
+also fails with an explicit timeout instead of leaving reconnection silent.
+Newly built guest images bound Beads hydration to 60 seconds per workspace and
+report a bootstrap failure before SSH starts. Retained sessions reuse their saved
+image, so an older session does not acquire the new guest-entrypoint timeout
+until a fresh workspace is created with `--new`.
 Run each of the following complete commands from a participating
 host repository. Jbox selects its only matching session or presents a picker:
 

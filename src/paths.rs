@@ -569,7 +569,16 @@ impl JboxPaths {
     /// and exposes no per-connection known-hosts option. Trust only this
     /// loopback guest key, tag the line, and remove exactly that line at stop.
     /// The guest never receives the host's `.ssh` directory.
-    pub fn trust_session_host(&self, host: &str, session_id: &str) -> Result<String> {
+    pub fn trust_session_host(
+        &self,
+        host: &str,
+        session_id: &str,
+        workspace_count: usize,
+        mut guest_running: impl FnMut() -> Result<bool>,
+    ) -> Result<String> {
+        if !guest_running()? {
+            bail!("jbox guest {session_id} exited before SSH became ready");
+        }
         let home = BaseDirs::new().context("could not determine home directory")?;
         let ssh_dir = home.home_dir().join(".ssh");
         fs::create_dir_all(&ssh_dir)?;
@@ -581,14 +590,25 @@ impl JboxPaths {
         // attempt. This is only readiness probing of a per-session loopback
         // address, before we publish any session state.
         // Guest bootstrap may hydrate several independent Beads databases
-        // before sshd starts. Retain a bounded deadline but allow that useful
-        // session-local preparation to complete on a cold Kata guest.
-        const SSH_READY_TIMEOUT_SECONDS: u64 = 300;
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(SSH_READY_TIMEOUT_SECONDS);
+        // before sshd starts. A single workspace should not silently wait five
+        // minutes, but leave more time when multiple workspaces need hydration.
+        let ssh_ready_timeout_seconds = ssh_ready_timeout_seconds(workspace_count);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(ssh_ready_timeout_seconds);
+        let mut next_progress = started + std::time::Duration::from_secs(5);
         let mut key = None;
         let mut last_error = None;
         while std::time::Instant::now() < deadline {
+            if !guest_running()? {
+                bail!("jbox guest {session_id} exited before SSH became ready");
+            }
+            if std::time::Instant::now() >= next_progress {
+                eprintln!(
+                    "Waiting for jbox guest {session_id} SSH readiness ({}s elapsed, up to {ssh_ready_timeout_seconds}s)...",
+                    started.elapsed().as_secs()
+                );
+                next_progress = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            }
             let output = Command::new("ssh-keyscan")
                 .args(["-T", "1", "-t", "ed25519", host])
                 .output()
@@ -605,10 +625,10 @@ impl JboxPaths {
         }
         let key = key.with_context(|| match last_error {
             Some(error) => {
-                format!("could not obtain SSH host key for jbox guest within {SSH_READY_TIMEOUT_SECONDS} seconds: {error}")
+                format!("could not obtain SSH host key for jbox guest within {ssh_ready_timeout_seconds} seconds: {error}")
             }
             None => format!(
-                "could not obtain SSH host key for jbox guest within {SSH_READY_TIMEOUT_SECONDS} seconds"
+                "could not obtain SSH host key for jbox guest within {ssh_ready_timeout_seconds} seconds"
             ),
         })?;
         let tag = format!("# jbox:{session_id}");
@@ -642,7 +662,7 @@ impl JboxPaths {
         fs::write(
             &file,
             format!(
-                "Host jbox\n  HostName {}\n  Port {}\n  User jbox\n  IdentityFile {}\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n  UserKnownHostsFile {}\n  ForwardAgent no\n",
+                "Host jbox\n  HostName {}\n  Port {}\n  User jbox\n  IdentityFile {}\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n  UserKnownHostsFile {}\n  ForwardAgent no\n  BatchMode yes\n  ConnectTimeout 10\n  ConnectionAttempts 1\n  ServerAliveInterval 15\n  ServerAliveCountMax 3\n",
                 session.ssh_host,
                 session.ssh_port,
                 dir.join("id_ed25519").display(),
@@ -665,6 +685,10 @@ impl JboxPaths {
         fs::set_permissions(&file, fs::Permissions::from_mode(0o700))?;
         Ok(file)
     }
+}
+
+fn ssh_ready_timeout_seconds(workspace_count: usize) -> u64 {
+    (60_u64 + 60_u64.saturating_mul(workspace_count.max(1) as u64)).min(300)
 }
 
 fn valid_jcode_session_id(value: &str) -> bool {
@@ -935,6 +959,76 @@ fn canonicalize_existing_ancestor(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{RepoState, SessionState};
+    use chrono::Utc;
+
+    #[test]
+    fn guest_ssh_config_bounds_dead_connection_attempts() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = JboxPaths {
+            data: temp.path().join("data"),
+            cache: temp.path().join("cache"),
+            sessions: temp.path().join("sessions"),
+            credentials: temp.path().join("credentials"),
+        };
+        let now = Utc::now();
+        let session = Session {
+            version: 1,
+            id: "test-guest".into(),
+            state: SessionState::Running,
+            container_name: "jbox-test-guest".into(),
+            ssh_host: "127.0.0.2".into(),
+            ssh_port: 2222,
+            ssh_agent_pid: 0,
+            known_hosts_tag: "# jbox:test-guest".into(),
+            created_at: now,
+            last_activity_at: now,
+            ttl_seconds: 3600,
+            config_path: temp.path().join("config"),
+            launch_directory: None,
+            image: "test".into(),
+            repos: Vec::<RepoState>::new(),
+            jcode_default_provider: None,
+            jcode_default_model: None,
+            git_access_policy: None,
+            brokered_plans: vec![],
+            sync: None,
+        };
+        fs::create_dir_all(paths.session_ssh_dir(&session.id)).unwrap();
+        let config = fs::read_to_string(paths.write_ssh_config(&session).unwrap()).unwrap();
+        for option in [
+            "BatchMode yes",
+            "ConnectTimeout 10",
+            "ConnectionAttempts 1",
+            "ServerAliveInterval 15",
+            "ServerAliveCountMax 3",
+        ] {
+            assert!(config.contains(option), "missing {option}");
+        }
+    }
+
+    #[test]
+    fn ssh_readiness_stops_when_guest_has_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = JboxPaths {
+            data: temp.path().join("data"),
+            cache: temp.path().join("cache"),
+            sessions: temp.path().join("sessions"),
+            credentials: temp.path().join("credentials"),
+        };
+        let error = paths
+            .trust_session_host("127.0.0.2", "test-guest", 1, || Ok(false))
+            .unwrap_err();
+        assert!(error.to_string().contains("exited before SSH became ready"));
+    }
+
+    #[test]
+    fn ssh_readiness_budget_scales_with_workspaces_but_remains_bounded() {
+        assert_eq!(ssh_ready_timeout_seconds(1), 120);
+        assert_eq!(ssh_ready_timeout_seconds(3), 240);
+        assert_eq!(ssh_ready_timeout_seconds(100), 300);
+    }
+
     #[test]
     fn guest_paths_are_strict() {
         assert!(safe_target("/workspace/project").is_ok());
