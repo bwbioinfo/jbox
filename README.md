@@ -257,7 +257,10 @@ jbox clean
 
 An explicit `jbox attach SESSION` invoked from a participating repository also
 opens that repository's guest workspace. When invoked elsewhere, it opens the
-session's primary workspace.
+session's primary workspace. `jbox resume` likewise attaches after restarting a
+stopped guest (including with `--refresh-image`), or attaches immediately if the
+guest is already running. An explicit session ID respects the invoking repository;
+from outside the session's repositories it opens the primary workspace.
 
 When jbox opens Jcode or a guest shell from an interactive terminal, it first
 renders a boxed **📦 JBOX GUEST** marker and sets the terminal title to

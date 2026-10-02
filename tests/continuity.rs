@@ -255,4 +255,54 @@ fn repeated_run_reuses_the_recorded_workspace_without_starting_another_vm() {
             .lines()
             .all(|line| line.starts_with("inspect "))
     );
+
+    // Failed restarts must not launch Jcode. An already-running session should
+    // attach whether selected by ID or by the invoking repository.
+    fs::remove_file(&jcode_log).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_jbox"))
+        .args(["resume", &session.id])
+        .current_dir(&repository)
+        .env("XDG_DATA_HOME", temp.path().join("data"))
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("JBOX_TEST_DOCKER_LOG", &docker_log)
+        .env("JBOX_TEST_JCODE_LOG", &jcode_log)
+        .env(
+            "PATH",
+            format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!jcode_log.exists(), "a failed restart attached to Jcode");
+
+    stopped.state = SessionState::Running;
+    store.save(&stopped).unwrap();
+    for args in [vec!["resume", &session.id], vec!["resume"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_jbox"))
+            .args(&args)
+            .current_dir(&repository)
+            .env("XDG_DATA_HOME", temp.path().join("data"))
+            .env("XDG_CACHE_HOME", temp.path().join("cache"))
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .env("JBOX_TEST_DOCKER_LOG", &docker_log)
+            .env("JBOX_TEST_JCODE_LOG", &jcode_log)
+            .env(
+                "PATH",
+                format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "jbox resume failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            fs::read_to_string(&jcode_log)
+                .unwrap()
+                .contains("--remote-working-dir /workspace/project")
+        );
+        fs::remove_file(&jcode_log).unwrap();
+    }
 }

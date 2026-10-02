@@ -2666,17 +2666,24 @@ done | LC_ALL=C sort -r | head -n 20
         }
     }
 
-    /// Resume a stopped session from its retained worktrees. If the retained
-    /// session is already live, reconnect to its Jcode conversation instead.
-    /// The worktree branch and image are reused. A fresh session SSH key and
-    /// runtime state are created only for a stopped guest. A visible dirty
-    /// worktree gets an explicit checkpoint offer before recreating its
-    /// isolated guest Git metadata.
+    /// Restart a stopped session without attaching. Internal callers use this
+    /// when they need to continue a larger workflow before opening Jcode.
     pub fn resume(&self, id: &str) -> Result<()> {
-        self.resume_with_image_refresh(id, false)
+        self.restart_session_with_image_refresh(id, false)
     }
 
+    /// Restart a stopped session and attach to Jcode, or attach directly when
+    /// the retained session is already running. Select the invoking repository
+    /// when this session contains multiple worktrees.
     pub fn resume_with_image_refresh(&self, id: &str, refresh_image: bool) -> Result<()> {
+        self.restart_session_with_image_refresh(id, refresh_image)?;
+        self.attach(id)
+    }
+
+    /// Reuse the worktree branch and image. A fresh SSH key and runtime state
+    /// are created only for a stopped guest. Offer to checkpoint visible dirty
+    /// worktrees before recreating isolated guest Git metadata.
+    fn restart_session_with_image_refresh(&self, id: &str, refresh_image: bool) -> Result<()> {
         let mut session = self.load_session(id)?;
         if session.sync.is_some() {
             bail!(
@@ -2687,9 +2694,8 @@ done | LC_ALL=C sort -r | head -n 20
             if refresh_image {
                 bail!("cannot refresh the image of running session {id}; stop it first");
             }
-            let mount = session.repos[0].mount.clone();
-            println!("jbox session {id} is already running. Attaching to it.");
-            return self.attach_session(&mut session, &mount);
+            println!("jbox session {id} is already running.");
+            return Ok(());
         }
         if session
             .repos
@@ -2825,7 +2831,6 @@ done | LC_ALL=C sort -r | head -n 20
             "jbox session {} resumed on {}:{}",
             session.id, session.ssh_host, session.ssh_port
         );
-        println!("Use `jbox attach {}` to reconnect.", session.id);
         Ok(())
     }
 
@@ -2923,7 +2928,9 @@ done | LC_ALL=C sort -r | head -n 20
             println!("resume cancelled.");
             return Ok(());
         }
-        self.resume_with_image_refresh(&session.id, refresh_image)
+        self.restart_session_with_image_refresh(&session.id, refresh_image)?;
+        let mut session = self.load_session(&session.id)?;
+        self.attach_session(&mut session, &repo.mount)
     }
 
     /// Reconnect the most recently active retained workspace for the requested
