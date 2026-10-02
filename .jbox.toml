@@ -30,9 +30,9 @@ persistent_credentials = true
 # These project defaults override the host Jcode client for jbox sessions.
 # Remove an option to inherit that value from the host Jcode client instead.
 default_provider = "openai"
-default_model = "gpt-6-sol"
+default_model = "gpt-6.1-sol"
 openai_reasoning_effort = "high"
-openai_service_tier = "off"
+openai_service_tier = "priority"
 
 [[jcode.skills]]
 # Every configured GitHub repository is installed by `gh skill install` in the guest.
