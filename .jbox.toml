@@ -29,10 +29,10 @@ lan = false
 persistent_credentials = true
 # These project defaults override the host Jcode client for jbox sessions.
 # Remove an option to inherit that value from the host Jcode client instead.
-# Claude-first startup, using the newest subscription-listed Sonnet tier checked
-# on 2026-10-06. Re-check the catalog when newer versions become available.
+# Claude-first startup with the user-selected Sonnet 5.5 model.
+# A stale catalog is not permission to substitute an older version.
 default_provider = "claude"
-default_model = "claude-sonnet-5"
+default_model = "claude-sonnet-5-5"
 openai_reasoning_effort = "high"
 openai_service_tier = "priority"
 
