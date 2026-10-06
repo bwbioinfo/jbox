@@ -29,8 +29,10 @@ lan = false
 persistent_credentials = true
 # These project defaults override the host Jcode client for jbox sessions.
 # Remove an option to inherit that value from the host Jcode client instead.
-default_provider = "openai"
-default_model = "gpt-6.1-sol"
+# Claude-first startup, using the newest subscription-listed Sonnet tier checked
+# on 2026-10-06. Re-check the catalog when newer versions become available.
+default_provider = "claude"
+default_model = "claude-sonnet-5"
 openai_reasoning_effort = "high"
 openai_service_tier = "priority"
 
@@ -57,16 +59,27 @@ At session start, before spawning workers, and after a provider error, check
 guest-reported, authenticated providers and their live allowance windows as eligible.
 
 For substantial work, split independent tasks and route new swarm workers to
-the appropriate viable provider and model. Prefer the provider with the most
-available included capacity that can complete the task reliably. Reserve scarce
-or stronger capacity for planning, integration, difficult debugging, and
-adversarial review. Use another viable provider for bounded implementation,
-research, bulk reading, and mechanical verification.
+the appropriate viable subscription-backed model. Prioritize Claude for new
+work and deplete its included allowance before OpenAI, even when OpenAI has
+more remaining capacity. Use OpenAI only when Claude is exhausted, cannot
+safely fit the next task within its live limits, is unauthenticated or unavailable,
+or lacks a required capability.
+
+For both Claude and OpenAI, use the newest catalog-listed version of the chosen
+model tier. Check `swarm list_models` or
+`jcode --quiet --provider <id> model list --json` for exact subscription routes.
+Adjust only the model tier and supported reasoning effort to the problem, not
+the model's age. Use lighter tiers for bounded implementation, research, bulk
+reading, and mechanical verification. Use stronger tiers for planning,
+integration, difficult debugging, and adversarial review. Never invent model
+names, inherit a stale worker default unchecked, or use an older version without
+explicit user approval. Pass the selected route explicitly for new workers.
 
 Keep an active conversation on its provider unless a fresh worker has a clean
-handoff. When a provider approaches a limit, stop assigning it new work and
-route eligible new tasks to another viable provider. Do not create work merely
-to consume allowance, retry quota failures to evade limits, use unapproved
+handoff. When Claude cannot safely fit the next task within its remaining
+allowance, route eligible new tasks to OpenAI. Re-check Claude's eligibility
+after its allowance resets and prefer it again for new work. Do not create work
+merely to consume allowance, retry quota failures to evade limits, use unapproved
 accounts, or enable API or extra paid usage without explicit user approval.
 """
 
