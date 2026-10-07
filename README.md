@@ -201,8 +201,8 @@ These instructions apply to new Jcode conversations in the jbox session.
 ```toml
 [jcode]
 default_provider = "openai"
-default_model = "gpt-5.6-terra"
-openai_reasoning_effort = "high"
+default_model = "gpt-6.1-sol"
+openai_reasoning_effort = "medium"
 openai_service_tier = "off" # Equivalent to Jcode's `/fast default off`.
 ```
 
@@ -526,8 +526,8 @@ lan = false
 persistent_credentials = true
 # Omit an individual key to inherit that setting from the host Jcode client.
 default_provider = "openai"
-default_model = "gpt-5.6-terra"
-openai_reasoning_effort = "high"
+default_model = "gpt-6.1-sol"
+openai_reasoning_effort = "medium"
 openai_service_tier = "off"
 
 [git]

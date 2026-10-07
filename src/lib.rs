@@ -54,8 +54,8 @@ persistent_credentials = true
 # These project defaults override the host Jcode client for jbox sessions.
 # Remove an option to inherit that value from the host Jcode client instead.
 default_provider = "openai"
-default_model = "gpt-5.6-terra"
-openai_reasoning_effort = "high"
+default_model = "gpt-6.1-sol"
+openai_reasoning_effort = "medium"
 openai_service_tier = "off"
 
 # Install all discoverable bwbioinfo skills inside the guest after GitHub CLI
@@ -4567,6 +4567,13 @@ merge = "user-confirmed"
 
         assert!(temp.path().join(".jbox.toml").is_file());
         let (config, _) = Config::load(temp.path()).unwrap();
+        assert_eq!(config.jcode.default_provider.as_deref(), Some("openai"));
+        assert_eq!(config.jcode.default_model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(
+            config.jcode.openai_reasoning_effort.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(config.jcode.openai_service_tier.as_deref(), Some("off"));
         assert_eq!(config.jcode.skills.len(), 1);
         assert_eq!(config.jcode.skills[0].repository, "bwbioinfo/skills");
         assert_eq!(config.jcode.skills[0].skill, None);
