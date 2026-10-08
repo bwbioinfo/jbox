@@ -11,11 +11,11 @@ clap = { version = "4.5", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 rand = "0.9"
+libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 toml = "0.9"
-uuid = { version = "1.18", features = ["v4", "serde"] }
-
-[dev-dependencies]
+toml_edit = "0.25"
 tempfile = "3.23"
+uuid = { version = "1.18", features = ["v4", "serde"] }

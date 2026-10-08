@@ -177,13 +177,106 @@ impl Default for Jcode {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Agent {
+    /// Legacy user-owned guidance, retained unchanged for compatibility.
     pub instructions: Option<String>,
+    #[serde(default)]
+    pub jbox: Prompt,
+    #[serde(default)]
+    pub project: Prompt,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Prompt {
+    pub instructions: Option<String>,
+}
+
+// Individual limits preserve the legacy allowance. The rendered limit includes
+// headings and separators and bounds the total global AGENTS.md mount to 128 KiB.
+const MAX_PROMPT_BYTES: usize = 65_536;
+const MAX_RENDERED_PROMPT_BYTES: usize = 131_072;
+
+impl Agent {
+    /// Render only populated sections, preserving their text and putting project
+    /// guidance last. An empty project placeholder does not create a blank mount.
+    pub fn render_instructions(&self) -> Option<String> {
+        let sections = [
+            (
+                "# Jbox session instructions",
+                self.jbox.instructions.as_deref(),
+            ),
+            (
+                "# Legacy session instructions",
+                self.instructions.as_deref(),
+            ),
+            (
+                "# Project instructions",
+                self.project.instructions.as_deref(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(heading, text)| {
+            text.filter(|text| !text.trim().is_empty())
+                .map(|text| format!("{heading}\n\n{text}"))
+        })
+        .collect::<Vec<_>>();
+        if sections.is_empty() {
+            None
+        } else {
+            Some(sections.join("\n\n"))
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (name, instructions, allow_empty) in [
+            (
+                "jcode.agent.instructions",
+                self.instructions.as_deref(),
+                false,
+            ),
+            (
+                "jcode.agent.jbox.instructions",
+                self.jbox.instructions.as_deref(),
+                false,
+            ),
+            (
+                "jcode.agent.project.instructions",
+                self.project.instructions.as_deref(),
+                true,
+            ),
+        ] {
+            if let Some(instructions) = instructions
+                && ((!allow_empty && instructions.trim().is_empty())
+                    || instructions.contains('\0')
+                    || instructions.len() > MAX_PROMPT_BYTES)
+            {
+                if allow_empty {
+                    bail!(
+                        "{name} must be NUL-free and at most 65536 bytes; an empty project placeholder is allowed"
+                    );
+                }
+                bail!("{name} must be non-empty, NUL-free, and at most 65536 bytes");
+            }
+        }
+        if self
+            .render_instructions()
+            .is_some_and(|text| text.len() > MAX_RENDERED_PROMPT_BYTES)
+        {
+            bail!(
+                "combined rendered agent instructions must be at most 131072 bytes, including section headings and separators"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillSource {
     pub repository: String,
+    /// Ownership metadata for selective init updates, not runtime skill policy.
+    #[serde(default)]
+    pub managed: bool,
     /// When omitted, install every discoverable skill from the repository.
     pub skill: Option<String>,
     pub pin: Option<String>,
@@ -492,22 +585,22 @@ impl Config {
         let config_path = primary.join(".jbox.toml");
         let mut config = if config_path.exists() {
             let text = std::fs::read_to_string(&config_path).context("cannot read .jbox.toml")?;
-            toml::from_str::<Config>(&text).context("invalid .jbox.toml")?
+            Self::from_toml(&text)?
         } else {
-            Config {
-                version: 1,
-                runtime: Runtime::default(),
-                resources: Resources::default(),
-                image: Image::default(),
-                workspace: Workspace::default(),
-                repos: Vec::new(),
-                network: Network::default(),
-                jcode: Jcode::default(),
-                git: Git::default(),
-                mounts: Vec::new(),
-                path: PathBuf::new(),
-            }
+            Self::from_toml("version = 1")?
         };
+        config.path = config_path;
+        for mount in &mut config.mounts {
+            let path = resolve_under(&primary, &mount.source)?;
+            mount.source_path = Some(path);
+        }
+        Ok((config, primary))
+    }
+
+    /// Parse and validate declarative configuration without resolving host paths.
+    /// `load` additionally discovers the repository and resolves mount sources.
+    pub fn from_toml(text: &str) -> Result<Self> {
+        let mut config = toml::from_str::<Config>(text).context("invalid .jbox.toml")?;
         if config.version != 1 {
             bail!(
                 "unsupported .jbox.toml version {}; only version = 1 is supported",
@@ -540,13 +633,7 @@ impl Config {
         if !config.jcode.skills.is_empty() {
             validate_skills(&config.jcode.skills, &config.network, &config.git)?;
         }
-        if let Some(instructions) = config.jcode.agent.instructions.as_deref()
-            && (instructions.trim().is_empty()
-                || instructions.contains('\0')
-                || instructions.len() > 65_536)
-        {
-            bail!("jcode.agent.instructions must be non-empty, NUL-free, and at most 65536 bytes");
-        }
+        config.jcode.agent.validate()?;
         for (name, value) in [
             (
                 "jcode.default_provider",
@@ -583,12 +670,7 @@ impl Config {
         {
             bail!("jcode.openai_service_tier must be `priority`, `flex`, or `off`");
         }
-        config.path = config_path;
-        for mount in &mut config.mounts {
-            let path = resolve_under(&primary, &mount.source)?;
-            mount.source_path = Some(path);
-        }
-        Ok((config, primary))
+        Ok(config)
     }
 
     /// Resolve the Git root that owns a path without requiring a valid jbox
@@ -1131,6 +1213,199 @@ fn parse_duration(input: &str) -> Result<i64> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn legacy_agent_instructions_remain_optional_and_unchanged() {
+        let absent = Config::from_toml("version = 1").unwrap();
+        assert!(absent.jcode.agent.instructions.is_none());
+        assert!(absent.jcode.agent.render_instructions().is_none());
+        let config =
+            Config::from_toml("version = 1\n[jcode.agent]\ninstructions = ' Legacy guidance '\n")
+                .unwrap();
+        assert_eq!(
+            config.jcode.agent.instructions.as_deref(),
+            Some(" Legacy guidance ")
+        );
+        assert!(config.jcode.agent.jbox.instructions.is_none());
+        assert!(config.jcode.agent.project.instructions.is_none());
+        assert_eq!(
+            config.jcode.agent.render_instructions().as_deref(),
+            Some("# Legacy session instructions\n\n Legacy guidance ")
+        );
+    }
+
+    #[test]
+    fn agent_renders_distinct_sections_in_precedence_order() {
+        let config = Config::from_toml(
+            "version = 1\n[jcode.agent]\ninstructions = 'Legacy'\n[jcode.agent.project]\ninstructions = 'Project'\n[jcode.agent.jbox]\ninstructions = 'Managed'\n",
+        ).unwrap();
+        assert_eq!(
+            config.jcode.agent.render_instructions().as_deref(),
+            Some(
+                "# Jbox session instructions\n\nManaged\n\n# Legacy session instructions\n\nLegacy\n\n# Project instructions\n\nProject"
+            )
+        );
+        let config = Config::from_toml(
+            "version = 1\n[jcode.agent.project]\ninstructions = 'Project only'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.jcode.agent.render_instructions().as_deref(),
+            Some("# Project instructions\n\nProject only")
+        );
+    }
+
+    #[test]
+    fn empty_project_placeholder_does_not_render_a_mount() {
+        for value in ["", " \n\t"] {
+            let text = format!(
+                "version = 1\n[jcode.agent.project]\ninstructions = {}\n",
+                toml::Value::String(value.into())
+            );
+            let config = Config::from_toml(&text).unwrap();
+            assert_eq!(
+                config.jcode.agent.project.instructions.as_deref(),
+                Some(value)
+            );
+            assert!(config.jcode.agent.render_instructions().is_none());
+        }
+        let config = Config::from_toml("version = 1\n[jcode.agent.jbox]\ninstructions = 'Managed'\n[jcode.agent.project]\ninstructions = ''\n").unwrap();
+        assert_eq!(
+            config.jcode.agent.render_instructions().as_deref(),
+            Some("# Jbox session instructions\n\nManaged")
+        );
+    }
+
+    #[test]
+    fn validates_individual_prompt_limits_and_unknown_fields() {
+        for section in ["jcode.agent", "jcode.agent.jbox", "jcode.agent.project"] {
+            for value in ["nul\0text".to_owned(), "x".repeat(MAX_PROMPT_BYTES + 1)] {
+                let text = format!(
+                    "version = 1\n[{section}]\ninstructions = {}\n",
+                    toml::Value::String(value)
+                );
+                let error = Config::from_toml(&text).unwrap_err().to_string();
+                assert!(
+                    error.contains(&format!("{section}.instructions")),
+                    "{error}"
+                );
+            }
+            let text = format!(
+                "version = 1\n[{section}]\ninstructions = '{}'\n",
+                "x".repeat(MAX_PROMPT_BYTES)
+            );
+            assert!(Config::from_toml(&text).is_ok());
+            let text = format!("version = 1\n[{section}]\nunexpected = true\n");
+            assert!(Config::from_toml(&text).is_err());
+        }
+        for section in ["jcode.agent", "jcode.agent.jbox"] {
+            for value in ["", "  "] {
+                let text = format!("version = 1\n[{section}]\ninstructions = '{value}'\n");
+                assert!(Config::from_toml(&text).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn combined_prompt_limit_includes_headings_and_separators() {
+        let prefix = "# Jbox session instructions\n\n\n\n# Project instructions\n\n";
+        let project_bytes = MAX_RENDERED_PROMPT_BYTES - MAX_PROMPT_BYTES - prefix.len();
+        let text = |project_bytes| {
+            format!(
+                "version = 1\n[jcode.agent.jbox]\ninstructions = '{}'\n[jcode.agent.project]\ninstructions = '{}'\n",
+                "x".repeat(MAX_PROMPT_BYTES),
+                "y".repeat(project_bytes)
+            )
+        };
+        let config = Config::from_toml(&text(project_bytes)).unwrap();
+        assert_eq!(
+            config.jcode.agent.render_instructions().unwrap().len(),
+            MAX_RENDERED_PROMPT_BYTES
+        );
+        let error = Config::from_toml(&text(project_bytes + 1))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("131072 bytes, including section headings and separators"));
+    }
+
+    #[test]
+    fn managed_skill_metadata_defaults_and_preserves_validation() {
+        let config = Config::from_toml("version = 1\n[[jcode.skills]]\nrepository = 'owner/skills'\nmanaged = true\n[[jcode.skills]]\nrepository = 'owner/custom'\n").unwrap();
+        assert!(config.jcode.skills[0].managed);
+        assert!(!config.jcode.skills[1].managed);
+        let config = Config::from_toml(
+            "version = 1\n[jcode.skills]\nrepository = 'owner/skills'\nmanaged = true\n",
+        )
+        .unwrap();
+        assert!(config.jcode.skills[0].managed);
+        assert!(
+            Config::from_toml(
+                "version = 1\n[jcode.skills]\nrepository = 'invalid'\nmanaged = true\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn from_toml_retains_static_validation_without_resolving_paths() {
+        for text in [
+            "version = 2",
+            "version = 1\n[runtime]\nbackend = 'docker'",
+            "version = 1\n[resources]\ncpus = 0",
+            "version = 1\n[resources]\nttl = '0h'",
+            "version = 1\n[resources]\nmemory = ''",
+            "version = 1\n[resources]\ndisk = ''",
+            "version = 1\n[network]\ninternet = false",
+            "version = 1\n[git]\ncredentials = 'unknown'",
+            "version = 1\n[jcode]\ndefault_provider = ''",
+            "version = 1\n[jcode]\ndefault_model = ''",
+            "version = 1\n[jcode]\nopenai_reasoning_effort = 'unknown'",
+            "version = 1\n[jcode]\nopenai_service_tier = 'unknown'",
+            "version = 1\n[git.author]\nname = ''",
+        ] {
+            assert!(Config::from_toml(text).is_err(), "{text}");
+        }
+        let config = Config::from_toml("version = 1\n[resources]\nttl = '2h'\n[[mounts]]\nsource = 'does-not-exist'\ntarget = '/data'\n").unwrap();
+        assert_eq!(config.resources.ttl_seconds, 7200);
+        assert!(config.path.as_os_str().is_empty());
+        assert!(config.mounts[0].source_path.is_none());
+    }
+
+    #[test]
+    fn load_preserves_defaults_repository_discovery_and_mount_resolution() {
+        let temp = tempdir().unwrap();
+        init_test_repository(temp.path());
+        let canonical = temp.path().canonicalize().unwrap();
+        let (config, primary) = Config::load(temp.path()).unwrap();
+        assert_eq!(primary, canonical);
+        assert_eq!(config.path, primary.join(".jbox.toml"));
+        assert_eq!(config.resources.ttl_seconds, 86_400);
+        assert_eq!(config.runtime.backend, "kata");
+        std::fs::create_dir(primary.join("data")).unwrap();
+        std::fs::write(
+            primary.join(".jbox.toml"),
+            "version = 1\n[resources]\nttl = '2h'\n[[mounts]]\nsource = 'data'\ntarget = '/data'\n",
+        )
+        .unwrap();
+        let (config, resolved) = Config::load(&primary.join("data")).unwrap();
+        assert_eq!(resolved, primary);
+        assert_eq!(config.resources.ttl_seconds, 7200);
+        assert_eq!(
+            config.mounts[0].source_path.as_ref(),
+            Some(&primary.join("data"))
+        );
+        std::fs::write(
+            primary.join(".jbox.toml"),
+            "version = 1\n[[mounts]]\nsource = 'missing'\ntarget = '/data'\n",
+        )
+        .unwrap();
+        assert!(
+            Config::load(&primary)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot resolve configured path missing")
+        );
+    }
     #[test]
     fn parses_durations() {
         assert_eq!(parse_duration("24h").unwrap(), 86400);
@@ -1151,6 +1426,7 @@ mod tests {
                 repository: "bwbioinfo/skills".into(),
                 skill: None,
                 pin: None,
+                managed: false,
                 allow_hidden_dirs: false,
                 private: true,
             },
@@ -1158,6 +1434,7 @@ mod tests {
                 repository: "K-Dense-AI/scientific-agent-skills".into(),
                 skill: Some("scanpy".into()),
                 pin: Some("v1.2.3".into()),
+                managed: false,
                 allow_hidden_dirs: true,
                 private: false,
             },
@@ -1185,6 +1462,7 @@ mod tests {
                     repository: "file:///tmp/skills".into(),
                     skill: None,
                     pin: None,
+                    managed: false,
                     allow_hidden_dirs: false,
                     private: false,
                 }],
@@ -1199,6 +1477,7 @@ mod tests {
                     repository: "bwbioinfo/skills".into(),
                     skill: Some("--all".into()),
                     pin: None,
+                    managed: false,
                     allow_hidden_dirs: false,
                     private: true,
                 }],
@@ -1345,6 +1624,7 @@ allowed_operations = ["clone", "fetch"]
             repository: "bwbioinfo/skills".into(),
             skill: None,
             pin: None,
+            managed: false,
             allow_hidden_dirs: false,
             private: true,
         }];
@@ -1384,6 +1664,7 @@ allowed_operations = ["clone", "fetch"]
             repository: "K-Dense-AI/scientific-agent-skills".into(),
             skill: Some("scanpy".into()),
             pin: None,
+            managed: false,
             allow_hidden_dirs: false,
             private: false,
         };

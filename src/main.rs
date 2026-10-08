@@ -35,6 +35,9 @@ enum Command {
         /// Debian package to install in the generated container image. Repeat for more packages.
         #[arg(long = "tool", value_name = "APT_PACKAGE")]
         tools: Vec<String>,
+        /// Refresh managed model versions, skills and Jbox instructions without changing project settings.
+        #[arg(long, conflicts_with = "tools")]
+        update: bool,
     },
     Ls {
         /// List every jbox session across all repositories.
@@ -237,6 +240,12 @@ enum PolicyCommand {
 
 fn main() -> Result<()> {
     let cli = Cli::parse_from(normalized_args());
+    if let Command::Init {
+        path, update: true, ..
+    } = &cli.command
+    {
+        return jbox::init::update_project(path);
+    }
     let app = jbox::App::open()?;
     match cli.command {
         Command::Run {
@@ -258,7 +267,7 @@ fn main() -> Result<()> {
                 "Use `jbox attach {id}` to reconnect, or `jbox status {id}` to inspect changes."
             );
         }
-        Command::Init { path, tools } => app.init(&path, &tools)?,
+        Command::Init { path, tools, .. } => app.init(&path, &tools)?,
         Command::Ls { all } => {
             if all {
                 app.list_all()?
@@ -464,6 +473,16 @@ fn normalized_args() -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn init_update_is_explicit_and_cannot_install_tools() {
+        let cli = Cli::try_parse_from(["jbox", "init", "--update", "project"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Init { path, tools, update: true } if path == std::path::Path::new("project") && tools.is_empty())
+        );
+        assert!(Cli::try_parse_from(["jbox", "init", "--update", "--tool", "jq"]).is_err());
+        let cli = Cli::try_parse_from(["jbox", "init"]).unwrap();
+        assert!(matches!(cli.command, Command::Init { update: false, .. }));
+    }
     #[test]
     fn bare_path_becomes_run() {
         let args = [OsString::from("jbox"), OsString::from(".")];

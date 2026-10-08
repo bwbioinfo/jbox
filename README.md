@@ -109,11 +109,63 @@ jbox .
 
 `jbox init` creates a `.jbox.toml` for the current Git repository and, when it
 does not already exist, a `.jbox/Dockerfile` that extends jbox's runtime image.
-It never overwrites either file. Pass `--tool` repeatedly to install Debian
+Ordinary initialization never overwrites either file. Pass `--tool` repeatedly to install Debian
 packages in the generated image, for example `jbox init --tool ripgrep --tool
 jq`. For any other customization, edit the generated Dockerfile and add normal
 Dockerfile instructions. Its content is hashed, so the next `jbox .` rebuilds
 the project image automatically when it changes.
+
+### Refresh managed defaults without reinitializing the project
+
+After upgrading the installed Jbox binary, run this from your repository:
+
+```bash
+jbox init --update
+```
+
+An explicit repository path is also supported, including a nested directory.
+`--update` requires an existing `.jbox.toml` and cannot be combined with
+`--tool`. It uses **bundled defaults from the installed Jbox version**, not a
+live model catalog or network download. Its scope is deliberately narrow:
+
+- Refresh recognized rolling model versions within the selected family and
+  provider: GPT Sol, Claude Sonnet/Opus, North Mini Code, and Qwen 27B.
+  Provider, effort, service tier, and credential choices remain unchanged.
+  Missing model settings stay inherited. Custom, newer, dated, and context-size
+  variants stay untouched, as do upgrades incompatible with preserved effort
+  (for example, Sol's unsupported `none` or `minimal` effort).
+- Merge bundled default skill sources into a collection that opted in with
+  `managed = true`. Existing custom sources, pins, selectors, private-source
+  declarations, and hidden-directory settings are preserved. An existing source
+  from the same repository blocks a broader default, so a pinned named skill
+  cannot be bypassed by an unpinned whole-repository install. Missing skills and
+  explicit `skills = []` stay untouched. `managed = false` explicitly opts out.
+  Only an unmodified, unpinned legacy default source with no ownership flag can
+  be adopted automatically, and duplicate matches are not guessed.
+- Replace only `[jcode.agent.jbox].instructions` with the managed prompt from
+  `templates/jbox-prompt.md`. Create an empty project authoring section if needed,
+  but never replace `[jcode.agent.project]` or project `AGENTS.md` content.
+
+Resources, runtime, image, workspace, repositories, mounts, network, Git policy,
+and every other project setting remain unchanged. No Dockerfile, credential,
+Jbox global state, or live session is initialized or modified. Skill installation
+still happens inside a **fresh guest**, not during this command. Retained guests
+and already imported skills are not refreshed by a configuration update.
+
+The updater validates the complete candidate before an atomic replacement,
+retains comments and value formatting where unchanged, preserves LF/CRLF and
+final-newline style, and leaves an already-current file's bytes and modification
+time alone. Symlinks, multiple hard links, and owner/group changes are refused.
+Jbox updaters use an advisory repository lock and recheck the source for observed
+concurrent changes. Run this in a trusted checkout and do not edit the config
+concurrently in another program, which need not honor Jbox's lock.
+
+Legacy `[jcode.agent].instructions` remains supported at runtime. Updates migrate
+only exact known whole generated prompts. If you edited or mixed project text
+into a legacy prompt, the command **refuses without changing files**. Manually
+move project guidance into `[jcode.agent.project].instructions`, remove the
+legacy `instructions` key, then rerun `jbox init --update` to supply the managed
+Jbox prompt. The version-1 configuration format remains backward compatible.
 
 Every jbox base image includes the Beads CLI (`bd` and its `beads` alias),
 installed by the upstream checksum-verifying installer. Run `bd init` from a
@@ -142,6 +194,7 @@ repository-scoped by `.jbox.toml`.
 # Omit `skill` to install all discovered skills from this private repository.
 repository = "bwbioinfo/skills"
 private = true
+managed = true # Opt into default-source merging, while keeping explicit pins/settings.
 
 [[jcode.skills]]
 repository = "K-Dense-AI/scientific-agent-skills"
@@ -157,46 +210,39 @@ GitHub CLI metadata are session-scoped. They never modify the host checkout or
 host credentials. Provider and model selection is inherited from the local host
 Jcode client when omitted. Project settings can override this in a
 session-scoped guest Jcode configuration. The generated template pins OpenAI
-`gpt-5.6-terra`, high reasoning effort, and fast mode off:
+`gpt-6.1-sol`, medium reasoning effort, and fast mode off.
 
-To make a skill a reliable default rather than merely an available choice, add
-session-wide instructions. Jbox renders this as the guest's global
-`~/AGENTS.md`, which Jcode loads after the project `AGENTS.md`; it does not
-write to or alter any Git worktree:
+### Managed Jbox prompt and project instructions
+
+New configurations separate the managed `[jcode.agent.jbox]` prompt from
+project-owned `[jcode.agent.project]` guidance. Jbox supplies the managed prompt
+from `templates/jbox-prompt.md`, shared by initialization and updates. Its model
+routing policy uses North Mini Code/Qwen for routine work, Sol Medium/High for
+premium work, and quota-aware Sonnet/Opus specialists.
+
+Put repository-specific commands, acceptance criteria, and scientific constraints
+in the project section, not the managed prompt. This is a complete minimal
+`.jbox.toml` example. In an initialized project, add only its project section
+without replacing the other settings:
 
 ```toml
-[jcode.agent]
+version = 1
+
+[jcode.agent.project]
 instructions = """
-Use the `work-with-geonic` skill for all work in this workspace.
-Use the `jcode-jbox` skill for Jbox workspace, lifecycle, isolation, credential, Jcode configuration, remote-session, and authentication tasks.
-
-Use subscription-backed providers efficiently and only within their terms.
-At session start, before spawning workers, and after a provider error, check
-`jcode auth status --json` and `jcode usage --json` in the guest. Treat only
-guest-reported, authenticated providers and their live allowance windows as eligible.
-
-For substantial work, split independent tasks and route new swarm workers to
-the appropriate viable provider and model. Prefer the provider with the most
-available included capacity that can complete the task reliably. Reserve scarce
-or stronger capacity for planning, integration, difficult debugging, and
-adversarial review. Use another viable provider for bounded implementation,
-research, bulk reading, and mechanical verification.
-
-Keep an active conversation on its provider unless a fresh worker has a clean
-handoff. When a provider approaches a limit, stop assigning it new work and
-route eligible new tasks to another viable provider. Do not create work merely
-to consume allowance, retry quota failures to evade limits, use unapproved
-accounts, or enable API or extra paid usage without explicit user approval.
-
-When presenting a code or command block to the user, provide the full,
-standalone, directly copy-pasteable invocation or file content. Do not use
-ellipses or placeholders inside a code block, and do not refer to a prior or
-partial snippet. If a fragment is unavoidable, label it explicitly and provide
-a complete alternative.
+Use the repository's documented build and test commands.
+Run the scientific acceptance workflow before declaring results complete.
+Preserve project-specific data and deployment settings.
 """
 ```
 
-These instructions apply to new Jcode conversations in the jbox session.
+Run `jbox init --update` to supply the managed prompt for this minimal file.
+Jbox renders managed guidance, any retained legacy instructions, and then project
+guidance in separate sections of the guest's global `~/AGENTS.md`. Jcode loads
+this after the repository's `AGENTS.md`; neither file in the worktree is changed.
+Each populated prompt allows 64 KiB, with a combined rendered limit of 128 KiB.
+An empty project placeholder is allowed. These instructions apply to fresh
+sessions, not existing running guests.
 
 ```toml
 [jcode]

@@ -1,56 +1,3 @@
-# Project-local jbox workspace configuration.
-version = 1
-
-[runtime]
-backend = "kata"
-
-[workspace]
-mount = "/workspace/jbox"
-
-[[repos]]
-path = "../skills"
-mount = "/workspace/skills"
-
-[image]
-dockerfile = ".jbox/Dockerfile"
-
-[resources]
-cpus = 8
-memory = "16G"
-disk = "40G"
-ttl = "24h"
-
-[network]
-internet = true
-host = false
-lan = false
-
-[jcode]
-persistent_credentials = true
-# These project defaults override the host Jcode client for jbox sessions.
-# Remove an option to inherit that value from the host Jcode client instead.
-# Start new sessions with GPT-6.1 Sol Medium as the premium baseline.
-# Workers follow the task-fit and quota-aware guidance below.
-default_provider = "openai"
-default_model = "gpt-6.1-sol"
-openai_reasoning_effort = "medium"
-openai_service_tier = "priority"
-
-[[jcode.skills]]
-# Every configured GitHub repository is installed by `gh skill install` in the guest.
-# Omit `skill` to install every discoverable skill from this private repository.
-repository = "bwbioinfo/skills"
-managed = true # Merge managed defaults without changing project pins or auth settings.
-
-[[jcode.skills]]
-# Install the named public scientific skill alongside the complete private skill set.
-repository = "K-Dense-AI/scientific-agent-skills"
-skill = "scanpy"
-
-# Managed session guidance. `jbox init --update` replaces instructions here.
-# Mounted in ~/AGENTS.md, never written into the generated Git worktree.
-[jcode.agent.jbox]
-instructions = """
 Use the `work-with-geonic` skill for all work in this workspace.
 Use the `jcode-jbox` skill for Jbox workspace, lifecycle, isolation, credential, Jcode configuration, remote-session, and authentication tasks.
 
@@ -105,19 +52,3 @@ standalone, directly copy-pasteable invocation or file content. Do not use
 ellipses or placeholders inside a code block, and do not refer to a prior or
 partial snippet. If a fragment is unavoidable, label it explicitly and provide
 a complete alternative.
-"""
-
-# Project-owned session guidance. `jbox init --update` never replaces this section.
-[jcode.agent.project]
-# Add repository-specific acceptance criteria and commands here.
-
-[git]
-network = true
-credentials = "github-cli"
-
-[git.author]
-# Read user.name and user.email from the host global Git config without
-# mounting it into the guest. Set either key here to override that field.
-inherit_host = true
-# name = "Your Name"
-# email = "you@example.com"
