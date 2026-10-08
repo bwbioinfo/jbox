@@ -1135,8 +1135,9 @@ impl Git {
     }
 
     /// Synchronize the current clean host branch with its explicit upstream.
-    /// `pull --rebase` only rewrites commits local to this checkout and never
-    /// force-pushes the resulting history.
+    /// Preserve local merge commits when replaying changes onto the upstream.
+    /// A plain rebase flattens a previously resolved merge and can replay its
+    /// second parent even when the upstream is already the first parent.
     pub fn rebase_host_onto_upstream(&self, repository: &Path, upstream: &Upstream) -> Result<()> {
         let current = self.current_branch(repository)?;
         if current != upstream.branch {
@@ -1150,7 +1151,7 @@ impl Git {
             repository,
             &[
                 "pull",
-                "--rebase",
+                "--rebase=merges",
                 "--no-autostash",
                 &upstream.remote,
                 &upstream.remote_ref,
@@ -1580,6 +1581,59 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn host_sync_keeps_a_resolved_merge_when_upstream_is_its_parent() {
+        let root = tempdir().unwrap();
+        let remote = root.path().join("remote.git");
+        let host = root.path().join("host");
+        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(
+            root.path(),
+            &["clone", remote.to_str().unwrap(), host.to_str().unwrap()],
+        );
+        git(&host, &["config", "user.email", "test@example.com"]);
+        git(&host, &["config", "user.name", "Test"]);
+        git(&host, &["checkout", "-b", "main"]);
+        fs::write(host.join("policy"), "base\n").unwrap();
+        git(&host, &["add", "policy"]);
+        git(&host, &["commit", "-m", "base"]);
+        git(&host, &["push", "-u", "origin", "main"]);
+
+        git(&host, &["branch", "topic"]);
+        fs::write(host.join("policy"), "upstream\n").unwrap();
+        git(&host, &["commit", "-am", "upstream policy"]);
+        git(&host, &["push", "origin", "main"]);
+        git(&host, &["checkout", "topic"]);
+        fs::write(host.join("policy"), "local\n").unwrap();
+        git(&host, &["commit", "-am", "local policy"]);
+        git(&host, &["checkout", "main"]);
+        assert!(Git::run(&host, &["merge", "--no-ff", "topic"]).is_err());
+        fs::write(host.join("policy"), "resolved\n").unwrap();
+        git(&host, &["add", "policy"]);
+        git(&host, &["commit", "-m", "resolve policy merge"]);
+        let original_head = Git::run(&host, &["rev-parse", "HEAD"]).unwrap();
+
+        Git.rebase_host_onto_upstream(
+            &host,
+            &Upstream {
+                branch: "main".into(),
+                remote: "origin".into(),
+                remote_ref: "refs/heads/main".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            Git::run(&host, &["rev-parse", "HEAD"]).unwrap(),
+            original_head
+        );
+        assert_eq!(
+            fs::read_to_string(host.join("policy")).unwrap(),
+            "resolved\n"
+        );
+        assert!(Git.in_progress_operation(&host).unwrap().is_none());
     }
     #[test]
     fn creates_isolated_worktree_at_head() {
