@@ -116,7 +116,7 @@ a complete alternative.
 [git]
 network = true
 # Skills use host-side fetching, so this is only for explicit guest Git opt-in.
-credentials = "none"
+credentials = "github-cli"
 
 [git.author]
 # Read user.name and user.email from the host global Git config without
