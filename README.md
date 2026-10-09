@@ -772,3 +772,20 @@ cargo run -- doctor
 ```
 
 The test suite verifies TTL/config path validation and proves that a worktree starts from `HEAD` rather than a dirty host checkout. End-to-end validation on the target host booted a Kata guest, connected the local jcode TUI through the managed loopback SSH bridge, verified the guest jcode daemon and Git worktree, and then exercised `status`, `stop`, and safe `clean`.
+
+### OpenAI transport in SSH guests
+
+If OpenAI requests stall over WebSocket with concurrent guests, select HTTPS
+in the project configuration (Jcode's `/account` command may be unavailable
+in SSH mode):
+
+```toml
+[jcode]
+openai_transport = "https"
+```
+
+Accepted values are `auto`, `https`, and `websocket`. Omitting the setting keeps
+Jcode's default. The setting is written into the guest's session configuration
+on launch. Existing retained sessions keep their saved configuration; use a new
+session to apply the project setting. HTTPS uses the existing OAuth login.
+This is a transport workaround, not a confirmed fix for concurrency failures.

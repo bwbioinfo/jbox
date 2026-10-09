@@ -157,6 +157,8 @@ pub struct Jcode {
     pub openai_reasoning_effort: Option<String>,
     #[serde(default)]
     pub openai_service_tier: Option<String>,
+    #[serde(default)]
+    pub openai_transport: Option<String>,
 }
 impl Default for Jcode {
     fn default() -> Self {
@@ -168,6 +170,7 @@ impl Default for Jcode {
             default_model: None,
             openai_reasoning_effort: None,
             openai_service_tier: None,
+            openai_transport: None,
         }
     }
 }
@@ -669,6 +672,11 @@ impl Config {
             && !matches!(tier, "priority" | "flex" | "off")
         {
             bail!("jcode.openai_service_tier must be `priority`, `flex`, or `off`");
+        }
+        if let Some(transport) = config.jcode.openai_transport.as_deref()
+            && !matches!(transport, "auto" | "https" | "websocket")
+        {
+            bail!("jcode.openai_transport must be `auto`, `https`, or `websocket`");
         }
         Ok(config)
     }
@@ -1335,6 +1343,7 @@ mod tests {
             "version = 1\n[jcode]\ndefault_model = ''",
             "version = 1\n[jcode]\nopenai_reasoning_effort = 'unknown'",
             "version = 1\n[jcode]\nopenai_service_tier = 'unknown'",
+            "version = 1\n[jcode]\nopenai_transport = 'unknown'",
             "version = 1\n[git.author]\nname = ''",
         ] {
             assert!(Config::from_toml(text).is_err(), "{text}");

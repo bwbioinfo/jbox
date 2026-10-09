@@ -647,6 +647,7 @@ impl App {
             || config.jcode.default_model.is_some()
             || config.jcode.openai_reasoning_effort.is_some()
             || config.jcode.openai_service_tier.is_some()
+            || config.jcode.openai_transport.is_some()
         {
             let jcode_config = ssh
                 .parent()
@@ -3776,6 +3777,7 @@ fn guest_jcode_config(jcode: &config::Jcode) -> String {
             jcode.openai_reasoning_effort.as_deref(),
         ),
         ("openai_service_tier", jcode.openai_service_tier.as_deref()),
+        ("openai_transport", jcode.openai_transport.as_deref()),
     ] {
         if let Some(value) = value {
             lines.push(format!("{key} = {}", toml::Value::String(value.into())));
@@ -5039,6 +5041,42 @@ allowed_operations = ["clone"]
     }
 
     #[test]
+    fn transport_only_override_is_mounted_into_guest() {
+        let temp = tempdir().unwrap();
+        let ssh = temp.path().join("session/ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        for transport in ["auto", "https", "websocket"] {
+            let config = Config::from_toml(&format!(
+                "version = 1\n[jcode]\nopenai_transport = '{transport}'\n"
+            ))
+            .unwrap();
+            let spec = test_app(temp.path())
+                .container_spec(
+                    &config,
+                    &[],
+                    "jbox-test",
+                    &ssh,
+                    SessionLaunch {
+                        image: "test-image".into(),
+                        ssh_host: "127.0.0.2".into(),
+                    },
+                )
+                .unwrap();
+            let (source, _, _) = spec
+                .mounts
+                .iter()
+                .find(|(_, target, _)| target == Path::new("/home/jbox/.jcode/config.toml"))
+                .expect("transport-only settings must reach the guest daemon");
+            let parsed: toml::Value =
+                toml::from_str(&std::fs::read_to_string(source).unwrap()).unwrap();
+            assert_eq!(
+                parsed["provider"]["openai_transport"].as_str(),
+                Some(transport)
+            );
+        }
+    }
+
+    #[test]
     fn guest_jcode_config_applies_project_preference_overrides() {
         let config = config::Jcode {
             persistent_credentials: true,
@@ -5048,10 +5086,15 @@ allowed_operations = ["clone"]
             default_model: Some("gpt-5.6-terra".into()),
             openai_reasoning_effort: Some("high".into()),
             openai_service_tier: Some("off".into()),
+            openai_transport: Some("https".into()),
         };
 
         let rendered = guest_jcode_config(&config);
         let parsed: toml::Value = toml::from_str(&rendered).unwrap();
+        assert_eq!(
+            parsed["provider"]["openai_transport"].as_str(),
+            Some("https")
+        );
         assert_eq!(
             parsed["provider"]["default_model"].as_str(),
             Some("gpt-5.6-terra")
