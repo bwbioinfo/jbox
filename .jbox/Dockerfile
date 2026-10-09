@@ -4,6 +4,7 @@ ARG JBOX_BASE_IMAGE
 # the guest SSH daemon; the Rust stage supplies a current toolchain compatible
 # with edition 2024.
 FROM rust:1.98-bookworm AS rust
+RUN rustup component add rustfmt clippy
 
 FROM ${JBOX_BASE_IMAGE}
 

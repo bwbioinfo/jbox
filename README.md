@@ -176,18 +176,24 @@ checks can run inside a newly built Jbox image. Existing running guests retain
 their current image and toolchain until they are recreated.
 
 The generated template installs every discoverable skill from
-`bwbioinfo/skills`. Add other GitHub sources with `[[jcode.skills]]`. Jbox runs
-`gh skill install` **inside the guest** before the Jcode daemon starts, placing
-the skills in `~/.agents/skills`, where Jcode discovers them. Every skill source
-needs `network.internet = true`. Set `private = true` for a source that requires
-authentication. Jbox then requires either legacy `git.credentials =
-"github-cli"` or an exact scoped guest-passthrough clone grant. Public sources
-default to `private = false` and do not require a guest token.
+`bwbioinfo/skills`. Add other GitHub sources with `[[jcode.skills]]`. Jbox
+fetches skills **on the host** with the host's authenticated `gh` before the
+guest starts, then snapshots the resulting files, and only files, into the
+session's `.agents` directory, where Jcode discovers them. The guest never runs
+`gh skill install`. Every skill source needs `network.internet = true`.
+`private = true` documents a source that needs host `gh` authentication. It does
+not require guest Git network access, `git.credentials`, or a guest-passthrough
+grant. A configured `pin` is honored by the host fetch.
 
-Legacy `github-cli` mode mounts the host login as a guest read-only `hosts.yml`.
-It does not expose host SSH keys or the rest of `~/.config`, but it is broad:
-guest programs can use the bearer token with every permission it has. It is not
-repository-scoped by `.jbox.toml`.
+Keyring-backed host logins work because the fetch runs through the host `gh`.
+Skill fetching never exports a token into Docker build arguments, image layers,
+or guest mounts. Only the installed skill files and their source metadata are
+retained in the session.
+
+If a fetch fails (for example the host `gh` is not authenticated or cannot read
+the repository, or a pin does not exist), the session fails before launch.
+Resuming a session reuses its existing snapshot and does not refetch. Guest Git
+credentials remain a separate opt-in through `[git]` for guest Git work.
 
 ```toml
 [[jcode.skills]]
@@ -204,9 +210,7 @@ skill = "scanpy"
 # private = false
 ```
 
-Jbox uses `--dir /home/jbox/.agents/skills` rather than a named `--agent`,
-because GitHub CLI has no `jcode` agent target. Skill installations and their
-GitHub CLI metadata are session-scoped. They never modify the host checkout or
+Skill snapshots are session-scoped. They never modify the host checkout or
 host credentials. Provider and model selection is inherited from the local host
 Jcode client when omitted. Project settings can override this in a
 session-scoped guest Jcode configuration. The generated template pins OpenAI
@@ -710,10 +714,9 @@ long-lived guest. Use `jbox credentials github import example-maintainer --yes
 --replace` only when you deliberately want to refresh the managed copy.
 
 A session may select only one guest-passthrough profile, so project and private
-skills grants that need guest access must share a least-privilege account. A
-skill declared with `private = true` additionally needs a matching
-guest-passthrough grant with `git = "read"` and `allowed_operations` including
-`"clone"`. Public skills leave `private` unset or false and need no profile.
+grants that need guest access must share a least-privilege account. Skills,
+including `private = true` sources, are fetched on the host and need no profile
+or grant.
 
 A guest-passthrough profile gives guest programs a usable bearer token. Obtain
 a new fine-grained GitHub token restricted to the declared account,

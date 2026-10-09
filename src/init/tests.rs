@@ -337,9 +337,17 @@ fn candidate_validation_and_preservation_guard_prevent_partial_updates() {
     let temp = tempdir().unwrap();
     let path = temp.path().join(".jbox.toml");
     fs::write(&path, original).unwrap();
-    assert!(update(temp.path()).is_err());
-    assert_eq!(fs::read_to_string(path).unwrap(), original);
-    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    // Private default skills are fetched on the host, so a collection without
+    // guest Git credentials is a valid update candidate.
+    assert!(update(temp.path()).unwrap());
+    let updated_file = fs::read_to_string(&path).unwrap();
+    assert!(updated_file.contains("bwbioinfo/skills"));
+    assert!(
+        updated_file.contains("credentials = 'none'")
+            || updated_file.contains("credentials=\"none\"")
+            || updated_file.contains("credentials='none'")
+    );
+    assert!(Config::from_toml(&updated_file).is_ok());
     let updated = PROJECT.replace("cpus = 3", "cpus = 4");
     assert!(
         ensure_project_preserved(

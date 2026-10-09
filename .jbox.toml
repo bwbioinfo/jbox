@@ -37,9 +37,11 @@ openai_reasoning_effort = "medium"
 openai_service_tier = "priority"
 
 [[jcode.skills]]
-# Every configured GitHub repository is installed by `gh skill install` in the guest.
+# Skills are fetched on the host with authenticated `gh` before launch and
+# snapshotted into the session. No guest Git credential is needed for this.
 # Omit `skill` to install every discoverable skill from this private repository.
 repository = "bwbioinfo/skills"
+private = true
 managed = true # Merge managed defaults without changing project pins or auth settings.
 
 [[jcode.skills]]
@@ -113,7 +115,8 @@ a complete alternative.
 
 [git]
 network = true
-credentials = "github-cli"
+# Skills use host-side fetching, so this is only for explicit guest Git opt-in.
+credentials = "none"
 
 [git.author]
 # Read user.name and user.email from the host global Git config without

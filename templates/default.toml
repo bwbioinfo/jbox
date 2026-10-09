@@ -55,9 +55,10 @@ managed = true
 
 [git]
 network = true
-# GitHub CLI credentials support private Git remotes and optional skills.
-# Jbox mounts only ~/.config/gh/hosts.yml, read-only, into the guest.
-credentials = "github-cli"
+# Skills are fetched on the host with authenticated `gh`, so they need no guest
+# Git credentials. Set `credentials = "github-cli"` only to opt in to guest Git
+# access (Jbox then mounts ~/.config/gh/hosts.yml, read-only, into the guest).
+credentials = "none"
 
 [git.author]
 # Read user.name and user.email from the host global Git config without

@@ -282,8 +282,8 @@ pub struct SkillSource {
     pub pin: Option<String>,
     #[serde(default)]
     pub allow_hidden_dirs: bool,
-    /// Private skill sources must have an explicit legacy GitHub CLI mode or a
-    /// scoped guest-passthrough clone grant. Public sources need no token.
+    /// Marks a source as private. Host `gh` authentication fetches it before
+    /// launch, so no guest Git credential or grant is required.
     #[serde(default)]
     pub private: bool,
 }
@@ -631,7 +631,7 @@ impl Config {
         }
         validate_git_access(&config.git)?;
         if !config.jcode.skills.is_empty() {
-            validate_skills(&config.jcode.skills, &config.network, &config.git)?;
+            validate_skills(&config.jcode.skills, &config.network)?;
         }
         config.jcode.agent.validate()?;
         for (name, value) in [
@@ -809,9 +809,11 @@ fn validate_guest_path(path: &str) -> Result<()> {
     }
     Ok(())
 }
-fn validate_skills(skills: &[SkillSource], network: &Network, git: &Git) -> Result<()> {
+/// Skills are fetched on the host with authenticated `gh`, so no guest Git
+/// network, credential, or passthrough grant is needed.
+fn validate_skills(skills: &[SkillSource], network: &Network) -> Result<()> {
     if !network.internet {
-        bail!("jcode.skills requires network.internet=true for `gh skill install`");
+        bail!("jcode.skills requires network.internet=true for host-side skill fetching");
     }
     for source in skills {
         if !valid_github_repository(&source.repository) {
@@ -833,34 +835,6 @@ fn validate_skills(skills: &[SkillSource], network: &Network, git: &Git) -> Resu
             {
                 bail!(
                     "jcode.skills.{field} must be a non-empty, non-option argument without line breaks"
-                );
-            }
-        }
-        if source.private {
-            if !git.network {
-                bail!(
-                    "private jcode.skills.repository `{}` requires git.network=true",
-                    source.repository
-                );
-            }
-            if git.credential_profiles.is_empty() {
-                if git.credentials != "github-cli" {
-                    bail!(
-                        "private jcode.skills.repository `{}` requires git.credentials=`github-cli`, or a repository-scoped guest-passthrough grant",
-                        source.repository
-                    );
-                }
-            } else if !git.repository_grants.iter().any(|grant| {
-                grant.repository == source.repository
-                    && grant.delivery == GitCredentialDelivery::GuestPassthrough
-                    && grant.git >= GitCapability::Read
-                    && grant
-                        .allowed_operations
-                        .contains(&GitRepositoryOperation::Clone)
-            }) {
-                bail!(
-                    "private jcode.skills.repository `{}` requires a guest-passthrough repository grant with git = `read` and allowed_operations including `clone`",
-                    source.repository
                 );
             }
         }
@@ -1440,11 +1414,7 @@ mod tests {
             },
         ];
         let network = Network::default();
-        let git = Git {
-            credentials: "github-cli".into(),
-            ..Git::default()
-        };
-        assert!(validate_skills(&skills, &network, &git).is_ok());
+        assert!(validate_skills(&skills, &network).is_ok());
         assert!(
             validate_skills(
                 &skills,
@@ -1452,7 +1422,6 @@ mod tests {
                     internet: false,
                     ..Network::default()
                 },
-                &git
             )
             .is_err()
         );
@@ -1467,7 +1436,6 @@ mod tests {
                     private: false,
                 }],
                 &network,
-                &git,
             )
             .is_err()
         );
@@ -1482,11 +1450,11 @@ mod tests {
                     private: true,
                 }],
                 &network,
-                &git,
             )
             .is_err()
         );
-        assert!(validate_skills(&skills, &network, &Git::default()).is_err());
+        // Host-side fetch needs no guest Git credentials, even for private sources.
+        assert!(validate_skills(&skills, &network).is_ok());
     }
 
     #[test]
@@ -1619,43 +1587,26 @@ allowed_operations = ["clone", "fetch"]
     }
 
     #[test]
-    fn scoped_skills_require_a_guest_clone_grant() {
+    fn private_skills_do_not_require_guest_git_credentials_or_grants() {
         let skills = vec![SkillSource {
             repository: "bwbioinfo/skills".into(),
             skill: None,
-            pin: None,
+            pin: Some("v1".into()),
             managed: false,
             allow_hidden_dirs: false,
             private: true,
         }];
-        let mut skills_grant = grant("skills-reader");
-        skills_grant.id = "skills-fetch".into();
-        skills_grant.repository = "bwbioinfo/skills".into();
-        skills_grant.remote = None;
-        skills_grant.delivery = GitCredentialDelivery::GuestPassthrough;
-        skills_grant.git = GitCapability::Read;
-        skills_grant.pull_requests = GitCapability::None;
-        skills_grant.actions = GitCapability::None;
-        skills_grant.checks = GitCapability::None;
-        skills_grant.allowed_operations = vec![GitRepositoryOperation::Clone];
-        skills_grant.allowed_push_ref_prefixes.clear();
-        skills_grant.protected_refs.clear();
-        skills_grant.merge = GitMergePolicy::Deny;
-        let git = Git {
-            credentials: "none".into(),
-            credential_profiles: vec![profile(
-                "skills-reader",
-                GitCapability::Read,
-                GitCapability::None,
-            )],
-            repository_grants: vec![skills_grant],
-            ..Git::default()
-        };
-        assert!(validate_skills(&skills, &Network::default(), &git).is_ok());
-
-        let mut missing_clone = git.clone();
-        missing_clone.repository_grants[0].allowed_operations = vec![GitRepositoryOperation::Fetch];
-        assert!(validate_skills(&skills, &Network::default(), &missing_clone).is_err());
+        assert!(validate_skills(&skills, &Network::default()).is_ok());
+        assert!(
+            validate_skills(
+                &skills,
+                &Network {
+                    internet: false,
+                    ..Network::default()
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1668,12 +1619,7 @@ allowed_operations = ["clone", "fetch"]
             allow_hidden_dirs: false,
             private: false,
         };
-        let git = Git {
-            network: false,
-            credentials: "none".into(),
-            ..Git::default()
-        };
-        assert!(validate_skills(&[public_skill], &Network::default(), &git).is_ok());
+        assert!(validate_skills(&[public_skill], &Network::default()).is_ok());
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod git;
 pub mod image;
 pub mod init;
 pub mod paths;
+pub mod skills;
 pub mod state;
 
 use anyhow::{Context, Result, bail};
@@ -76,7 +77,6 @@ pub struct SyncOptions {
 struct SessionLaunch {
     image: String,
     ssh_host: String,
-    reuse_runtime_state: bool,
 }
 
 impl App {
@@ -309,6 +309,19 @@ impl App {
         self.engine.check()?;
         self.offer_priming_if_needed(config.network.internet)?;
 
+        // Fetch through the host's GitHub CLI, including its keyring, before
+        // creating worktrees or launching a guest. Only installed skill files
+        // enter the session, never the credentials used to retrieve them.
+        let prepared_skills = if config.jcode.skills.is_empty() {
+            None
+        } else {
+            let prepared = tempfile::Builder::new()
+                .prefix("skill-preparation-")
+                .tempdir_in(&self.paths.sessions)?;
+            skills::stage(&config.jcode.skills, &prepared.path().join("agents"))?;
+            Some(prepared)
+        };
+
         if config.git.network && config.git.credentials == "jbox" {
             self.paths.ensure_credentials()?;
         }
@@ -326,6 +339,11 @@ impl App {
         let image = ImageManager::new(&self.paths).ensure(&config, &primary)?;
         let ssh_host = self.next_ssh_host(&session_id)?;
         let session_dir = self.paths.sessions.join(&session_id);
+        if let Some(prepared) = prepared_skills {
+            let runtime = session_dir.join("runtime");
+            std::fs::create_dir_all(&runtime)?;
+            std::fs::rename(prepared.path().join("agents"), runtime.join("agents"))?;
+        }
         let worktrees = session_dir.join("worktrees");
         std::fs::create_dir_all(&worktrees)?;
 
@@ -493,7 +511,6 @@ impl App {
             SessionLaunch {
                 image: image.clone(),
                 ssh_host: ssh_host.clone(),
-                reuse_runtime_state: false,
             },
         ) {
             Ok(spec) => spec,
@@ -693,53 +710,18 @@ impl App {
             ));
         }
         if !config.jcode.skills.is_empty() {
-            // `gh skill` records source metadata at `.agents/.skill-lock.json`.
-            // Mount the parent directory, not only `skills`, so the non-root
-            // guest user can update that file while installing and refreshing
-            // configured skills.
+            // Reuse the host-prepared session snapshot, including installation
+            // metadata. Resume never fetches skills or reads host credentials.
             let agents_dir = ssh
                 .parent()
                 .context("session SSH directory lacks a parent")?
                 .join("runtime/agents");
-            std::fs::create_dir_all(&agents_dir)?;
-            std::fs::set_permissions(&agents_dir, std::fs::Permissions::from_mode(0o700))?;
-            mounts.push((agents_dir, PathBuf::from("/home/jbox/.agents"), true));
-            environment.push((
-                "JBOX_SKILL_COUNT".into(),
-                if launch.reuse_runtime_state {
-                    // A session reaches Stopped only after its guest ran
-                    // successfully. Its session-owned skills directory is
-                    // therefore complete and can be reused without another
-                    // network-bound `gh skill install` before SSH starts.
-                    "0".into()
-                } else {
-                    config.jcode.skills.len().to_string()
-                },
-            ));
-            if !launch.reuse_runtime_state {
-                for (index, source) in config.jcode.skills.iter().enumerate() {
-                    environment.push((
-                        format!("JBOX_SKILL_{index}_REPOSITORY"),
-                        source.repository.clone(),
-                    ));
-                    environment.push((
-                        format!("JBOX_SKILL_{index}_NAME"),
-                        source.skill.clone().unwrap_or_default(),
-                    ));
-                    environment.push((
-                        format!("JBOX_SKILL_{index}_PIN"),
-                        source.pin.clone().unwrap_or_default(),
-                    ));
-                    environment.push((
-                        format!("JBOX_SKILL_{index}_ALLOW_HIDDEN"),
-                        if source.allow_hidden_dirs { "1" } else { "0" }.into(),
-                    ));
-                    environment.push((
-                        format!("JBOX_SKILL_{index}_PRIVATE"),
-                        if source.private { "1" } else { "0" }.into(),
-                    ));
-                }
+            if !agents_dir.join("skills").is_dir() {
+                bail!(
+                    "session skills are missing; launch a new session to stage configured sources"
+                );
             }
+            mounts.push((agents_dir, PathBuf::from("/home/jbox/.agents"), true));
         }
         if config.git.network && config.git.credentials == "jbox" {
             mounts.push((
@@ -2689,7 +2671,6 @@ done | LC_ALL=C sort -r | head -n 20
             SessionLaunch {
                 image: image.clone(),
                 ssh_host: session.ssh_host.clone(),
-                reuse_runtime_state: true,
             },
         ) {
             Ok(spec) => spec,
@@ -4483,7 +4464,6 @@ merge = "user-confirmed"
                 SessionLaunch {
                     image: "test-image".into(),
                     ssh_host: "127.0.0.2".into(),
-                    reuse_runtime_state: false,
                 },
             )
             .unwrap();
@@ -4616,7 +4596,7 @@ merge = "user-confirmed"
     }
 
     #[test]
-    fn skills_repository_mount_includes_writable_gh_metadata_parent() {
+    fn host_staged_skills_mount_without_guest_fetch_or_github_credentials() {
         let temp = tempdir().unwrap();
         assert!(
             Command::new("git")
@@ -4633,6 +4613,28 @@ merge = "user-confirmed"
         let (config, _) = Config::load(temp.path()).unwrap();
         let ssh = temp.path().join("session/ssh");
         std::fs::create_dir_all(&ssh).unwrap();
+        let agents = temp.path().join("session/runtime/agents");
+        let missing = test_app(temp.path())
+            .container_spec(
+                &config,
+                &[],
+                "jbox-test",
+                &ssh,
+                SessionLaunch {
+                    image: "test-image".into(),
+                    ssh_host: "127.0.0.2".into(),
+                },
+            )
+            .err()
+            .unwrap();
+        assert!(missing.to_string().contains("session skills are missing"));
+        assert!(
+            !agents.exists(),
+            "mount construction must not silently stage skills"
+        );
+        let skill = agents.join("skills/example/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(&skill, "---\nname: example\n---\nExample skill\n").unwrap();
         let spec = test_app(temp.path())
             .container_spec(
                 &config,
@@ -4642,15 +4644,13 @@ merge = "user-confirmed"
                 SessionLaunch {
                     image: "test-image".into(),
                     ssh_host: "127.0.0.2".into(),
-                    reuse_runtime_state: false,
                 },
             )
             .unwrap();
 
         assert!(
             spec.mounts
-                .iter()
-                .any(|(_, target, _)| { target == Path::new("/home/jbox/.agents") })
+                .contains(&(agents.clone(), PathBuf::from("/home/jbox/.agents"), true,))
         );
         assert!(
             !spec
@@ -4658,34 +4658,9 @@ merge = "user-confirmed"
                 .iter()
                 .any(|(_, target, _)| { target == Path::new("/home/jbox/.config/gh/hosts.yml") })
         );
-        assert!(
-            spec.environment
-                .contains(&("JBOX_SKILL_COUNT".into(), "2".into(),))
-        );
-        assert!(
-            spec.environment
-                .contains(&("JBOX_SKILL_0_REPOSITORY".into(), "example/skills".into(),))
-        );
-        assert!(
-            spec.environment
-                .contains(&("JBOX_SKILL_0_NAME".into(), String::new(),))
-        );
-        assert!(
-            spec.environment
-                .contains(&("JBOX_SKILL_0_PRIVATE".into(), "0".into(),))
-        );
-        assert!(spec.environment.contains(&(
-            "JBOX_SKILL_1_REPOSITORY".into(),
-            "K-Dense-AI/scientific-agent-skills".into(),
-        )));
-        assert!(
-            spec.environment
-                .contains(&("JBOX_SKILL_1_NAME".into(), "scanpy".into(),))
-        );
-        assert!(
-            spec.environment
-                .contains(&("JBOX_SKILL_1_PRIVATE".into(), "0".into(),))
-        );
+        assert!(!spec.environment.iter().any(|(name, _)| {
+            name.starts_with("JBOX_SKILL_") || name.starts_with("JBOX_GITHUB_CLI_")
+        }));
 
         let resumed = test_app(temp.path())
             .container_spec(
@@ -4696,20 +4671,23 @@ merge = "user-confirmed"
                 SessionLaunch {
                     image: "test-image".into(),
                     ssh_host: "127.0.0.2".into(),
-                    reuse_runtime_state: true,
                 },
             )
             .unwrap();
         assert!(
             resumed
-                .environment
-                .contains(&("JBOX_SKILL_COUNT".into(), "0".into(),))
+                .mounts
+                .contains(&(agents, PathBuf::from("/home/jbox/.agents"), true,))
         );
         assert!(
             !resumed
                 .environment
                 .iter()
-                .any(|(name, _)| name.starts_with("JBOX_SKILL_0_"))
+                .any(|(name, _)| name.starts_with("JBOX_SKILL_"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(&skill).unwrap(),
+            "---\nname: example\n---\nExample skill\n"
         );
     }
 
@@ -4766,7 +4744,6 @@ allowed_operations = ["clone"]
                 SessionLaunch {
                     image: "test-image".into(),
                     ssh_host: "127.0.0.2".into(),
-                    reuse_runtime_state: false,
                 },
             )
             .unwrap();

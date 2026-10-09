@@ -62,42 +62,6 @@ if [ "${JBOX_GITHUB_CLI_CREDENTIALS:-}" = "1" ]; then
     fi
 fi
 index=0
-while [ "$index" -lt "${JBOX_SKILL_COUNT:-0}" ]; do
-    repository="$(printenv "JBOX_SKILL_${index}_REPOSITORY")"
-    skill="$(printenv "JBOX_SKILL_${index}_NAME")"
-    pin="$(printenv "JBOX_SKILL_${index}_PIN")"
-    hidden="$(printenv "JBOX_SKILL_${index}_ALLOW_HIDDEN")"
-    private="$(printenv "JBOX_SKILL_${index}_PRIVATE")"
-    # `gh skill` has no Jcode target. An explicit directory installs the
-    # standardized skill layout where Jcode discovers it, instead of silently
-    # defaulting to GitHub Copilot. The mounted directory is session-owned.
-    if ! env JBOX_ONE_SKILL_REPOSITORY="$repository" JBOX_ONE_SKILL_NAME="$skill" JBOX_ONE_SKILL_PIN="$pin" JBOX_ONE_SKILL_HIDDEN="$hidden" JBOX_ONE_SKILL_PRIVATE="$private" \
-        su -s /bin/sh jbox -c '
-            set -eu
-            mkdir -p /home/jbox/.agents/skills
-            set -- gh skill install "$JBOX_ONE_SKILL_REPOSITORY"
-            if [ -n "$JBOX_ONE_SKILL_NAME" ]; then set -- "$@" "$JBOX_ONE_SKILL_NAME"; else set -- "$@" --all; fi
-            set -- "$@" --dir /home/jbox/.agents/skills
-            if [ -n "$JBOX_ONE_SKILL_PIN" ]; then set -- "$@" --pin "$JBOX_ONE_SKILL_PIN"; fi
-            if [ "$JBOX_ONE_SKILL_HIDDEN" = "1" ]; then set -- "$@" --allow-hidden-dirs; fi
-            "$@"
-        '
-    then
-        # Keep the original `gh` error above, then provide remediation that is
-        # actionable without leaking the guest's read-only credential material.
-        # A session snapshots hosts.yml at launch, so host reauthentication only
-        # takes effect after the user launches a new Jbox session.
-        echo "jbox: failed to install configured GitHub skill source: ${repository}" >&2
-        if [ "$private" = "1" ]; then
-            echo "jbox: this source is configured private and requires guest authentication." >&2
-            echo "jbox: on the host, authenticate an account that can read ${repository}, then retry." >&2
-        else
-            echo "jbox: this source is configured public; check repository visibility, pin, and network access." >&2
-        fi
-    fi
-    index=$((index + 1))
-done
-index=0
 while [ "$index" -lt "${JBOX_BEADS_WORKSPACE_COUNT:-0}" ]; do
     workspace="$(printenv "JBOX_BEADS_WORKSPACE_${index}")"
     prefix="$(printenv "JBOX_BEADS_PREFIX_${index}")"
@@ -342,20 +306,13 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn guest_entrypoint_installs_skills_with_gh_before_starting_jcode() {
-        assert!(JBOX_ENTRYPOINT.contains("JBOX_SKILL_COUNT"));
-        assert!(JBOX_ENTRYPOINT.contains("/home/jbox/.agents/skills"));
-        assert!(JBOX_ENTRYPOINT.contains("gh skill install"));
-        assert!(JBOX_ENTRYPOINT.contains("failed to install configured GitHub skill source"));
-        assert!(JBOX_ENTRYPOINT.contains("JBOX_SKILL_${index}_PRIVATE"));
-        assert!(JBOX_ENTRYPOINT.contains("configured private and requires guest authentication"));
-        assert!(JBOX_ENTRYPOINT.contains("configured public; check repository visibility"));
+    fn guest_entrypoint_does_not_install_skills() {
+        // Skills are fetched on the host and snapshotted into the session.
+        assert!(!JBOX_ENTRYPOINT.contains("JBOX_SKILL_"));
+        assert!(!JBOX_ENTRYPOINT.contains("gh skill install"));
+        assert!(!JBOX_ENTRYPOINT.contains("failed to install configured GitHub skill source"));
         assert!(
             JBOX_ENTRYPOINT.find("gh auth setup-git").unwrap()
-                < JBOX_ENTRYPOINT.find("gh skill install").unwrap()
-        );
-        assert!(
-            JBOX_ENTRYPOINT.find("gh skill install").unwrap()
                 < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
         );
     }
