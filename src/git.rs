@@ -6,13 +6,27 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub struct Git;
 const BEADS_EXPORT_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// Keep a newly imported pack alive until its snapshot ref is published. A
+/// unique marker prevents removing a keep file owned by another operation.
+struct GuestPackKeep {
+    path: PathBuf,
+    marker: String,
+}
+impl Drop for GuestPackKeep {
+    fn drop(&mut self) {
+        if fs::read_to_string(&self.path).is_ok_and(|text| text.trim() == self.marker) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
 
 /// The exact remote branch configured as a checked-out host branch's upstream.
 /// Jbox deliberately never guesses `origin` or assumes the upstream branch has
@@ -649,25 +663,167 @@ impl Git {
         if !gitfile.is_dir() {
             return Ok(());
         }
-        Self::run(
-            &repo.source,
-            &["fetch", "--quiet", &gitfile.to_string_lossy(), &repo.branch],
-        )?;
         let session_ref = format!("refs/heads/{}", repo.branch);
+        let previous = Self::run(
+            &repo.source,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("{session_ref}^{{commit}}"),
+            ],
+        )?;
+        let snapshot = Self::run(
+            &repo.worktree,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("{session_ref}^{{commit}}"),
+            ],
+        )?;
+        // Pin the snapshot before importing. FETCH_HEAD is shared host state,
+        // and neither a later guest commit nor another fetch should change
+        // which commit this operation validates and installs.
+        let fetched = Self::run(
+            &repo.source,
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-recurse-submodules",
+                &gitfile.to_string_lossy(),
+                &snapshot,
+            ],
+        )
+        .and_then(|_| Self::verify_snapshot_objects(&repo.source, &snapshot));
+        let _pack_keep = if let Err(import_error) = fetched {
+            // Fetch's negotiation/connectivity checks can walk unrelated
+            // refs, such as stale refs/codex/turn-diffs entries. Do not delete
+            // those refs or bypass preservation during forced cleanup.
+            let keep = Self::import_guest_pack(repo, &snapshot).with_context(|| {
+                format!(
+                    "{import_error:#}; branch-scoped import also failed for {}. Guest worktree {} was retained",
+                    repo.name,
+                    repo.worktree.display()
+                )
+            })?;
+            Self::verify_snapshot_objects(&repo.source, &snapshot).with_context(|| {
+                format!(
+                    "guest snapshot verification failed; worktree {} was retained",
+                    repo.worktree.display()
+                )
+            })?;
+            Some(keep)
+        } else {
+            None
+        };
         let is_fast_forward = Command::new("git")
             .arg("-C")
             .arg(&repo.source)
-            .args(["merge-base", "--is-ancestor", &session_ref, "FETCH_HEAD"])
-            .status()
+            .args(["merge-base", "--is-ancestor", &previous, &snapshot])
+            .output()
             .context("could not verify imported guest history")?;
-        if !is_fast_forward.success() {
+        if is_fast_forward.status.code() == Some(1) {
             bail!(
                 "guest branch `{}` rewrote history; refusing to replace its host snapshot",
                 repo.branch
             );
         }
-        Self::run(&repo.source, &["update-ref", &session_ref, "FETCH_HEAD"])?;
+        if !is_fast_forward.status.success() {
+            bail!(
+                "could not verify imported guest history for {}: {}. Guest worktree {} was retained",
+                repo.name,
+                String::from_utf8_lossy(&is_fast_forward.stderr).trim(),
+                repo.worktree.display()
+            );
+        }
+        Self::run(
+            &repo.source,
+            &["update-ref", &session_ref, &snapshot, &previous],
+        )?;
         Ok(())
+    }
+
+    fn verify_snapshot_objects(repository: &Path, snapshot: &str) -> Result<()> {
+        // A successful/no-op fetch and commit ancestry alone do not guarantee
+        // that every required tree and blob is available on the host.
+        Self::run(
+            repository,
+            &[
+                "rev-list",
+                "--objects",
+                "--quiet",
+                "--missing=error",
+                snapshot,
+                "--",
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Transfer a self-contained pack rooted only at the requested snapshot.
+    /// Unlike fetch, this does not enumerate either repository's other refs.
+    /// Spool to disk rather than buffering an entire repository in memory or
+    /// leaving a producer process blocked if the consumer exits early.
+    fn import_guest_pack(repo: &RepoState, snapshot: &str) -> Result<GuestPackKeep> {
+        // A session can be large, and the system temporary directory may be
+        // RAM-backed. Keep anonymous staging files on the session filesystem.
+        let staging = repo.worktree.join(".git");
+        let mut revisions =
+            tempfile::tempfile_in(&staging).context("cannot stage guest pack revisions")?;
+        writeln!(revisions, "{snapshot}")?;
+        revisions.rewind()?;
+        let mut pack =
+            tempfile::tempfile_in(&staging).context("cannot stage guest snapshot pack")?;
+        let exported = Command::new("git")
+            .arg("-C")
+            .arg(&repo.worktree)
+            .args(["pack-objects", "--stdout", "--revs"])
+            .stdin(Stdio::from(revisions))
+            .stdout(Stdio::from(pack.try_clone()?))
+            .output()
+            .context("cannot export guest snapshot objects")?;
+        if !exported.status.success() {
+            bail!(
+                "cannot export guest snapshot {snapshot}: {}",
+                String::from_utf8_lossy(&exported.stderr).trim()
+            );
+        }
+        pack.rewind()?;
+        let pack_directory = Self::run(&repo.source, &["rev-parse", "--git-path", "objects/pack"])?;
+        let marker = format!("jbox guest snapshot {}", uuid::Uuid::new_v4());
+        let imported = Command::new("git")
+            .arg("-C")
+            .arg(&repo.source)
+            .args([
+                "index-pack",
+                "--stdin",
+                "--strict",
+                &format!("--keep={marker}"),
+            ])
+            .stdin(Stdio::from(pack))
+            .output()
+            .context("cannot import guest snapshot objects")?;
+        if !imported.status.success() {
+            bail!(
+                "cannot import guest snapshot {snapshot}: {}",
+                String::from_utf8_lossy(&imported.stderr).trim()
+            );
+        }
+        let output = String::from_utf8(imported.stdout)?;
+        let hash = output
+            .split_whitespace()
+            .last()
+            .filter(|hash| {
+                matches!(hash.len(), 40 | 64) && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .context("index-pack did not report a valid guest pack hash")?;
+        Ok(GuestPackKeep {
+            path: repo
+                .source
+                .join(pack_directory)
+                .join(format!("pack-{hash}.keep")),
+            marker,
+        })
     }
 
     /// Explicitly checkpoint agent work in a generated worktree before it is
@@ -2227,6 +2383,243 @@ mod tests {
             "guest change"
         );
         assert!(Git.remove_worktree(tmp.path(), &wt, false).is_ok());
+    }
+
+    fn isolated_import_fixture() -> (tempfile::TempDir, RepoState) {
+        let root = tempdir().unwrap();
+        let host = root.path().join("host");
+        git(root.path(), &["init", host.to_str().unwrap()]);
+        git(&host, &["config", "user.email", "test@example.com"]);
+        git(&host, &["config", "user.name", "Test"]);
+        fs::write(host.join("a"), "base\n").unwrap();
+        git(&host, &["add", "a"]);
+        git(&host, &["commit", "-m", "base"]);
+        let worktree = root.path().join("worktree");
+        let made = Git
+            .add_worktree(&host, &worktree, "bright-fox-123", "repo")
+            .unwrap();
+        let host_gitfile = root.path().join("host-gitfile");
+        Git.isolate_guest_metadata(
+            &host,
+            &worktree,
+            &made.branch,
+            &made.commit,
+            &host_gitfile,
+            &ResolvedGitAuthor {
+                name: Some("Guest".into()),
+                email: Some("guest@example.com".into()),
+            },
+        )
+        .unwrap();
+        fs::write(worktree.join("a"), "guest\n").unwrap();
+        git(&worktree, &["commit", "-am", "guest"]);
+        let repo = RepoState {
+            name: "repo".into(),
+            source: host,
+            worktree,
+            mount: "/workspace/repo".into(),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile,
+            beads_snapshot: None,
+            beads_bootstrap: Vec::new(),
+        };
+        (root, repo)
+    }
+
+    fn add_broken_import_ref(repository: &Path, packed: bool, oid_length: usize) -> PathBuf {
+        let oid = "1".repeat(oid_length);
+        let name = "refs/codex/turn-diffs/test/base";
+        if packed {
+            let path = repository.join(".git/packed-refs");
+            let mut text = fs::read_to_string(&path)
+                .unwrap_or_else(|_| "# pack-refs with: peeled\n".into())
+                .replace(" sorted", "");
+            text.push_str(&format!("{oid} {name}\n"));
+            fs::write(&path, text).unwrap();
+            path
+        } else {
+            let path = repository.join(".git").join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, format!("{oid}\n")).unwrap();
+            path
+        }
+    }
+
+    #[test]
+    fn imports_guest_snapshot_with_unrelated_broken_loose_or_packed_refs() {
+        for packed in [false, true] {
+            for (broken_host, broken_guest) in [(true, false), (false, true), (true, true)] {
+                let (_root, repo) = isolated_import_fixture();
+                let snapshot = Git::run(&repo.worktree, &["rev-parse", "HEAD"]).unwrap();
+                let mut retained_refs = Vec::new();
+                for (repository, broken) in
+                    [(&repo.source, broken_host), (&repo.worktree, broken_guest)]
+                {
+                    if broken {
+                        let path = add_broken_import_ref(repository, packed, snapshot.len());
+                        let bytes = fs::read(&path).unwrap();
+                        retained_refs.push((path, bytes));
+                    }
+                }
+                Git.import_guest_commits(&repo).unwrap();
+                Git.import_guest_commits(&repo).unwrap();
+                assert!(repo.worktree.join(".git").is_dir());
+                assert_eq!(
+                    Git::run(&repo.source, &["rev-parse", &repo.branch]).unwrap(),
+                    snapshot
+                );
+                assert_eq!(
+                    Git::run(&repo.source, &["show", &format!("{}:a", repo.branch)]).unwrap(),
+                    "guest"
+                );
+                assert_eq!(fs::read_to_string(repo.source.join("a")).unwrap(), "base\n");
+                assert_eq!(
+                    Git::run(&repo.source, &["rev-parse", "HEAD"]).unwrap(),
+                    repo.base_commit
+                );
+                for (path, bytes) in retained_refs {
+                    assert_eq!(fs::read(path).unwrap(), bytes);
+                }
+                assert!(
+                    fs::read_dir(repo.source.join(".git/objects/pack"))
+                        .unwrap()
+                        .all(|entry| entry
+                            .unwrap()
+                            .path()
+                            .extension()
+                            .is_none_or(|ext| ext != "keep"))
+                );
+                Git.restore_and_import_guest_metadata(&repo).unwrap();
+                assert!(repo.worktree.join(".git").is_file());
+                Git.remove_worktree(&repo.source, &repo.worktree, true)
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn failed_guest_snapshot_import_retains_required_objects_and_metadata() {
+        for object in ["HEAD:a", "HEAD^{tree}", "HEAD", "HEAD^"] {
+            let (_root, repo) = isolated_import_fixture();
+            fs::write(repo.worktree.join("second"), "second guest commit\n").unwrap();
+            git(&repo.worktree, &["add", "second"]);
+            git(&repo.worktree, &["commit", "-m", "second guest commit"]);
+            add_broken_import_ref(&repo.source, false, repo.base_commit.len());
+            let oid = Git::run(&repo.worktree, &["rev-parse", object]).unwrap();
+            fs::remove_file(
+                repo.worktree
+                    .join(".git/objects")
+                    .join(&oid[..2])
+                    .join(&oid[2..]),
+            )
+            .unwrap();
+            let error = Git.restore_and_import_guest_metadata(&repo).unwrap_err();
+            if object != "HEAD" {
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains("branch-scoped import also failed"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("cannot export guest snapshot"),
+                    "{message}"
+                );
+            }
+            assert!(repo.worktree.join(".git").is_dir());
+            assert!(repo.host_gitfile.is_file());
+            assert_eq!(
+                fs::read_to_string(repo.worktree.join("a")).unwrap(),
+                "guest\n"
+            );
+            assert_eq!(
+                Git::run(&repo.source, &["rev-parse", &repo.branch]).unwrap(),
+                repo.base_commit
+            );
+        }
+    }
+
+    #[test]
+    fn guest_import_repairs_missing_host_objects_even_when_tips_match() {
+        for object in ["HEAD:a", "HEAD^{tree}"] {
+            let (_root, repo) = isolated_import_fixture();
+            Git.import_guest_commits(&repo).unwrap();
+            let oid = Git::run(&repo.source, &["rev-parse", object]).unwrap();
+            fs::remove_file(
+                repo.source
+                    .join(".git/objects")
+                    .join(&oid[..2])
+                    .join(&oid[2..]),
+            )
+            .unwrap();
+            let snapshot = Git::run(&repo.worktree, &["rev-parse", "HEAD"]).unwrap();
+            assert!(Git::verify_snapshot_objects(&repo.source, &snapshot).is_err());
+            Git.import_guest_commits(&repo).unwrap();
+            Git::verify_snapshot_objects(&repo.source, &snapshot).unwrap();
+            assert!(repo.worktree.join(".git").is_dir());
+            assert_eq!(fs::read_to_string(repo.source.join("a")).unwrap(), "base\n");
+            assert_eq!(
+                Git::run(&repo.source, &["rev-parse", &repo.branch]).unwrap(),
+                snapshot
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_guest_import_still_rejects_rewritten_history() {
+        let (_root, repo) = isolated_import_fixture();
+        Git.import_guest_commits(&repo).unwrap();
+        let previous = Git::run(&repo.source, &["rev-parse", &repo.branch]).unwrap();
+        git(&repo.worktree, &["reset", "--hard", &repo.base_commit]);
+        fs::write(repo.worktree.join("a"), "rewritten\n").unwrap();
+        git(&repo.worktree, &["commit", "-am", "rewrite"]);
+        add_broken_import_ref(&repo.source, false, previous.len());
+        let error = Git.restore_and_import_guest_metadata(&repo).unwrap_err();
+        assert!(error.to_string().contains("rewrote history"));
+        assert!(repo.worktree.join(".git").is_dir());
+        assert_eq!(
+            Git::run(&repo.source, &["rev-parse", &repo.branch]).unwrap(),
+            previous
+        );
+    }
+
+    #[test]
+    fn guest_pack_keep_guard_removes_only_its_own_keep_file() {
+        let (_root, repo) = isolated_import_fixture();
+        let snapshot = Git::run(&repo.worktree, &["rev-parse", "HEAD"]).unwrap();
+        let keep = Git::import_guest_pack(&repo, &snapshot).unwrap();
+        let path = keep.path.clone();
+        assert_eq!(fs::read_to_string(&path).unwrap().trim(), keep.marker);
+        drop(keep);
+        assert!(!path.exists());
+
+        fs::write(&path, "another operation\n").unwrap();
+        drop(Git::import_guest_pack(&repo, &snapshot).unwrap());
+        assert_eq!(fs::read_to_string(path).unwrap(), "another operation\n");
+    }
+
+    #[test]
+    fn failed_guest_ref_publication_retains_isolated_metadata() {
+        for fallback in [false, true] {
+            let (_root, repo) = isolated_import_fixture();
+            if fallback {
+                add_broken_import_ref(&repo.source, false, repo.base_commit.len());
+            }
+            let lock = repo
+                .source
+                .join(".git/refs/heads")
+                .join(format!("{}.lock", repo.branch));
+            fs::write(&lock, "another operation\n").unwrap();
+            let error = Git.restore_and_import_guest_metadata(&repo).unwrap_err();
+            assert!(error.to_string().contains("update-ref"));
+            assert_eq!(fs::read_to_string(lock).unwrap(), "another operation\n");
+            assert!(repo.worktree.join(".git").is_dir());
+            assert!(repo.host_gitfile.is_file());
+            assert_eq!(
+                Git::run(&repo.source, &["rev-parse", &repo.branch]).unwrap(),
+                repo.base_commit
+            );
+        }
     }
 
     #[test]

@@ -537,6 +537,16 @@ run `jbox accept --abort` and choose that worktree. Neither option stops the
 
 An internal detached watcher checks TTL every minute. TTL uses the most recent create, attach, shell, or accept timestamp. Expiry stops the guest and retains its worktrees. `jbox clean` refuses when a worktree has staged, unstaged, untracked, or post-base commits unless `--force` is explicit.
 
+Before removing an isolated guest worktree, jbox imports its committed session
+snapshot into the host session branch. If unrelated broken Git refs (for example,
+`refs/codex/turn-diffs/...`) block the normal fetch, jbox falls back to transferring
+only the snapshot's reachable objects without changing those refs. The imported
+history must be complete and fast-forward the retained host snapshot. If required
+objects are missing or publication fails, the worktree is retained even with
+`--force`. This fallback can require temporary disk space for a full history pack
+on the session filesystem. It does not repair unrelated broken refs, and `--force`
+can still discard uncommitted guest files.
+
 ## `.jbox.toml`
 
 Configuration lives in the primary repository root. Unknown fields and malformed paths fail closed.
