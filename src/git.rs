@@ -6,13 +6,14 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{Seek, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{Read, Seek, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub struct Git;
 const BEADS_EXPORT_LIMIT: u64 = 8 * 1024 * 1024;
+const BEADS_DOLT_SERVER_CONFIG: &str = ".beads/dolt-server-config.yaml";
 
 /// Keep a newly imported pack alive until its snapshot ref is published. A
 /// unique marker prevents removing a keep file owned by another operation.
@@ -845,6 +846,17 @@ impl Git {
             );
         }
         let status = self.status(repo)?;
+        if status
+            .lines()
+            .any(|line| line == format!("!! {BEADS_DOLT_SERVER_CONFIG}"))
+        {
+            bail!(
+                "cannot checkpoint {}: ignored {} is not recognized as generated Beads runtime state; review it and explicitly stage it with `git add -f -- {}` or move it out of the worktree",
+                repo.name,
+                BEADS_DOLT_SERVER_CONFIG,
+                BEADS_DOLT_SERVER_CONFIG
+            );
+        }
         if status.lines().all(|line| line.starts_with("##")) {
             return Ok(false);
         }
@@ -887,10 +899,14 @@ impl Git {
         if !self.validate_session_checkpoint(repo)? {
             return Ok(false);
         }
+        // Determine provenance before staging: an explicit user-staged file
+        // must remain project work, while our own `add` must not invalidate
+        // the unchanged bootstrap/runtime exclusions.
+        let ignored_paths = self.ignored_jbox_beads_paths(repo);
         Self::run(&repo.worktree, &["add", "--all"])?;
         // Keep jbox-created Beads bootstrap files out of an agent checkpoint.
-        for path in self.ignored_jbox_beads_paths(repo) {
-            let _ = Self::run(&repo.worktree, &["reset", "--", &path]);
+        for path in ignored_paths {
+            Self::run(&repo.worktree, &["reset", "--", &path])?;
         }
         Self::run(
             &repo.worktree,
@@ -1231,7 +1247,7 @@ impl Git {
             &repo.worktree,
             &["status", "--short", "--branch", "--untracked-files=all"],
         )?;
-        Ok(self.without_jbox_beads_snapshot(repo, &status))
+        self.without_jbox_beads_snapshot(repo, &status)
     }
     pub fn current_branch(&self, repository: &Path) -> Result<String> {
         Self::run(repository, &["branch", "--show-current"])
@@ -1493,15 +1509,7 @@ impl Git {
     /// Git's force flag solely to dispose of ignored caches and guest runtime
     /// artifacts.
     pub fn requires_safe_worktree_force(&self, repo: &RepoState) -> Result<bool> {
-        let project_status = Self::run(
-            &repo.worktree,
-            &["status", "--porcelain", "--untracked-files=all"],
-        )?;
-        if !self
-            .without_jbox_beads_snapshot(repo, &project_status)
-            .trim()
-            .is_empty()
-        {
+        if self.has_uncommitted_changes(repo)? {
             return Ok(false);
         }
         let all_status = Self::run(
@@ -1551,26 +1559,123 @@ impl Git {
             &["status", "--porcelain", "--untracked-files=all"],
         )?;
         Ok(!self
-            .without_jbox_beads_snapshot(repo, &status)
+            .without_jbox_beads_snapshot(repo, &status)?
             .trim()
             .is_empty())
     }
 
-    fn without_jbox_beads_snapshot(&self, repo: &RepoState, status: &str) -> String {
+    fn without_jbox_beads_snapshot(&self, repo: &RepoState, status: &str) -> Result<String> {
         let snapshot_is_unchanged = self.is_unchanged_beads_snapshot(repo);
-        if !snapshot_is_unchanged && repo.beads_bootstrap.is_empty() {
-            return status.into();
+        if repo.beads_snapshot.is_none() && repo.beads_bootstrap.is_empty() {
+            return Ok(status.into());
         }
-        status
+        let runtime_status = Self::run(
+            &repo.worktree,
+            &[
+                "status",
+                "--porcelain",
+                "-z",
+                "--ignored",
+                "--untracked-files=all",
+                "--",
+                BEADS_DOLT_SERVER_CONFIG,
+            ],
+        )?;
+        let generated_runtime = self.is_generated_beads_dolt_config(repo);
+        let mut filtered = status
             .lines()
             .filter(|line| {
                 !((snapshot_is_unchanged && line.ends_with(".beads/issues.jsonl"))
                     || self.is_unchanged_bootstrap_line(repo, line)
                     || self.is_transient_beads_gate_lock(repo, line)
+                    || (generated_runtime
+                        && (*line == format!("?? {BEADS_DOLT_SERVER_CONFIG}")
+                            || *line == format!("!! {BEADS_DOLT_SERVER_CONFIG}")))
                     || self.is_safe_beads_runtime_line(repo, line))
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+        // A malformed or symlinked config must not become disposable merely
+        // because a Beads version added the runtime name to its gitignore.
+        let ignored_marker = format!("!! {BEADS_DOLT_SERVER_CONFIG}");
+        let ignored_directory = format!("{ignored_marker}/");
+        if !generated_runtime
+            && runtime_status
+                .split('\0')
+                .any(|line| line == ignored_marker || line.starts_with(&ignored_directory))
+            && !filtered.lines().any(|line| line == ignored_marker)
+        {
+            if !filtered.is_empty() {
+                filtered.push('\n');
+            }
+            filtered.push_str(&ignored_marker);
+        }
+        Ok(filtered)
+    }
+
+    /// Recognize only the ordinary, untracked localhost config emitted by
+    /// Beads. Unknown versions or edits fail closed instead of hiding work.
+    fn is_generated_beads_dolt_config(&self, repo: &RepoState) -> bool {
+        if repo.beads_snapshot.is_none() && repo.beads_bootstrap.is_empty() {
+            return false;
+        }
+        let beads = repo.worktree.join(".beads");
+        if !fs::symlink_metadata(&beads).is_ok_and(|metadata| metadata.is_dir()) {
+            return false;
+        }
+        let path = repo.worktree.join(BEADS_DOLT_SERVER_CONFIG);
+        let Ok(file) = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+        else {
+            return false;
+        };
+        if !file
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= 4096)
+        {
+            return false;
+        }
+        // Check HEAD as well as the index. A tracked file staged for deletion
+        // and recreated untracked must not have its deliberate deletion reset.
+        for args in [
+            vec!["ls-files", "--", BEADS_DOLT_SERVER_CONFIG],
+            vec![
+                "ls-tree",
+                "--name-only",
+                "HEAD",
+                "--",
+                BEADS_DOLT_SERVER_CONFIG,
+            ],
+        ] {
+            if !Self::run(&repo.worktree, &args).is_ok_and(|text| text.is_empty()) {
+                return false;
+            }
+        }
+        let mut text = String::new();
+        if file.take(4097).read_to_string(&mut text).is_err() || text.len() > 4096 {
+            return false;
+        }
+        let prefix = "log_level: warning\nbehavior:\n    auto_gc_behavior:\n        archive_level: 0\nlistener:\n    host: 127.0.0.1\n    port: ";
+        let Some((port_text, remainder)) = text
+            .strip_prefix(prefix)
+            .and_then(|tail| tail.split_once('\n'))
+        else {
+            return false;
+        };
+        let Ok(port) = port_text.parse::<u16>() else {
+            return false;
+        };
+        port != 0
+            && port.to_string() == port_text
+            && remainder
+                == format!(
+                    "cfg_dir: {}\nuser_session_vars: []\njwks: []\n",
+                    Path::new(&repo.mount)
+                        .join(".beads/dolt/.doltcfg")
+                        .display()
+                )
     }
 
     fn is_unchanged_beads_snapshot(&self, repo: &RepoState) -> bool {
@@ -1676,6 +1781,9 @@ impl Git {
         );
         if repo.beads_snapshot.is_some() || !repo.beads_bootstrap.is_empty() {
             paths.push(".beads.gate.lock".to_owned());
+        }
+        if self.is_generated_beads_dolt_config(repo) {
+            paths.push(BEADS_DOLT_SERVER_CONFIG.to_owned());
         }
         paths.sort();
         paths.dedup();
@@ -2320,6 +2428,347 @@ mod tests {
         repo.beads_bootstrap.clear();
         fs::write(worktree.join(".beads/issues.jsonl"), "agent edit\n").unwrap();
         Git.remove_worktree(source.path(), &worktree, true).unwrap();
+    }
+
+    fn dolt_runtime_fixture() -> (tempfile::TempDir, RepoState) {
+        let root = tempdir().unwrap();
+        let host = root.path().join("host");
+        git(root.path(), &["init", host.to_str().unwrap()]);
+        git(&host, &["config", "user.email", "test@example.com"]);
+        git(&host, &["config", "user.name", "Test"]);
+        fs::write(host.join("tracked"), "base\n").unwrap();
+        git(&host, &["add", "."]);
+        git(&host, &["commit", "-m", "base"]);
+        let worktree = root.path().join("worktree");
+        let made = Git
+            .add_worktree(&host, &worktree, "calm-fox-123", "repo")
+            .unwrap();
+        fs::create_dir(worktree.join(".beads")).unwrap();
+        fs::write(worktree.join(".beads/config.yaml"), "dolt: server\n").unwrap();
+        let beads_bootstrap = Git.capture_beads_bootstrap(&worktree);
+        let repo = RepoState {
+            name: "repo".into(),
+            source: host,
+            worktree,
+            mount: "/workspace/repo".into(),
+            branch: made.branch,
+            base_commit: made.commit,
+            host_gitfile: root.path().join("host-gitfile"),
+            beads_snapshot: None,
+            beads_bootstrap,
+        };
+        fs::write(
+            repo.worktree.join(".beads/dolt-server-config.yaml"),
+            dolt_runtime_config(34763),
+        )
+        .unwrap();
+        (root, repo)
+    }
+
+    fn dolt_runtime_config(port: u16) -> String {
+        format!(
+            "log_level: warning\nbehavior:\n    auto_gc_behavior:\n        archive_level: 0\nlistener:\n    host: 127.0.0.1\n    port: {port}\ncfg_dir: /workspace/repo/.beads/dolt/.doltcfg\nuser_session_vars: []\njwks: []\n"
+        )
+    }
+
+    #[test]
+    fn generated_dolt_runtime_config_is_clean_without_an_issue_snapshot() {
+        let (_root, repo) = dolt_runtime_fixture();
+        assert_eq!(Git.change_state(&repo).unwrap(), WorktreeChangeState::Clean);
+        assert!(
+            !Git.status(&repo)
+                .unwrap()
+                .contains("dolt-server-config.yaml")
+        );
+        assert!(Git.requires_safe_worktree_force(&repo).unwrap());
+        let host_branch = Git::run(&repo.source, &["branch", "--show-current"]).unwrap();
+        Git.preflight_rebase_worktree(&repo, &host_branch).unwrap();
+        assert!(!Git.validate_session_checkpoint(&repo).unwrap());
+        assert!(
+            !Git.checkpoint_session_changes(&repo, "calm-fox-123")
+                .unwrap()
+        );
+        assert_eq!(
+            Git::run(&repo.worktree, &["rev-parse", "HEAD"]).unwrap(),
+            repo.base_commit
+        );
+        assert_eq!(
+            fs::read_to_string(repo.worktree.join(".beads/dolt-server-config.yaml")).unwrap(),
+            dolt_runtime_config(34763)
+        );
+    }
+
+    #[test]
+    fn checkpoint_keeps_generated_dolt_runtime_and_bootstrap_files_out_of_commit() {
+        for resume in [false, true] {
+            let (_root, repo) = dolt_runtime_fixture();
+            fs::write(repo.worktree.join("agent-file"), "real work\n").unwrap();
+            if resume {
+                assert!(
+                    Git.checkpoint_session_changes_for_resume(&repo, "calm-fox-123")
+                        .unwrap()
+                );
+            } else {
+                assert!(
+                    Git.checkpoint_session_changes(&repo, "calm-fox-123")
+                        .unwrap()
+                );
+            }
+            assert_eq!(
+                Git::run(
+                    &repo.worktree,
+                    &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]
+                )
+                .unwrap(),
+                "agent-file"
+            );
+            assert!(
+                Git::run(&repo.worktree, &["ls-files", ".beads"])
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(!Git.validate_session_checkpoint(&repo).unwrap());
+            assert!(
+                repo.worktree
+                    .join(".beads/dolt-server-config.yaml")
+                    .is_file()
+            );
+        }
+    }
+
+    #[test]
+    fn staged_and_tracked_dolt_configs_remain_user_work() {
+        for tracked in [false, true] {
+            let (_root, repo) = dolt_runtime_fixture();
+            let path = ".beads/dolt-server-config.yaml";
+            git(&repo.worktree, &["add", path]);
+            if tracked {
+                git(&repo.worktree, &["commit", "-m", "user config"]);
+                fs::write(repo.worktree.join(path), dolt_runtime_config(34764)).unwrap();
+            }
+            assert!(Git.status(&repo).unwrap().contains(path));
+            assert!(Git.validate_session_checkpoint(&repo).unwrap());
+            assert!(
+                Git.checkpoint_session_changes(&repo, "calm-fox-123")
+                    .unwrap()
+            );
+            assert_eq!(Git::run(&repo.worktree, &["ls-files", path]).unwrap(), path);
+            assert_eq!(
+                Git::run(&repo.worktree, &["show", &format!("HEAD:{path}")]).unwrap(),
+                dolt_runtime_config(if tracked { 34764 } else { 34763 }).trim()
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognized_dolt_configs_and_paths_remain_visible() {
+        let (_root, mut repo) = dolt_runtime_fixture();
+        let path = ".beads/dolt-server-config.yaml";
+        let generated = dolt_runtime_config(34763);
+        for content in [
+            "agent data\n".to_owned(),
+            generated.replace("127.0.0.1", "0.0.0.0"),
+            generated.replace("/workspace/repo", "/workspace/other"),
+            generated.replace("34763", "0"),
+            generated.replace("34763", "65536"),
+            generated.replace("34763", "+34763"),
+            generated.replace("archive_level: 0", "archive_level: 1"),
+            format!("{generated}agent_option: true\n"),
+            format!("{generated}---\nlistener: {{host: example.com}}\n"),
+            format!("{generated}listener: {{host: example.com}}\n"),
+            "x".repeat(4097),
+        ] {
+            fs::write(repo.worktree.join(path), &content).unwrap();
+            assert!(Git.status(&repo).unwrap().contains(path), "{content}");
+            assert!(Git.validate_session_checkpoint(&repo).unwrap());
+            assert!(
+                !Git.ignored_jbox_beads_paths(&repo)
+                    .contains(&path.to_owned())
+            );
+        }
+        fs::write(repo.worktree.join(path), &generated).unwrap();
+        repo.beads_bootstrap.clear();
+        assert!(Git.status(&repo).unwrap().contains(path));
+    }
+
+    #[test]
+    fn recreated_dolt_config_does_not_hide_a_staged_deletion() {
+        let (_root, repo) = dolt_runtime_fixture();
+        let path = BEADS_DOLT_SERVER_CONFIG;
+        git(&repo.worktree, &["add", path]);
+        git(&repo.worktree, &["commit", "-m", "user config"]);
+        git(&repo.worktree, &["rm", "--", path]);
+        fs::write(repo.worktree.join(path), dolt_runtime_config(34764)).unwrap();
+        assert!(!Git.is_generated_beads_dolt_config(&repo));
+        assert!(
+            !Git.ignored_jbox_beads_paths(&repo)
+                .contains(&path.to_owned())
+        );
+        assert!(Git.status(&repo).unwrap().contains(path));
+        assert_eq!(
+            Git::run(&repo.worktree, &["diff", "--cached", "--name-status"]).unwrap(),
+            format!("D\t{path}")
+        );
+    }
+
+    #[test]
+    fn symlinked_beads_directory_cannot_prove_dolt_runtime_is_disposable() {
+        let (_root, repo) = dolt_runtime_fixture();
+        let beads = repo.worktree.join(".beads");
+        let outside = repo.source.join("external-beads");
+        fs::rename(&beads, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &beads).unwrap();
+        assert!(!Git.is_generated_beads_dolt_config(&repo));
+        assert!(
+            !Git.ignored_jbox_beads_paths(&repo)
+                .contains(&BEADS_DOLT_SERVER_CONFIG.to_owned())
+        );
+        assert_eq!(
+            Git.change_state(&repo).unwrap(),
+            WorktreeChangeState::Changes
+        );
+        assert!(!Git.requires_safe_worktree_force(&repo).unwrap());
+    }
+
+    #[test]
+    fn ignored_dolt_runtime_is_safe_but_symlinked_runtime_is_not() {
+        let (_root, repo) = dolt_runtime_fixture();
+        let path = ".beads/dolt-server-config.yaml";
+        fs::write(
+            repo.worktree.join(".beads/.gitignore"),
+            "dolt-server-config.yaml\n",
+        )
+        .unwrap();
+        let mut repo = repo;
+        repo.beads_bootstrap = Git.capture_beads_bootstrap(&repo.worktree);
+        let ignored = Git::run(
+            &repo.worktree,
+            &[
+                "status",
+                "--porcelain",
+                "--ignored",
+                "--untracked-files=all",
+            ],
+        )
+        .unwrap();
+        assert!(
+            !Git.without_jbox_beads_snapshot(&repo, &ignored)
+                .unwrap()
+                .contains(path)
+        );
+        assert_eq!(Git.change_state(&repo).unwrap(), WorktreeChangeState::Clean);
+        fs::write(repo.worktree.join(path), "custom config\n").unwrap();
+        assert!(Git.status(&repo).unwrap().contains(path));
+        assert_eq!(
+            Git.change_state(&repo).unwrap(),
+            WorktreeChangeState::Changes
+        );
+        assert!(!Git.requires_safe_worktree_force(&repo).unwrap());
+        assert!(
+            Git.validate_session_checkpoint(&repo)
+                .unwrap_err()
+                .to_string()
+                .contains("git add -f")
+        );
+        fs::remove_file(repo.worktree.join(path)).unwrap();
+        let outside = repo.source.join("runtime.yaml");
+        fs::write(&outside, dolt_runtime_config(34763)).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.worktree.join(path)).unwrap();
+        let ignored = Git::run(
+            &repo.worktree,
+            &[
+                "status",
+                "--porcelain",
+                "--ignored",
+                "--untracked-files=all",
+            ],
+        )
+        .unwrap();
+        assert!(
+            Git.without_jbox_beads_snapshot(&repo, &ignored)
+                .unwrap()
+                .contains(path)
+        );
+        assert!(Git.status(&repo).unwrap().contains(path));
+        assert_eq!(
+            Git.change_state(&repo).unwrap(),
+            WorktreeChangeState::Changes
+        );
+        assert!(!Git.requires_safe_worktree_force(&repo).unwrap());
+        assert!(
+            Git.validate_session_checkpoint(&repo)
+                .unwrap_err()
+                .to_string()
+                .contains("git add -f")
+        );
+        assert_eq!(
+            fs::read_to_string(&outside).unwrap(),
+            dolt_runtime_config(34763)
+        );
+        fs::remove_file(repo.worktree.join(".beads/.gitignore")).unwrap();
+        assert!(Git.status(&repo).unwrap().contains(path));
+    }
+
+    #[test]
+    fn ignored_dolt_config_directory_remains_protected() {
+        for name in [
+            "user-data",
+            "user\tdata",
+            "ümlaut",
+            "user\nfile",
+            "quoted\"name",
+        ] {
+            let (_root, mut repo) = dolt_runtime_fixture();
+            let path = BEADS_DOLT_SERVER_CONFIG;
+            fs::remove_file(repo.worktree.join(path)).unwrap();
+            fs::create_dir(repo.worktree.join(path)).unwrap();
+            fs::write(repo.worktree.join(path).join(name), "preserve me\n").unwrap();
+            fs::write(
+                repo.worktree.join(".beads/.gitignore"),
+                "dolt-server-config.yaml/\n",
+            )
+            .unwrap();
+            repo.beads_bootstrap = Git.capture_beads_bootstrap(&repo.worktree);
+            assert!(
+                Git.status(&repo).unwrap().contains(&format!("!! {path}")),
+                "{name:?}"
+            );
+            assert_eq!(
+                Git.change_state(&repo).unwrap(),
+                WorktreeChangeState::Changes
+            );
+            assert!(!Git.requires_safe_worktree_force(&repo).unwrap());
+            assert!(
+                Git.validate_session_checkpoint(&repo)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("git add -f")
+            );
+            assert_eq!(
+                fs::read_to_string(repo.worktree.join(path).join(name)).unwrap(),
+                "preserve me\n"
+            );
+        }
+    }
+
+    #[test]
+    fn changed_issue_snapshot_does_not_disable_dolt_runtime_classification() {
+        let (_root, mut repo) = dolt_runtime_fixture();
+        repo.beads_bootstrap.clear();
+        repo.beads_snapshot = Some(format!("{:x}", Sha256::digest(b"initial\n")));
+        fs::write(repo.worktree.join(".beads/issues.jsonl"), "agent update\n").unwrap();
+        let status = Git.status(&repo).unwrap();
+        assert!(status.contains("issues.jsonl"));
+        assert!(!status.contains(BEADS_DOLT_SERVER_CONFIG));
+    }
+
+    #[test]
+    fn dolt_runtime_status_query_failure_is_not_treated_as_clean() {
+        let (_root, repo) = dolt_runtime_fixture();
+        let git_dir = Git::run(&repo.worktree, &["rev-parse", "--git-common-dir"]).unwrap();
+        fs::write(Path::new(&git_dir).join("config"), "[invalid\n").unwrap();
+        assert!(Git.without_jbox_beads_snapshot(&repo, "").is_err());
+        assert!(repo.worktree.join(BEADS_DOLT_SERVER_CONFIG).is_file());
     }
 
     #[test]

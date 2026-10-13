@@ -439,7 +439,15 @@ you may instead commit or stash manually. `jbox resume <session>` is available f
 selection. If Docker or Kata stops a guest outside jbox, the next jbox command
 detects the stale runtime, imports its committed guest history, marks the
 session stopped, and makes it resumable. Transient Beads coordination locks do
-not count as user changes.
+not count as user changes. In Beads-bootstrapped worktrees, an untracked
+`.beads/dolt-server-config.yaml` matching the generated localhost configuration
+for that guest mount is also runtime state: it neither blocks synchronization
+nor enters a checkpoint. Tracked, explicitly staged, symlinked, or unrecognized
+configurations remain ordinary project work. Unknown Beads output formats fail
+closed and remain visible for review. A generated config may be rewritten with
+a different valid local port and still count as runtime state. To preserve a
+custom ignored config in checkpoints, overlays, or previews, review it and
+explicitly stage it with `git add -f` first.
 
 If a retained worktree has a paused rebase or merge, jbox never checkpoints
 conflict markers. From the affected host repository run `jbox resolve` and
