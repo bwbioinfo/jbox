@@ -175,6 +175,13 @@ The default Debian guest tooling also includes `rustfmt`, so Rust formatting
 checks can run inside a newly built Jbox image. Existing running guests retain
 their current image and toolchain until they are recreated.
 
+The default x86_64 image also includes all 13 **ArtCraft headless CLIs**, with
+pinned release checksums, runtime libraries and PdfCraft OCR models. The desktop
+apps and launcher are not installed, and no GPU/audio devices or additional
+listeners are exposed. See [ArtCraft tooling](docs/artcraft.md) for the version
+matrix, dependencies, usage and update procedure. Updated installer inputs
+invalidate the image cache, but existing guests must be recreated.
+
 The generated template installs every discoverable skill from
 `bwbioinfo/skills`. Add other GitHub sources with `[[jcode.skills]]`. Jbox
 fetches skills **on the host** with the host's authenticated `gh` before the

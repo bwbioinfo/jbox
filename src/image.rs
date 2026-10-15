@@ -166,7 +166,10 @@ su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode &&
 exec /usr/sbin/sshd -D -e
 "#;
 
-const BASE_DOCKERFILE: &str = "FROM debian:bookworm-slim\nARG JBOX_UID=1000\nARG JBOX_GID=1000\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl git gzip openssh-client openssh-server rustfmt tar && rm -rf /var/lib/apt/lists/*\nRUN mkdir -p -m 0755 /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' > /etc/apt/sources.list.d/github-cli.list && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*\nRUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash && bd version\n# Never inherit a repository's host-managed Dolt server settings in a jbox guest.\nENV BEADS_DOLT_SERVER_MODE=embedded BEADS_DOLT_AUTO_START=true\nRUN groupadd --gid \"$JBOX_GID\" jbox && useradd --uid \"$JBOX_UID\" --gid \"$JBOX_GID\" -m -s /bin/bash jbox && mkdir -p /run/sshd /home/jbox/.jcode /home/jbox/.ssh && chown -R jbox:jbox /home/jbox\nCOPY jcode /usr/local/bin/jcode\nCOPY jcode-linux-x86_64.bin /usr/local/bin/jcode-linux-x86_64.bin\nCOPY jbox-entrypoint /usr/local/bin/jbox-entrypoint\nCOPY jbox-beads-pre-commit /usr/local/bin/jbox-beads-pre-commit\nRUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/local/bin/jbox-entrypoint /usr/local/bin/jbox-beads-pre-commit && printf '%s\\n' 'Port 2222' 'PasswordAuthentication no' 'PermitRootLogin no' 'AllowUsers jbox' 'AuthorizedKeysFile .ssh/authorized_keys' > /etc/ssh/sshd_config.d/jbox.conf\nEXPOSE 2222\n";
+const ARTCRAFT_INSTALLER: &str = include_str!("../templates/install-artcraft.sh");
+const ARTCRAFT_RELEASES: &str = include_str!("../templates/artcraft-releases.txt");
+
+const BASE_DOCKERFILE: &str = "FROM debian:bookworm-slim\nARG JBOX_UID=1000\nARG JBOX_GID=1000\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl git gzip libc6 libgcc-s1 openssh-client openssh-server rustfmt tar && rm -rf /var/lib/apt/lists/*\nRUN mkdir -p -m 0755 /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' > /etc/apt/sources.list.d/github-cli.list && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*\nRUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash && bd version\nCOPY install-artcraft.sh artcraft-releases.txt /opt/jbox/\nRUN sh /opt/jbox/install-artcraft.sh /opt/jbox/artcraft-releases.txt /usr/local && rm -rf /opt/jbox\n# Never inherit a repository's host-managed Dolt server settings in a jbox guest.\nENV BEADS_DOLT_SERVER_MODE=embedded BEADS_DOLT_AUTO_START=true\nRUN groupadd --gid \"$JBOX_GID\" jbox && useradd --uid \"$JBOX_UID\" --gid \"$JBOX_GID\" -m -s /bin/bash jbox && mkdir -p /run/sshd /home/jbox/.jcode /home/jbox/.ssh && chown -R jbox:jbox /home/jbox\nCOPY jcode /usr/local/bin/jcode\nCOPY jcode-linux-x86_64.bin /usr/local/bin/jcode-linux-x86_64.bin\nCOPY jbox-entrypoint /usr/local/bin/jbox-entrypoint\nCOPY jbox-beads-pre-commit /usr/local/bin/jbox-beads-pre-commit\nRUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/local/bin/jbox-entrypoint /usr/local/bin/jbox-beads-pre-commit && printf '%s\\n' 'Port 2222' 'PasswordAuthentication no' 'PermitRootLogin no' 'AllowUsers jbox' 'AuthorizedKeysFile .ssh/authorized_keys' > /etc/ssh/sshd_config.d/jbox.conf\nEXPOSE 2222\n";
 impl<'a> ImageManager<'a> {
     pub fn new(paths: &'a JboxPaths) -> Self {
         Self { paths }
@@ -213,11 +216,7 @@ impl<'a> ImageManager<'a> {
         // in the tag so an entrypoint security or startup fix cannot silently
         // reuse a stale local base image, which would also poison project-image
         // caching through its base-image build argument.
-        let mut hasher = Sha256::new();
-        hasher.update(BASE_DOCKERFILE.as_bytes());
-        hasher.update(JBOX_ENTRYPOINT.as_bytes());
-        hasher.update(JBOX_BEADS_PRE_COMMIT.as_bytes());
-        let fingerprint = format!("{:x}", hasher.finalize());
+        let fingerprint = base_image_fingerprint(ARTCRAFT_INSTALLER, ARTCRAFT_RELEASES);
         let tag = format!("jbox/jcode:local-v10-{uid}-{gid}-{}", &fingerprint[..16]);
         if self.exists(&tag) {
             return Ok(tag);
@@ -249,6 +248,8 @@ impl<'a> ImageManager<'a> {
         std::fs::write(context.join("Dockerfile"), BASE_DOCKERFILE)?;
         std::fs::write(context.join("jbox-entrypoint"), JBOX_ENTRYPOINT)?;
         std::fs::write(context.join("jbox-beads-pre-commit"), JBOX_BEADS_PRE_COMMIT)?;
+        std::fs::write(context.join("install-artcraft.sh"), ARTCRAFT_INSTALLER)?;
+        std::fs::write(context.join("artcraft-releases.txt"), ARTCRAFT_RELEASES)?;
         run_build(
             &context,
             &context.join("Dockerfile"),
@@ -257,6 +258,20 @@ impl<'a> ImageManager<'a> {
         )?;
         Ok(tag)
     }
+}
+
+fn base_image_fingerprint(artcraft_installer: &str, artcraft_releases: &str) -> String {
+    let mut hasher = Sha256::new();
+    for input in [
+        BASE_DOCKERFILE,
+        JBOX_ENTRYPOINT,
+        JBOX_BEADS_PRE_COMMIT,
+        artcraft_installer,
+        artcraft_releases,
+    ] {
+        hasher.update(input.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 fn current_user_ids() -> Result<(String, String)> {
@@ -314,6 +329,34 @@ mod tests {
         assert!(
             JBOX_ENTRYPOINT.find("gh auth setup-git").unwrap()
                 < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
+        );
+    }
+
+    #[test]
+    fn base_image_installs_artcraft_with_runtime_dependencies() {
+        assert!(BASE_DOCKERFILE.contains("libc6 libgcc-s1"));
+        assert!(
+            BASE_DOCKERFILE.contains("COPY install-artcraft.sh artcraft-releases.txt /opt/jbox/")
+        );
+        assert!(BASE_DOCKERFILE.contains(
+            "sh /opt/jbox/install-artcraft.sh /opt/jbox/artcraft-releases.txt /usr/local"
+        ));
+    }
+
+    #[test]
+    fn artcraft_installer_and_release_pins_invalidate_the_base_image_cache() {
+        let original = base_image_fingerprint(ARTCRAFT_INSTALLER, ARTCRAFT_RELEASES);
+        assert_ne!(
+            original,
+            base_image_fingerprint("changed installer", ARTCRAFT_RELEASES)
+        );
+        assert_ne!(
+            original,
+            base_image_fingerprint(ARTCRAFT_INSTALLER, "changed releases")
+        );
+        assert_eq!(
+            original,
+            base_image_fingerprint(ARTCRAFT_INSTALLER, ARTCRAFT_RELEASES)
         );
     }
 
