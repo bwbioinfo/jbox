@@ -110,8 +110,8 @@ jbox .
 `jbox init` creates a `.jbox.toml` for the current Git repository and, when it
 does not already exist, a `.jbox/Dockerfile` that extends jbox's runtime image.
 Ordinary initialization never overwrites either file. Pass `--tool` repeatedly to install Debian
-packages in the generated image, for example `jbox init --tool sqlite3 --tool
-rsync`. For any other customization, edit the generated Dockerfile and add normal
+packages in the generated image, for example `jbox init --tool tree --tool
+wget`. For any other customization, edit the generated Dockerfile and add normal
 Dockerfile instructions. Its content is hashed, so the next `jbox .` rebuilds
 the project image automatically when it changes.
 
@@ -124,9 +124,10 @@ just the Jcode runtime. No `--tool` arguments are needed for:
 | --- | --- |
 | Rust | Rust 1.99.0, Cargo, rustup, rustfmt, Clippy, rust-analyzer |
 | Native builds | GCC/G++, Make (`build-essential`), CMake, Ninja, pkg-config, OpenSSL development headers |
-| Python | Python 3.15.0, pip, venv, development headers |
-| JavaScript | Node.js 26.12.0 (Current), npm, npx |
-| Shell and inspection | Bash, ripgrep (`rg`), jq, file, less, procps |
+| Python | Python 3.15.0, pip, venv, development headers, uv/uvx 0.13.1 |
+| JavaScript | Node.js 26.12.0 (Current), npm, npx, pnpm/pnpx 12.11.2 |
+| Shell and inspection | Bash, ripgrep (`rg`), jq, file, less, procps, ShellCheck |
+| Data and transfers | sqlite3, rsync, rclone 1.75.2 |
 | Git and connectivity | Git, GitHub CLI (`gh`), OpenSSH client/server, curl, CA certificates |
 | Archives | tar, gzip, xz, zip, unzip |
 | Creative automation | All 13 ArtCraft headless CLIs, Fontconfig, DejaVu and Liberation fonts |
@@ -154,7 +155,18 @@ rustup target add wasm32-unknown-unknown --toolchain stable
 ```
 
 Global npm installs use `/home/jbox/.local`; both user binary directories are
-on the guest PATH. Use project virtual environments for Python dependencies.
+on the guest PATH. `PNPM_HOME=/home/jbox/.local/bin` is also set for Docker and SSH
+sessions, keeping pnpm's global binaries writable and discoverable. uv uses its
+normal user-local cache, tool directory, and `~/.local/bin` entry points. Use
+project virtual environments for Python dependencies. uv and rclone binaries
+come from version-pinned official images. pnpm is installed at its pinned
+version in the Node build stage with the lifecycle scripts its native binary
+requires. sqlite3, rsync, and ShellCheck use Debian Bookworm packages.
+
+rclone's configuration stays guest-local unless you explicitly configure an
+approved credential mechanism. No host rclone config, cloud credentials, FUSE
+device, or additional container capabilities are imported or enabled. File
+transfer commands are available, but `rclone mount` is not enabled by default.
 
 ArtCraft commands are `photocraft-cli`, `vectorcraft-cli`, `filmcraft-cli`,
 `lightcraft-cli`, `pdfcraft-cli`, `effectcraft-cli`, `designcraft-cli`,
@@ -174,9 +186,7 @@ compression**, in addition to the language toolchains. Initial builds require
 network access to the official image/package/release sources, while installed
 tools do not need to be downloaded again when a guest starts.
 
-Useful project-specific additions include **uv** for Python environments,
-**pnpm** for JavaScript workspaces, **sqlite3/rsync** for data and synchronization,
-**ShellCheck** for shell projects, **clang/lld/gdb** for native debugging, and
+Useful project-specific additions include **clang/lld/gdb** for native debugging and
 **FFmpeg/Poppler** for media and PDF interoperability. Keep browsers, document
 publishing stacks, database servers, GPUs, and language-specific SDKs opt-in to
 avoid increasing every session's image size and maintenance surface.

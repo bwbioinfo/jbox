@@ -711,6 +711,31 @@ mod tests {
     }
 
     #[test]
+    fn base_image_installs_package_managers_and_transfer_tools() {
+        for expected in [
+            "FROM ghcr.io/astral-sh/uv:0.13.1 AS uv",
+            "COPY --from=uv /uv /uvx /usr/local/bin/",
+            "npm install --global --prefix /usr/local pnpm@12.11.2 --no-audit --no-fund",
+            "../lib/node_modules/pnpm/pnpm /usr/local/bin/pnpm",
+            "../lib/node_modules/pnpm/pnpx /usr/local/bin/pnpx",
+            "FROM rclone/rclone:1.75.2 AS rclone",
+            "COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone",
+            "        rsync \\",
+            "        shellcheck \\",
+            "        sqlite3 \\",
+            "uv --version; uvx --version; pnpm --version",
+            "sqlite3 :memory: \"SELECT 1;\"; rsync --version; shellcheck --version; rclone version",
+            "PNPM_HOME=/home/jbox/.local/bin",
+            "test -w \"$PNPM_HOME\"",
+        ] {
+            assert!(BASE_DOCKERFILE.contains(expected), "missing {expected}");
+        }
+        // Disabling these scripts leaves pnpm 12's native executable uninstalled.
+        assert!(!BASE_DOCKERFILE.contains("--ignore-scripts"));
+        assert!(!BASE_DOCKERFILE.contains("COPY --from=rclone /config"));
+    }
+
+    #[test]
     fn base_image_preserves_non_root_and_ssh_toolchain_access() {
         for expected in [
             "export RUSTUP_HOME=",
