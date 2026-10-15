@@ -131,10 +131,52 @@ fn templates_and_runtime_prompt_stay_in_sync() {
 }
 
 #[test]
+fn multi_repository_guidance_reaches_new_refreshed_and_checked_in_prompts() {
+    for source in [
+        default_config().unwrap(),
+        refresh(PROJECT).unwrap(),
+        include_str!("../../.jbox.toml").to_owned(),
+    ] {
+        let config = Config::from_toml(&source).unwrap();
+        assert_eq!(
+            config.jcode.agent.jbox.instructions.as_deref(),
+            Some(JBOX_PROMPT)
+        );
+        let rendered = config.jcode.agent.render_instructions().unwrap();
+        for expected in [
+            "**Projects may contain multiple repositories.",
+            "primary `[workspace]` and additional `[[repos]]`",
+            "Host source paths are not guest worktrees.",
+            "`.git` file rather than a `.git` directory",
+            "Read each affected repository's `AGENTS.md`",
+            "`git -C`",
+            "cross-repository dependencies and integration checks",
+            "review every affected repository and report its path",
+            "one repository's credentials or grants do not authorize another",
+        ] {
+            assert!(rendered.contains(expected), "missing {expected}");
+        }
+        assert!(
+            rendered
+                .find("**Projects may contain multiple repositories.")
+                .unwrap()
+                < rendered
+                    .find("Use configured, authorized providers")
+                    .unwrap()
+        );
+    }
+}
+
+#[test]
 fn known_whole_legacy_prompts_migrate_without_touching_project_text() {
     for prompt in [
         LEGACY_PROMPT,
         LEGACY_PROMPT
+            .split("\nWhen presenting a code or command block")
+            .next()
+            .unwrap(),
+        LEGACY_ROUTING_PROMPT,
+        LEGACY_ROUTING_PROMPT
             .split("\nWhen presenting a code or command block")
             .next()
             .unwrap(),

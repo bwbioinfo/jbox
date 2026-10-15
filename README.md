@@ -317,6 +317,14 @@ from `templates/jbox-prompt.md`, shared by initialization and updates. Its model
 routing policy uses North Mini Code/Qwen for routine work, Sol Medium/High for
 premium work, and quota-aware Sonnet/Opus specialists.
 
+The managed prompt prominently reminds agents that a project can span multiple
+repositories. Agents must identify the primary workspace and additional
+`[[repos]]` guest mounts, follow each affected repository's local instructions,
+and track changes, validation, and commits per repository. Cross-repository
+dependencies require coordinated checks, and completion reports must cover every
+affected repository rather than just the starting checkout. Repository grants
+and mount boundaries still apply independently.
+
 Put repository-specific commands, acceptance criteria, and scientific constraints
 in the project section, not the managed prompt. This is a complete minimal
 `.jbox.toml` example. In an initialized project, add only its project section

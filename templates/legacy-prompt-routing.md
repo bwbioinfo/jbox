@@ -1,0 +1,54 @@
+Use the `work-with-geonic` skill for all work in this workspace.
+Use the `jcode-jbox` skill for Jbox workspace, lifecycle, isolation, credential, Jcode configuration, remote-session, and authentication tasks.
+
+Use configured, authorized providers efficiently and only within their terms.
+At session start, before spawning workers, and after a provider error, check
+`jcode auth status --json` and `jcode usage --json` in the guest. A catalog entry
+is not proof of working authentication or sufficient quota. Check both short
+and weekly allowance windows, task size, and concurrent work before routing.
+Do not assume unreported API quota or pricing is unlimited or free.
+
+Prefer North Mini Code and Qwen for routine, retryable work: boilerplate,
+repetitive edits, simple coding, summarization, log analysis, and first-pass
+reasoning. Use the exact catalog-listed models on the user-authorized
+OpenAI-compatible endpoint, currently `North-Mini-Code-1.0` and `Qwen3.8-27B`.
+Verify results with real tests or review. Escalate after bounded retries when
+uncertainty, repeated failure, or correctness consequences warrant it.
+
+Use `gpt-6.1-sol` with `effort: "medium"` as the default premium model for harder
+coding, scientific reasoning, architecture, debugging, and correctness-critical
+tasks. Escalate the same model to `effort: "high"` for especially difficult or
+high-confidence review work. Medium and High are effort levels, not model IDs.
+If the routine endpoint is unavailable, report the constraint and use this
+premium baseline rather than inventing an unsupported route.
+
+Treat Claude as a limited but perishable specialist resource. Proactively use
+Sonnet 5.5 for complex repository work, autonomous debugging, large refactors,
+code review, and other agentic coding when quota comfortably fits the task.
+When substantial allowance remains or a reset is approaching, prefer spending
+Claude capacity on suitable high-value work before routing that work to GPT.
+Do not save it unnecessarily or create work solely to consume allowance.
+Reserve Opus 5.5 for the hardest coding, architectural review, or final
+verification. Keep sufficient headroom in every applicable allowance window.
+When Claude is constrained or unavailable, use the equivalent GPT-6.1 Sol
+Medium or High level matched to the task's difficulty and correctness needs.
+Re-check Claude after resets and prefer it again for suitable specialist work.
+
+For substantial work, split independent tasks. Check `swarm list_models` or
+`jcode --quiet --provider <id> model list --json` for exact available routes.
+Pass the selected `model` and supported `effort` explicitly for new workers,
+including worker-creating assignments and plans. Do not blindly inherit a
+static default. A model option does not reroute an existing worker.
+
+Keep active conversations on their provider unless a fresh worker has a clean
+handoff. Claude and OpenAI subscription routes are distinct from API-key routes.
+The authorized North Mini Code/Qwen endpoint is not permission to enable other
+paid APIs or extra usage. Do not invent model names, retry quota failures to
+evade limits, use unapproved accounts, expose credentials, or expand spending
+without explicit user approval.
+
+When presenting a code or command block to the user, provide the full,
+standalone, directly copy-pasteable invocation or file content. Do not use
+ellipses or placeholders inside a code block, and do not refer to a prior or
+partial snippet. If a fragment is unavoidable, label it explicitly and provide
+a complete alternative.

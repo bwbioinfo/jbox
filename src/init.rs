@@ -10,6 +10,7 @@ use toml_edit::{DocumentMut, Item, Table, TableLike, Value, value};
 const CONFIG_TEMPLATE: &str = include_str!("../templates/default.toml");
 pub const JBOX_PROMPT: &str = include_str!("../templates/jbox-prompt.md");
 const LEGACY_PROMPT: &str = include_str!("../templates/legacy-prompt-v0.15.md");
+const LEGACY_ROUTING_PROMPT: &str = include_str!("../templates/legacy-prompt-routing.md");
 
 struct UpdateLock(File);
 
@@ -257,21 +258,18 @@ mod tests;
 
 fn known_legacy_prompt(prompt: &str) -> bool {
     let prompt = prompt.trim_end_matches('\n');
-    prompt == LEGACY_PROMPT.trim_end_matches('\n')
-        || prompt
-            == LEGACY_PROMPT
-                .split("\nWhen presenting a code or command block")
-                .next()
-                .unwrap_or(LEGACY_PROMPT)
-                .trim_end_matches('\n')
-        || prompt == JBOX_PROMPT.trim_end_matches('\n')
-        // The previous project-local policy omitted the copy/paste paragraph.
-        || prompt
-            == JBOX_PROMPT
-                .split("\nWhen presenting a code or command block")
-                .next()
-                .unwrap_or(JBOX_PROMPT)
-                .trim_end_matches('\n')
+    [LEGACY_PROMPT, LEGACY_ROUTING_PROMPT, JBOX_PROMPT]
+        .into_iter()
+        .any(|known| {
+            prompt == known.trim_end_matches('\n')
+                // Previous project-local policies omitted the copy/paste paragraph.
+                || prompt
+                    == known
+                        .split("\nWhen presenting a code or command block")
+                        .next()
+                        .unwrap_or(known)
+                        .trim_end_matches('\n')
+        })
 }
 
 /// Update a known family without changing provider, model tier or effort.

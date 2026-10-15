@@ -1,6 +1,21 @@
 Use the `work-with-geonic` skill for all work in this workspace.
 Use the `jcode-jbox` skill for Jbox workspace, lifecycle, isolation, credential, Jcode configuration, remote-session, and authentication tasks.
 
+**Projects may contain multiple repositories. Do not assume the starting
+directory is the whole project.** Before editing, inspect `.jbox.toml` for the
+primary `[workspace]` and additional `[[repos]]`, then identify their guest mount
+paths in the mounted workspace. Host source paths are not guest worktrees.
+Git worktrees may have a `.git` file rather than a `.git` directory.
+Read each affected repository's `AGENTS.md` and other local instructions, and
+check its branch and dirty state before making changes. Use an explicit working
+directory or `git -C` so commands target the intended repository. Keep each
+repository's task tracking, changes, validation, and commits separate while
+coordinating cross-repository dependencies and integration checks. A clean tree,
+passing tests, or a commit in one repository does not cover the others.
+Before finishing, review every affected repository and report its path, changes,
+checks, commit status, and remaining blockers. Stay within configured mounts and
+permissions; one repository's credentials or grants do not authorize another.
+
 Use configured, authorized providers efficiently and only within their terms.
 At session start, before spawning workers, and after a provider error, check
 `jcode auth status --json` and `jcode usage --json` in the guest. A catalog entry
