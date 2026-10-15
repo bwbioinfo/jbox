@@ -103,17 +103,100 @@ cargo install --path .
 Then, from the root of the Git repository you want to isolate, run:
 
 ```bash
-jbox init --tool ripgrep --tool jq
+jbox init
 jbox .
 ```
 
 `jbox init` creates a `.jbox.toml` for the current Git repository and, when it
 does not already exist, a `.jbox/Dockerfile` that extends jbox's runtime image.
 Ordinary initialization never overwrites either file. Pass `--tool` repeatedly to install Debian
-packages in the generated image, for example `jbox init --tool ripgrep --tool
-jq`. For any other customization, edit the generated Dockerfile and add normal
+packages in the generated image, for example `jbox init --tool sqlite3 --tool
+rsync`. For any other customization, edit the generated Dockerfile and add normal
 Dockerfile instructions. Its content is hashed, so the next `jbox .` rebuilds
 the project image automatically when it changes.
+
+### Default guest tooling
+
+The default image is a Debian Bookworm-based **development environment**, not
+just the Jcode runtime. No `--tool` arguments are needed for:
+
+| Area | Included tools |
+| --- | --- |
+| Rust | Rust 1.99.0, Cargo, rustup, rustfmt, Clippy, rust-analyzer |
+| Native builds | GCC/G++, Make (`build-essential`), CMake, Ninja, pkg-config, OpenSSL development headers |
+| Python | Python 3.15.0, pip, venv, development headers |
+| JavaScript | Node.js 26.12.0 (Current), npm, npx |
+| Shell and inspection | Bash, ripgrep (`rg`), jq, file, less, procps |
+| Git and connectivity | Git, GitHub CLI (`gh`), OpenSSH client/server, curl, CA certificates |
+| Archives | tar, gzip, xz, zip, unzip |
+| Creative automation | All 13 ArtCraft headless CLIs, Fontconfig, DejaVu and Liberation fonts |
+| Agent workflow | Jcode, Beads (`bd`), guest-local Beads hydration and safe Git hook |
+
+The compiler/interpreter versions above were checked against official releases
+on **October 15, 2026** and pinned in `templates/base.Dockerfile`. They are not
+silently upgraded during guest startup. Updating a bundled Dockerfile, installer,
+or ArtCraft release pin invalidates the base and dependent project image caches.
+An upgraded Jbox builds the new image for fresh sessions. Existing running or
+retained guests are unchanged. `jbox init --update` does not refresh images.
+Project `rust-toolchain.toml` files can still select their own Rust toolchains.
+
+Rust proxies remain available to non-interactive SSH commands, and Cargo's
+cache lives in `/home/jbox/.cargo`. Startup creates a writable
+`/home/jbox/.rustup` after the tmpfs home is mounted, linking the immutable baked
+compiler without copying it into RAM. Additional project toolchains install
+there without making the root filesystem writable. To customize targets or
+components, install a separate user-local toolchain:
+
+```bash
+rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+rustup default stable
+rustup target add wasm32-unknown-unknown --toolchain stable
+```
+
+Global npm installs use `/home/jbox/.local`; both user binary directories are
+on the guest PATH. Use project virtual environments for Python dependencies.
+
+ArtCraft commands are `photocraft-cli`, `vectorcraft-cli`, `filmcraft-cli`,
+`lightcraft-cli`, `pdfcraft-cli`, `effectcraft-cli`, `designcraft-cli`,
+`figcraft-cli`, `wordcraft-cli`, `soundcraft-cli`, `deckcraft-cli`, `cadcraft-cli`,
+and `gridcraft-cli`. These are official Linux x86_64 prebuilt releases, not GUI
+applications or a desktop launcher. `templates/artcraft-releases.json` pins each
+archive URL and SHA-256. The installer checks the checksum before safe extraction,
+omits desktop executables, and preserves relative resources, OCR models, fonts,
+and third-party notices under `/opt/artcraft`. Installed release metadata is
+available at `/opt/artcraft/releases.json`. Each CLI must pass `--version` as the
+non-root guest user during the image build. GUI/GPU workflows and every creative
+export format are not implied by this headless smoke check.
+The PDF OCR model files carry CC-BY-SA-4.0 notices distinct from the applications'
+MIT/Apache-2.0 code and the fonts' OFL licenses; these notices are retained.
+The verified headless ArtCraft payload is approximately **788 MiB before image
+compression**, in addition to the language toolchains. Initial builds require
+network access to the official image/package/release sources, while installed
+tools do not need to be downloaded again when a guest starts.
+
+Useful project-specific additions include **uv** for Python environments,
+**pnpm** for JavaScript workspaces, **sqlite3/rsync** for data and synchronization,
+**ShellCheck** for shell projects, **clang/lld/gdb** for native debugging, and
+**FFmpeg/Poppler** for media and PDF interoperability. Keep browsers, document
+publishing stacks, database servers, GPUs, and language-specific SDKs opt-in to
+avoid increasing every session's image size and maintenance surface.
+
+When changing the image or installer, run the repository's Rust quality gate
+and the offline installer regressions:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+cargo run -- --help
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+The installer tests need Python 3.11+. Extraction accepts only regular files and
+directories, rejecting links, special files, and unsafe paths even on Python
+versions without tar extraction filters. A real Docker/Kata build and fresh guest
+session on the host remain necessary to verify image layers, runtime linkage,
+SSH environment, and the image's built-in non-root smoke checks.
 
 ### Refresh managed defaults without reinitializing the project
 

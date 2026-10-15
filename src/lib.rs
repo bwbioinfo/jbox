@@ -3790,7 +3790,7 @@ fn init_dockerfile(tools: &[String]) -> String {
     );
     if tools.is_empty() {
         dockerfile.push_str(
-            "# Add tools with a command such as:\n# RUN apt-get update && apt-get install -y --no-install-recommends ripgrep jq && rm -rf /var/lib/apt/lists/*\n",
+            "# Rust, Python, Node, native build tools, ripgrep, jq and ArtCraft CLIs are already installed.\n# Add project-specific tools with a command such as:\n# RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 rsync && rm -rf /var/lib/apt/lists/*\n",
         );
     } else {
         dockerfile.push_str(

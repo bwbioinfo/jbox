@@ -1,34 +1,7 @@
 ARG JBOX_BASE_IMAGE
-
-# Rust toolchain for developing jbox itself. The runtime base keeps jcode and
-# the guest SSH daemon; the Rust stage supplies a current toolchain compatible
-# with edition 2024.
-FROM rust:1.98-bookworm AS rust
-RUN rustup component add rustfmt clippy
-
 FROM ${JBOX_BASE_IMAGE}
 
-USER root
-COPY --from=rust /usr/local/cargo /usr/local/cargo
-COPY --from=rust /usr/local/rustup /usr/local/rustup
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential \
-        pkg-config \
-        python-is-python3 \
-        python3 \
-        python3-pip \
-        python3-venv \
-    && rm -rf /var/lib/apt/lists/*
-# sshd supplies a conservative PATH for remote commands. Keep small wrappers
-# in /usr/local/bin so shells and jcode tool processes find the Rust toolchain
-# even when Docker's image ENV is not retained by the SSH login path.
-RUN for tool in cargo rustc rustdoc rustup; do \
-        printf '%s\n' '#!/bin/sh' 'export RUSTUP_HOME=/usr/local/rustup' \
-            "exec /usr/local/cargo/bin/$tool \"\$@\"" > "/usr/local/bin/$tool"; \
-        chmod 0755 "/usr/local/bin/$tool"; \
-    done
-
-ENV PATH=/usr/local/cargo/bin:${PATH} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/home/jbox/.cargo
+# The default image supplies Rust/Cargo/rustfmt/Clippy, native build tools,
+# Python/pip/venv, Node/npm, ripgrep, jq and all 13 ArtCraft CLIs.
+# rust-toolchain.toml still selects this repository's pinned compiler through
+# rustup. Add only project-specific packages or build steps here.

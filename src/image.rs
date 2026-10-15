@@ -52,6 +52,9 @@ fi
 const JBOX_ENTRYPOINT: &str = r#"#!/bin/sh
 set -eu
 mkdir -p /run/sshd
+if [ -x /usr/local/bin/jbox-toolchain-init ]; then
+    su -s /bin/sh jbox -c /usr/local/bin/jbox-toolchain-init
+fi
 if [ "${JBOX_GITHUB_CLI_CREDENTIALS:-}" = "1" ]; then
     # `gh auth setup-git` only installs a credential helper. It must never
     # prevent SSH or Jcode from starting when GitHub CLI blocks on a broken or
@@ -166,7 +169,24 @@ su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode &&
 exec /usr/sbin/sshd -D -e
 "#;
 
-const BASE_DOCKERFILE: &str = "FROM debian:bookworm-slim\nARG JBOX_UID=1000\nARG JBOX_GID=1000\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl git gzip openssh-client openssh-server rustfmt tar && rm -rf /var/lib/apt/lists/*\nRUN mkdir -p -m 0755 /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' > /etc/apt/sources.list.d/github-cli.list && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*\nRUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash && bd version\n# Never inherit a repository's host-managed Dolt server settings in a jbox guest.\nENV BEADS_DOLT_SERVER_MODE=embedded BEADS_DOLT_AUTO_START=true\nRUN groupadd --gid \"$JBOX_GID\" jbox && useradd --uid \"$JBOX_UID\" --gid \"$JBOX_GID\" -m -s /bin/bash jbox && mkdir -p /run/sshd /home/jbox/.jcode /home/jbox/.ssh && chown -R jbox:jbox /home/jbox\nCOPY jcode /usr/local/bin/jcode\nCOPY jcode-linux-x86_64.bin /usr/local/bin/jcode-linux-x86_64.bin\nCOPY jbox-entrypoint /usr/local/bin/jbox-entrypoint\nCOPY jbox-beads-pre-commit /usr/local/bin/jbox-beads-pre-commit\nRUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/local/bin/jbox-entrypoint /usr/local/bin/jbox-beads-pre-commit && printf '%s\\n' 'Port 2222' 'PasswordAuthentication no' 'PermitRootLogin no' 'AllowUsers jbox' 'AuthorizedKeysFile .ssh/authorized_keys' > /etc/ssh/sshd_config.d/jbox.conf\nEXPOSE 2222\n";
+const BASE_DOCKERFILE: &str = include_str!("../templates/base.Dockerfile");
+const BASE_IMAGE_FILES: &[(&str, &str)] = &[
+    ("Dockerfile", BASE_DOCKERFILE),
+    ("jbox-entrypoint", JBOX_ENTRYPOINT),
+    ("jbox-beads-pre-commit", JBOX_BEADS_PRE_COMMIT),
+    (
+        "jbox-toolchain-init",
+        include_str!("../templates/jbox-toolchain-init.sh"),
+    ),
+    (
+        "install-artcraft.py",
+        include_str!("../templates/install-artcraft.py"),
+    ),
+    (
+        "artcraft-releases.json",
+        include_str!("../templates/artcraft-releases.json"),
+    ),
+];
 impl<'a> ImageManager<'a> {
     pub fn new(paths: &'a JboxPaths) -> Self {
         Self { paths }
@@ -209,16 +229,10 @@ impl<'a> ImageManager<'a> {
     }
     fn base_image(&self) -> Result<String> {
         let (uid, gid) = current_user_ids()?;
-        // The base is generated from both strings below. Include their content
-        // in the tag so an entrypoint security or startup fix cannot silently
-        // reuse a stale local base image, which would also poison project-image
-        // caching through its base-image build argument.
-        let mut hasher = Sha256::new();
-        hasher.update(BASE_DOCKERFILE.as_bytes());
-        hasher.update(JBOX_ENTRYPOINT.as_bytes());
-        hasher.update(JBOX_BEADS_PRE_COMMIT.as_bytes());
-        let fingerprint = format!("{:x}", hasher.finalize());
-        let tag = format!("jbox/jcode:local-v10-{uid}-{gid}-{}", &fingerprint[..16]);
+        // Include every bundled build input, including release pins and the
+        // installer, so tool upgrades also invalidate dependent project images.
+        let fingerprint = base_image_fingerprint(BASE_IMAGE_FILES);
+        let tag = format!("jbox/jcode:local-v11-{uid}-{gid}-{}", &fingerprint[..16]);
         if self.exists(&tag) {
             return Ok(tag);
         }
@@ -246,9 +260,9 @@ impl<'a> ImageManager<'a> {
             );
         }
         std::fs::copy(&jcode_binary, context.join("jcode-linux-x86_64.bin"))?;
-        std::fs::write(context.join("Dockerfile"), BASE_DOCKERFILE)?;
-        std::fs::write(context.join("jbox-entrypoint"), JBOX_ENTRYPOINT)?;
-        std::fs::write(context.join("jbox-beads-pre-commit"), JBOX_BEADS_PRE_COMMIT)?;
+        for (name, contents) in BASE_IMAGE_FILES {
+            std::fs::write(context.join(name), contents)?;
+        }
         run_build(
             &context,
             &context.join("Dockerfile"),
@@ -257,6 +271,17 @@ impl<'a> ImageManager<'a> {
         )?;
         Ok(tag)
     }
+}
+
+fn base_image_fingerprint(files: &[(&str, &str)]) -> String {
+    let mut hasher = Sha256::new();
+    for (name, contents) in files {
+        hasher.update((name.len() as u64).to_be_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update((contents.len() as u64).to_be_bytes());
+        hasher.update(contents.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 fn current_user_ids() -> Result<(String, String)> {
@@ -666,8 +691,162 @@ mod tests {
     }
 
     #[test]
-    fn base_image_installs_rustfmt() {
-        assert!(BASE_DOCKERFILE.contains("openssh-server rustfmt tar"));
+    fn base_image_installs_pinned_development_toolchains() {
+        for expected in [
+            "FROM rust:1.99.0-slim-bookworm AS rust",
+            "rustup component add rustfmt clippy rust-analyzer",
+            "FROM node:26.12.0-bookworm-slim AS node",
+            "FROM python:3.15.0-slim-bookworm",
+            "build-essential",
+            "cmake",
+            "ninja-build",
+            "pkg-config",
+            "libssl-dev",
+            "ripgrep",
+            "jq",
+        ] {
+            assert!(BASE_DOCKERFILE.contains(expected), "missing {expected}");
+        }
+        assert!(!BASE_DOCKERFILE.contains("apt-get install -y rustfmt"));
+    }
+
+    #[test]
+    fn base_image_preserves_non_root_and_ssh_toolchain_access() {
+        for expected in [
+            "export RUSTUP_HOME=",
+            "exec /usr/local/cargo/bin/$tool",
+            "chown -R jbox:jbox /home/jbox",
+            "RUSTUP_HOME=/home/jbox/.rustup",
+            "COPY jbox-toolchain-init /usr/local/bin/jbox-toolchain-init",
+            "prefix=${HOME}/.local",
+            "SetEnv PATH=/home/jbox/.cargo/bin:/home/jbox/.local/bin:/usr/local/bin:",
+            "RUN su -s /bin/sh jbox -c 'set -eu; jbox-toolchain-init; rustc --version",
+            "python -m pip --version",
+            "npm --version",
+            "test -w \"$RUSTUP_HOME\"",
+        ] {
+            assert!(BASE_DOCKERFILE.contains(expected), "missing {expected}");
+        }
+        assert!(
+            JBOX_ENTRYPOINT.find("jbox-toolchain-init").unwrap()
+                < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
+        );
+    }
+
+    #[test]
+    fn every_bundled_base_image_input_invalidates_the_cache() {
+        let original = base_image_fingerprint(BASE_IMAGE_FILES);
+        for index in 0..BASE_IMAGE_FILES.len() {
+            let mut changed = BASE_IMAGE_FILES.to_vec();
+            changed[index].1 = "changed";
+            assert_ne!(original, base_image_fingerprint(&changed));
+            let mut renamed = BASE_IMAGE_FILES.to_vec();
+            renamed[index].0 = "renamed";
+            assert_ne!(original, base_image_fingerprint(&renamed));
+        }
+        assert_ne!(
+            base_image_fingerprint(&[("a", "bc")]),
+            base_image_fingerprint(&[("ab", "c")])
+        );
+    }
+
+    #[test]
+    fn toolchain_init_populates_a_fresh_home_without_copying_compilers() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("fresh-home");
+        let seed = temp.path().join("immutable-seed");
+        let name = "1.99.0-x86_64-unknown-linux-gnu";
+        fs::create_dir_all(seed.join("toolchains").join(name)).unwrap();
+        fs::write(seed.join("settings.toml"), "default_toolchain = '1.99.0'\n").unwrap();
+        let init = || {
+            Command::new("sh")
+                .args([
+                    "-c",
+                    include_str!("../templates/jbox-toolchain-init.sh"),
+                    "jbox-toolchain-init",
+                ])
+                .arg(&seed)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .status()
+                .unwrap()
+        };
+        assert!(init().success());
+        assert!(home.join(".cargo/bin").is_dir());
+        assert!(home.join(".local/bin").is_dir());
+        let settings = home.join(".rustup/settings.toml");
+        assert_eq!(
+            fs::read(&settings).unwrap(),
+            fs::read(seed.join("settings.toml")).unwrap()
+        );
+        let toolchain = home.join(".rustup/toolchains").join(name);
+        assert_eq!(
+            fs::read_link(&toolchain).unwrap(),
+            seed.join("toolchains").join(name)
+        );
+        fs::write(&settings, "default_toolchain = 'custom'\n").unwrap();
+        let custom = home.join(".rustup/toolchains/custom");
+        fs::create_dir(&custom).unwrap();
+        assert!(init().success());
+        assert_eq!(
+            fs::read_to_string(settings).unwrap(),
+            "default_toolchain = 'custom'\n"
+        );
+        assert!(custom.is_dir());
+        assert!(toolchain.is_symlink());
+    }
+
+    #[test]
+    fn artcraft_manifest_pins_the_complete_official_cli_suite() {
+        let raw = BASE_IMAGE_FILES
+            .iter()
+            .find(|(name, _)| *name == "artcraft-releases.json")
+            .unwrap()
+            .1;
+        let manifest: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let releases = manifest["releases"].as_array().unwrap();
+        let mut apps: Vec<_> = releases
+            .iter()
+            .map(|release| {
+                let app = release["app"].as_str().unwrap();
+                let url = release["url"].as_str().unwrap();
+                assert!(url.starts_with(&format!(
+                    "https://github.com/storytold/{app}/releases/download/"
+                )));
+                assert!(url.ends_with("-linux-x86_64.tar.gz"));
+                let checksum = release["sha256"].as_str().unwrap();
+                assert_eq!(checksum.len(), 64);
+                assert!(checksum.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                assert!(
+                    release["binary"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with(&format!("/{app}-cli"))
+                );
+                app
+            })
+            .collect();
+        apps.sort();
+        let mut expected = vec![
+            "photocraft",
+            "vectorcraft",
+            "filmcraft",
+            "lightcraft",
+            "pdfcraft",
+            "effectcraft",
+            "designcraft",
+            "figcraft",
+            "wordcraft",
+            "soundcraft",
+            "deckcraft",
+            "cadcraft",
+            "gridcraft",
+        ];
+        expected.sort();
+        assert_eq!(apps, expected);
+        assert!(BASE_DOCKERFILE.contains("python /usr/local/lib/jbox/install-artcraft.py"));
+        assert!(BASE_DOCKERFILE.contains("\"$tool-cli\" --version"));
     }
 
     #[test]
