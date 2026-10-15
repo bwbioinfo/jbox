@@ -39,8 +39,10 @@ The CLI binaries require glibc and `libgcc_s`, supplied explicitly by Debian's
 `libc6` and `libgcc-s1` packages. The installer uses the base image's `curl`, CA
 certificates, `tar`, `gzip` and standard core utilities. No source compilation,
 Node/Python runtime, desktop environment, X server, audio service, GPU device,
-FFmpeg, Tesseract or external PDF renderer is required for these headless tools.
-Fonts and codec implementations are bundled in the upstream binaries. Preserve
+FFmpeg, Tesseract or external PDF renderer is required for the reviewed core
+CPU file workflows. Fonts and codec implementations are bundled in the upstream
+binaries, but arbitrary imported documents can still need additional fonts for
+faithful substitution. Preserve
 upstream license notices under `/usr/local/share/doc/<app>`.
 
 These conclusions follow the pinned release packaging scripts and real CLI
@@ -74,7 +76,9 @@ options when launching an agent-facing server.
 Desktop bridge commands such as `app`, `ui` and `--connect` need a separately
 running app and are not provided by this headless image. GPU rendering,
 real-time audio, physical printing, external plugins and integrations such as
-Zotero are not configured. Offline rendering/export uses the CPU paths and
+Zotero are not configured. LightCraft AI denoise additionally needs separately
+installed model weights, which are not downloaded into the default image.
+Offline rendering/export uses the CPU paths and
 requires no relaxed sandbox privileges. Use writable workspace or temporary
 paths for outputs rather than the read-only image filesystem.
 
