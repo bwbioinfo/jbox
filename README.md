@@ -325,6 +325,27 @@ dependencies require coordinated checks, and completion reports must cover every
 affected repository rather than just the starting checkout. Repository grants
 and mount boundaries still apply independently.
 
+The layout comes from the primary repository's `.jbox.toml`. `[workspace].mount`
+locates its editable guest worktree, normally `/workspace/project`. Each
+`[[repos]]` entry maps a host repository `path` to a separate absolute guest
+`mount`, commonly a sibling such as `/workspace/api` or
+`/workspace/infrastructure`. Relative host paths resolve from the primary
+repository root, not the guest's current directory. These worktrees are separate
+Git roots, not automatically submodules, and their common parent is not a Git
+repository. All guest paths are configurable. This repository's checked-in
+configuration uses `/workspace/jbox` for Jbox and `/workspace/skills` for the
+separate skills repository.
+
+Extra `[[mounts]]` entries map host `source` paths to guest `target` paths and
+default to `writable = false`. They supply data, not additional editable Git
+worktrees. **Mounted reference/input data is immutable**, even when technically
+writable: agents must not edit, delete, rename, change permissions, or write
+indexes, sidecars, caches, lockfiles, journals, or outputs into it. Outputs and
+tool state belong in an approved writable workspace, scratch directory, or
+output mount. Tools requiring adjacent writes must use an approved writable copy
+or stop for guidance, never bypass mount protections. Changing reference data
+requires explicit approval through the host workflow, not a guest workaround.
+
 Put repository-specific commands, acceptance criteria, and scientific constraints
 in the project section, not the managed prompt. This is a complete minimal
 `.jbox.toml` example. In an initialized project, add only its project section

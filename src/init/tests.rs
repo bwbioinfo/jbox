@@ -147,12 +147,27 @@ fn multi_repository_guidance_reaches_new_refreshed_and_checked_in_prompts() {
             "**Projects may contain multiple repositories.",
             "primary `[workspace]` and additional `[[repos]]`",
             "Host source paths are not guest worktrees.",
+            "`[workspace].mount` is the primary editable session worktree's absolute guest",
+            "Each `[[repos]].path` selects another host repository",
+            "independent Git roots, commonly siblings",
+            "not a combined Git repository",
+            "Mount paths are configurable and may be elsewhere",
+            "`[[mounts]].source` and `target` describe extra host-to-guest data mounts",
+            "`writable` defaults to `false`",
             "`.git` file rather than a `.git` directory",
             "Read each affected repository's `AGENTS.md`",
             "`git -C`",
             "cross-repository dependencies and integration checks",
             "review every affected repository and report its path",
             "one repository's credentials or grants do not authorize another",
+            "**Mounted reference data must not be modified.**",
+            "mount designated as reference/input data as immutable",
+            "Do not edit, delete, rename, or",
+            "change permissions or ownership",
+            "sidecars, caches, lockfiles, database journals, or generated outputs",
+            "Direct outputs and tool-managed state to an approved writable workspace",
+            "an approved writable copy or stop and ask",
+            "Do not remount, elevate privileges, or otherwise bypass read-only",
         ] {
             assert!(rendered.contains(expected), "missing {expected}");
         }
@@ -177,6 +192,11 @@ fn known_whole_legacy_prompts_migrate_without_touching_project_text() {
             .unwrap(),
         LEGACY_ROUTING_PROMPT,
         LEGACY_ROUTING_PROMPT
+            .split("\nWhen presenting a code or command block")
+            .next()
+            .unwrap(),
+        LEGACY_MULTI_REPO_PROMPT,
+        LEGACY_MULTI_REPO_PROMPT
             .split("\nWhen presenting a code or command block")
             .next()
             .unwrap(),

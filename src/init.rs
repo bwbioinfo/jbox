@@ -11,6 +11,7 @@ const CONFIG_TEMPLATE: &str = include_str!("../templates/default.toml");
 pub const JBOX_PROMPT: &str = include_str!("../templates/jbox-prompt.md");
 const LEGACY_PROMPT: &str = include_str!("../templates/legacy-prompt-v0.15.md");
 const LEGACY_ROUTING_PROMPT: &str = include_str!("../templates/legacy-prompt-routing.md");
+const LEGACY_MULTI_REPO_PROMPT: &str = include_str!("../templates/legacy-prompt-multi-repo.md");
 
 struct UpdateLock(File);
 
@@ -258,10 +259,15 @@ mod tests;
 
 fn known_legacy_prompt(prompt: &str) -> bool {
     let prompt = prompt.trim_end_matches('\n');
-    [LEGACY_PROMPT, LEGACY_ROUTING_PROMPT, JBOX_PROMPT]
-        .into_iter()
-        .any(|known| {
-            prompt == known.trim_end_matches('\n')
+    [
+        LEGACY_PROMPT,
+        LEGACY_ROUTING_PROMPT,
+        LEGACY_MULTI_REPO_PROMPT,
+        JBOX_PROMPT,
+    ]
+    .into_iter()
+    .any(|known| {
+        prompt == known.trim_end_matches('\n')
                 // Previous project-local policies omitted the copy/paste paragraph.
                 || prompt
                     == known
@@ -269,7 +275,7 @@ fn known_legacy_prompt(prompt: &str) -> bool {
                         .next()
                         .unwrap_or(known)
                         .trim_end_matches('\n')
-        })
+    })
 }
 
 /// Update a known family without changing provider, model tier or effort.

@@ -5,9 +5,11 @@ version = 1
 backend = "kata"
 
 [workspace]
+# Primary editable guest worktree. The original host checkout is not mounted here.
 mount = "/workspace/jbox"
 
 [[repos]]
+# Separate sibling Git worktree at /workspace/skills, not a subdirectory of jbox.
 path = "../skills"
 mount = "/workspace/skills"
 
@@ -60,6 +62,24 @@ Use the `jcode-jbox` skill for Jbox workspace, lifecycle, isolation, credential,
 directory is the whole project.** Before editing, inspect `.jbox.toml` for the
 primary `[workspace]` and additional `[[repos]]`, then identify their guest mount
 paths in the mounted workspace. Host source paths are not guest worktrees.
+The primary repository's root contains the project `.jbox.toml`; additional
+repositories need not have their own Jbox configuration. Interpret the layout as:
+
+- `[workspace].mount` is the primary editable session worktree's absolute guest
+  path, normally `/workspace/project` unless configured otherwise.
+- Each `[[repos]].path` selects another host repository (relative paths resolve
+  from the primary repository root), while its `mount` is that repository's
+  absolute guest worktree path. Work only at the guest path, not the host path.
+  These are independent Git roots, commonly siblings such as
+  `/workspace/project`, `/workspace/api`, and `/workspace/infrastructure`, not
+  necessarily subdirectories or submodules of the primary repository.
+- `/workspace` is a common parent directory, not a combined Git repository.
+  Mount paths are configurable and may be elsewhere; use the actual configured
+  paths instead of assuming these examples or treating every directory as code.
+- `[[mounts]].source` and `target` describe extra host-to-guest data mounts, not
+  additional editable repository worktrees. The guest location is `target`, for
+  example `/data/reference`; `writable` defaults to `false`.
+
 Git worktrees may have a `.git` file rather than a `.git` directory.
 Read each affected repository's `AGENTS.md` and other local instructions, and
 check its branch and dirty state before making changes. Use an explicit working
@@ -70,6 +90,18 @@ passing tests, or a commit in one repository does not cover the others.
 Before finishing, review every affected repository and report its path, changes,
 checks, commit status, and remaining blockers. Stay within configured mounts and
 permissions; one repository's credentials or grants do not authorize another.
+
+**Mounted reference data must not be modified.** Treat read-only mounts and any
+mount designated as reference/input data as immutable, even if a filesystem
+permission check suggests writes are possible. Do not edit, delete, rename, or
+change permissions or ownership of their contents. Do not create indexes,
+sidecars, caches, lockfiles, database journals, or generated outputs beside the
+inputs. Direct outputs and tool-managed state to an approved writable workspace
+or scratch directory instead. If a tool requires adjacent writable files, use
+an approved writable copy or stop and ask rather than modifying the reference
+mount. Do not remount, elevate privileges, or otherwise bypass read-only
+protections. Writable output mounts are not permission to alter reference inputs;
+changing reference data requires explicit user approval through the host workflow.
 
 Use configured, authorized providers efficiently and only within their terms.
 At session start, before spawning workers, and after a provider error, check
