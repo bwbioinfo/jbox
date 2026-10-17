@@ -108,6 +108,6 @@ RUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/l
 # Fail image builds early if the non-root guest cannot use the toolchains.
 RUN su -s /bin/sh jbox -c 'set -eu; jbox-toolchain-init; rustc --version; cargo --version; cargo fmt --version; cargo clippy --version; rust-analyzer --version; python --version; python -m pip --version; python -c "import ssl, sqlite3, venv"; node --version; npm --version; npx --version; rg --version; jq --version; cmake --version; ninja --version; test -w "$RUSTUP_HOME"; test -w "$CARGO_HOME"; test -w "$NPM_CONFIG_PREFIX"'
 RUN su -s /bin/sh jbox -c 'set -eu; uv --version; uvx --version; pnpm --version; sqlite3 :memory: "SELECT 1;"; rsync --version; shellcheck --version; rclone version; test -w "$PNPM_HOME"'
-# Some upstream CLIs intentionally return exit 1 for --help; --version is strict.
-RUN su -s /bin/sh jbox -c 'set -eu; for tool in photocraft vectorcraft filmcraft lightcraft pdfcraft effectcraft designcraft figcraft wordcraft soundcraft deckcraft cadcraft gridcraft; do "$tool-cli" --version; done'
+# Repeat startup and OCR discovery checks with the final non-root guest identity.
+RUN su -s /bin/sh jbox -c 'python /usr/local/lib/jbox/install-artcraft.py --manifest /usr/local/lib/jbox/artcraft-releases.json --verify-only'
 EXPOSE 2222

@@ -12,7 +12,14 @@ use chrono::Utc;
 use config::{
     Config, GitCredentialDelivery, GitRepositoryOperation, ResolvedGitAuthor, ResolvedRepository,
 };
-use engine::{ContainerSpec, DockerEngine, Engine};
+#[cfg(not(test))]
+use engine::DockerEngine;
+use engine::{ContainerSpec, Engine};
+#[cfg(test)]
+use tests::TestDockerEngine as DockerEngine;
+#[cfg(test)]
+#[allow(non_upper_case_globals)]
+const DockerEngine: tests::TestDockerEngine = tests::TestDockerEngine::Real;
 use git::{Git, Upstream};
 use image::ImageManager;
 use paths::{JboxPaths, safe_target};
@@ -647,6 +654,7 @@ impl App {
             || config.jcode.default_model.is_some()
             || config.jcode.openai_reasoning_effort.is_some()
             || config.jcode.openai_service_tier.is_some()
+            || config.jcode.openai_transport.is_some()
         {
             let jcode_config = ssh
                 .parent()
@@ -3082,8 +3090,15 @@ done | LC_ALL=C sort -r | head -n 20
         for repo in &session.repos {
             self.git.restore_and_import_guest_metadata(repo)?;
         }
-        self.paths.stop_session_ssh_agent(session.ssh_agent_pid);
-        self.paths.untrust_session_host(&session.known_hosts_tag)?;
+        // Synthetic lifecycle fixtures have no real host SSH resources.
+        #[cfg(test)]
+        let cleanup_host_ssh = matches!(self.engine, DockerEngine::Real);
+        #[cfg(not(test))]
+        let cleanup_host_ssh = true;
+        if cleanup_host_ssh {
+            self.paths.stop_session_ssh_agent(session.ssh_agent_pid);
+            self.paths.untrust_session_host(&session.known_hosts_tag)?;
+        }
         session.state = SessionState::Stopped;
         self.state.save(session)?;
         println!(
@@ -3776,6 +3791,7 @@ fn guest_jcode_config(jcode: &config::Jcode) -> String {
             jcode.openai_reasoning_effort.as_deref(),
         ),
         ("openai_service_tier", jcode.openai_service_tier.as_deref()),
+        ("openai_transport", jcode.openai_transport.as_deref()),
     ] {
         if let Some(value) = value {
             lines.push(format!("{key} = {}", toml::Value::String(value.into())));
@@ -3808,6 +3824,186 @@ fn init_dockerfile(tools: &[String]) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    // Restricted to stale-runtime reconciliation fixtures. Real SSH cleanup
+    // is skipped there because these synthetic sessions own no SSH resources.
+    pub(super) enum TestDockerEngine {
+        Real,
+        Stale,
+    }
+
+    impl TestDockerEngine {
+        pub(super) fn startup_logs(&self, name: &str) -> Result<String> {
+            match self {
+                Self::Real => engine::DockerEngine.startup_logs(name),
+                Self::Stale => Ok("synthetic stale runtime".into()),
+            }
+        }
+    }
+
+    impl Engine for TestDockerEngine {
+        fn check(&self) -> Result<()> {
+            match self {
+                Self::Real => engine::DockerEngine.check(),
+                Self::Stale => bail!("fake stale engine cannot launch guests"),
+            }
+        }
+
+        fn start(&self, spec: &ContainerSpec) -> Result<u16> {
+            match self {
+                Self::Real => engine::DockerEngine.start(spec),
+                Self::Stale => bail!("fake stale engine cannot launch guests"),
+            }
+        }
+
+        fn stop(&self, name: &str) -> Result<()> {
+            match self {
+                Self::Real => engine::DockerEngine.stop(name),
+                Self::Stale => Ok(()),
+            }
+        }
+
+        fn is_running(&self, name: &str) -> Result<bool> {
+            match self {
+                Self::Real => engine::DockerEngine.is_running(name),
+                Self::Stale => Ok(false),
+            }
+        }
+    }
+
+    fn stale_clean_fixture(root: &Path) -> (App, Session, String, PathBuf) {
+        let mut app = test_app(root);
+        app.engine = TestDockerEngine::Stale;
+        let source = root.join("source");
+        fs::create_dir(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        git(&source, &["config", "user.name", "Test"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        fs::write(source.join("base"), "base\n").unwrap();
+        git(&source, &["add", "base"]);
+        git(&source, &["commit", "-qm", "base"]);
+        let mut session = test_session("stale-clean", source.clone());
+        session.state = SessionState::Running;
+        let repo = &mut session.repos[0];
+        repo.worktree = app.paths.sessions.join(&session.id).join("repo");
+        let made = Git
+            .add_worktree(&source, &repo.worktree, &session.id, "repo")
+            .unwrap();
+        repo.branch = made.branch;
+        repo.base_commit = made.commit;
+        repo.host_gitfile = app.paths.sessions.join(&session.id).join("host-gitfile");
+        Git.isolate_guest_metadata(
+            &source,
+            &repo.worktree,
+            &repo.branch,
+            &repo.base_commit,
+            &repo.host_gitfile,
+            &ResolvedGitAuthor {
+                name: Some("Guest".into()),
+                email: Some("guest@example.com".into()),
+            },
+        )
+        .unwrap();
+        fs::write(repo.worktree.join("guest"), "guest change\n").unwrap();
+        git(&repo.worktree, &["add", "guest"]);
+        git(&repo.worktree, &["commit", "-qm", "guest"]);
+        let guest_commit = git(&repo.worktree, &["rev-parse", "HEAD"]);
+        let broken_ref = source.join(".git/refs/codex/turn-diffs/test/base");
+        fs::create_dir_all(broken_ref.parent().unwrap()).unwrap();
+        fs::write(&broken_ref, format!("{}\n", "1".repeat(40))).unwrap();
+        app.state.save(&session).unwrap();
+        (app, session, guest_commit, broken_ref)
+    }
+
+    #[test]
+    fn clean_stale_running_session_preserves_guest_commit_with_unrelated_broken_ref() {
+        for all in [false, true] {
+            let root = tempdir().unwrap();
+            let (app, session, guest_commit, broken_ref) = stale_clean_fixture(root.path());
+            let repo = &session.repos[0];
+            let host_head = git(&repo.source, &["rev-parse", "HEAD"]);
+            let host_branch = git(&repo.source, &["symbolic-ref", "HEAD"]);
+            fs::write(repo.source.join("host-only"), "keep host file\n").unwrap();
+            let host_status = git(&repo.source, &["status", "--porcelain"]);
+
+            app.clean(if all { None } else { Some(&session.id) }, true)
+                .unwrap();
+
+            assert_eq!(
+                git(&repo.source, &["rev-parse", &repo.branch]),
+                guest_commit
+            );
+            assert_eq!(
+                git(&repo.source, &["show", &format!("{}:guest", repo.branch)]),
+                "guest change"
+            );
+            assert_eq!(git(&repo.source, &["rev-parse", "HEAD"]), host_head);
+            assert_eq!(git(&repo.source, &["symbolic-ref", "HEAD"]), host_branch);
+            assert_eq!(git(&repo.source, &["status", "--porcelain"]), host_status);
+            assert_eq!(
+                fs::read_to_string(repo.source.join("host-only")).unwrap(),
+                "keep host file\n"
+            );
+            assert!(!repo.source.join("guest").exists());
+            assert_eq!(
+                fs::read_to_string(&broken_ref).unwrap(),
+                format!("{}\n", "1".repeat(40))
+            );
+            assert!(app.state.list().unwrap().is_empty());
+            assert!(!repo.worktree.exists());
+            assert!(!app.paths.sessions.join(&session.id).exists());
+            assert!(
+                !git(&repo.source, &["worktree", "list", "--porcelain"])
+                    .contains(repo.worktree.to_str().unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn clean_stale_running_session_retains_isolated_workspace_when_guest_object_missing() {
+        for all in [false, true] {
+            let root = tempdir().unwrap();
+            let (app, session, guest_commit, broken_ref) = stale_clean_fixture(root.path());
+            let repo = &session.repos[0];
+            let guest_blob = git(&repo.worktree, &["rev-parse", "HEAD:guest"]);
+            let missing_object = repo
+                .worktree
+                .join(".git/objects")
+                .join(&guest_blob[..2])
+                .join(&guest_blob[2..]);
+            assert!(missing_object.is_file());
+            fs::remove_file(missing_object).unwrap();
+            fs::write(repo.worktree.join("uncommitted"), "retain me\n").unwrap();
+            let host_head = git(&repo.source, &["rev-parse", "HEAD"]);
+
+            assert!(
+                app.clean(if all { None } else { Some(&session.id) }, true)
+                    .is_err()
+            );
+
+            assert_eq!(
+                app.state.load(&session.id).unwrap().state,
+                SessionState::Running
+            );
+            assert!(repo.worktree.join(".git").is_dir());
+            assert!(repo.host_gitfile.is_file());
+            assert_eq!(git(&repo.worktree, &["rev-parse", "HEAD"]), guest_commit);
+            assert_eq!(
+                fs::read_to_string(repo.worktree.join("guest")).unwrap(),
+                "guest change\n"
+            );
+            assert_eq!(
+                fs::read_to_string(repo.worktree.join("uncommitted")).unwrap(),
+                "retain me\n"
+            );
+            assert_eq!(git(&repo.source, &["rev-parse", "HEAD"]), host_head);
+            assert_eq!(
+                git(&repo.source, &["rev-parse", &repo.branch]),
+                repo.base_commit
+            );
+            assert!(broken_ref.is_file());
+        }
+    }
 
     fn test_app(root: &Path) -> App {
         let data = root.join("jbox-data");
@@ -5039,6 +5235,42 @@ allowed_operations = ["clone"]
     }
 
     #[test]
+    fn transport_only_override_is_mounted_into_guest() {
+        let temp = tempdir().unwrap();
+        let ssh = temp.path().join("session/ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        for transport in ["auto", "https", "websocket"] {
+            let config = Config::from_toml(&format!(
+                "version = 1\n[jcode]\nopenai_transport = '{transport}'\n"
+            ))
+            .unwrap();
+            let spec = test_app(temp.path())
+                .container_spec(
+                    &config,
+                    &[],
+                    "jbox-test",
+                    &ssh,
+                    SessionLaunch {
+                        image: "test-image".into(),
+                        ssh_host: "127.0.0.2".into(),
+                    },
+                )
+                .unwrap();
+            let (source, _, _) = spec
+                .mounts
+                .iter()
+                .find(|(_, target, _)| target == Path::new("/home/jbox/.jcode/config.toml"))
+                .expect("transport-only settings must reach the guest daemon");
+            let parsed: toml::Value =
+                toml::from_str(&std::fs::read_to_string(source).unwrap()).unwrap();
+            assert_eq!(
+                parsed["provider"]["openai_transport"].as_str(),
+                Some(transport)
+            );
+        }
+    }
+
+    #[test]
     fn guest_jcode_config_applies_project_preference_overrides() {
         let config = config::Jcode {
             persistent_credentials: true,
@@ -5048,10 +5280,15 @@ allowed_operations = ["clone"]
             default_model: Some("gpt-5.6-terra".into()),
             openai_reasoning_effort: Some("high".into()),
             openai_service_tier: Some("off".into()),
+            openai_transport: Some("https".into()),
         };
 
         let rendered = guest_jcode_config(&config);
         let parsed: toml::Value = toml::from_str(&rendered).unwrap();
+        assert_eq!(
+            parsed["provider"]["openai_transport"].as_str(),
+            Some("https")
+        );
         assert_eq!(
             parsed["provider"]["default_model"].as_str(),
             Some("gpt-5.6-terra")

@@ -4,9 +4,11 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import subprocess
 import tarfile
 import tempfile
 from urllib.parse import urlparse
@@ -21,6 +23,8 @@ APPS = (
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_EXTRACT_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 10_000
+CLI_TIMEOUT_SECONDS = 30
+PDFCRAFT_MODELS = ("text-detection.rten", "text-recognition.rten")
 
 
 def validate_release(release):
@@ -86,6 +90,35 @@ def extract_cli(archive, destination, desktop):
                 shutil.copyfileobj(source, output)
 
 
+def verify_cli(binary, app):
+    """Verify headless startup and resources without modifying the installation."""
+    if app not in APPS:
+        raise ValueError("invalid ArtCraft application")
+    binary = Path(binary).resolve(strict=True)
+    environment = os.environ.copy()
+    environment.pop("DISPLAY", None)
+    environment.pop("WAYLAND_DISPLAY", None)
+
+    def run(*arguments):
+        return subprocess.run(
+            [str(binary), *arguments], check=True, capture_output=True, text=True,
+            timeout=CLI_TIMEOUT_SECONDS, env=environment,
+        ).stdout
+
+    run("--version")
+    # These two upstream CLIs print help but deliberately return exit status 1.
+    run("commands" if app in ("deckcraft", "cadcraft") else "--help")
+    if app == "pdfcraft":
+        models = binary.parent.parent / "share/pdfcraft/models"
+        for name in PDFCRAFT_MODELS:
+            model = models / name
+            if not model.is_file() or model.stat().st_size == 0:
+                raise ValueError(f"pdfcraft: missing or empty OCR model: {name}")
+        status = json.loads(run("run", "ocr_status"))
+        if not isinstance(status, dict) or status.get("available") is not True:
+            raise ValueError("pdfcraft: OCR models are unavailable")
+
+
 def install_release(release, prefix, bin_dir):
     validate_release(release)
     app = release["app"]
@@ -114,6 +147,7 @@ def install_release(release, prefix, bin_dir):
     if not binary.is_file() or binary.is_symlink():
         raise ValueError(f"{app}: archive does not contain the expected regular CLI binary")
     binary.chmod(0o755)
+    verify_cli(binary, app)
     link.symlink_to(binary)
     return binary
 
@@ -123,8 +157,19 @@ def main():
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--prefix", type=Path, default=Path("/opt/artcraft"))
     parser.add_argument("--bin-dir", type=Path, default=Path("/usr/local/bin"))
+    parser.add_argument("--verify-only", action="store_true",
+                        help="verify installed CLI links and resources without downloading or writing")
     args = parser.parse_args()
     releases = load_releases(args.manifest)
+    if args.verify_only:
+        for release in releases:
+            binary = args.prefix.resolve() / release["app"] / release["binary"]
+            link = args.bin_dir / f"{release['app']}-cli"
+            if not link.is_symlink() or link.resolve(strict=True) != binary.resolve(strict=True):
+                raise ValueError(f"{release['app']}: installed CLI link does not match manifest")
+            verify_cli(link, release["app"])
+        print("Verified all 13 ArtCraft CLIs", flush=True)
+        return
     for release in releases:
         install_release(release, args.prefix.resolve(), args.bin_dir.resolve())
     # Record the exact installed versions and checksums for later inspection.

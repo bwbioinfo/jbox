@@ -176,9 +176,13 @@ applications or a desktop launcher. `templates/artcraft-releases.json` pins each
 archive URL and SHA-256. The installer checks the checksum before safe extraction,
 omits desktop executables, and preserves relative resources, OCR models, fonts,
 and third-party notices under `/opt/artcraft`. Installed release metadata is
-available at `/opt/artcraft/releases.json`. Each CLI must pass `--version` as the
-non-root guest user during the image build. GUI/GPU workflows and every creative
-export format are not implied by this headless smoke check.
+available at `/opt/artcraft/releases.json`. Each CLI must pass bounded startup
+checks as the non-root guest user during the image build: `--version` and
+`--help`, or `commands` for DeckCraft and CadCraft. PdfCraft must also discover
+its two nonempty OCR models and report OCR available. See
+[ArtCraft tooling](docs/artcraft.md) for the version matrix and update procedure.
+GUI/GPU workflows and every creative export format are not implied by these
+headless smoke checks.
 The PDF OCR model files carry CC-BY-SA-4.0 notices distinct from the applications'
 MIT/Apache-2.0 code and the fonts' OFL licenses; these notices are retained.
 The verified headless ArtCraft payload is approximately **788 MiB before image
@@ -561,7 +565,16 @@ you may instead commit or stash manually. `jbox resume <session>` is available f
 selection. If Docker or Kata stops a guest outside jbox, the next jbox command
 detects the stale runtime, imports its committed guest history, marks the
 session stopped, and makes it resumable. Transient Beads coordination locks do
-not count as user changes.
+not count as user changes. In Beads-bootstrapped worktrees, an untracked
+`.beads/dolt-server-config.yaml` matching the generated localhost configuration
+for that guest mount is also runtime state: it neither blocks synchronization
+nor enters a checkpoint. Tracked, explicitly staged, symlinked, or unrecognized
+configurations remain ordinary project work. Unknown Beads output formats fail
+closed and remain visible for review. A generated config may be rewritten with
+a different valid local port and still count as runtime state. To preserve a
+custom ignored config in checkpoints, review it and explicitly stage it with
+`git add -f` first. Overlays and previews do not yet preserve newly staged
+ignored files; commit them to the session branch before using those workflows.
 
 If a retained worktree has a paused rebase or merge, jbox never checkpoints
 conflict markers. From the affected host repository run `jbox resolve` and
@@ -658,6 +671,16 @@ commit. To abandon only the host-side merge while retaining the jbox worktree,
 run `jbox accept --abort` and choose that worktree. Neither option stops the
 
 An internal detached watcher checks TTL every minute. TTL uses the most recent create, attach, shell, or accept timestamp. Expiry stops the guest and retains its worktrees. `jbox clean` refuses when a worktree has staged, unstaged, untracked, or post-base commits unless `--force` is explicit.
+
+Before removing an isolated guest worktree, jbox imports its committed session
+snapshot into the host session branch. If unrelated broken Git refs (for example,
+`refs/codex/turn-diffs/...`) block the normal fetch, jbox falls back to transferring
+only the snapshot's reachable objects without changing those refs. The imported
+history must be complete and fast-forward the retained host snapshot. If required
+objects are missing or publication fails, the worktree is retained even with
+`--force`. This fallback can require temporary disk space for a full history pack
+on the session filesystem. It does not repair unrelated broken refs, and `--force`
+can still discard uncommitted guest files.
 
 ## `.jbox.toml`
 
@@ -894,3 +917,20 @@ cargo run -- doctor
 ```
 
 The test suite verifies TTL/config path validation and proves that a worktree starts from `HEAD` rather than a dirty host checkout. End-to-end validation on the target host booted a Kata guest, connected the local jcode TUI through the managed loopback SSH bridge, verified the guest jcode daemon and Git worktree, and then exercised `status`, `stop`, and safe `clean`.
+
+### OpenAI transport in SSH guests
+
+If OpenAI requests stall over WebSocket with concurrent guests, select HTTPS
+in the project configuration (Jcode's `/account` command may be unavailable
+in SSH mode):
+
+```toml
+[jcode]
+openai_transport = "https"
+```
+
+Accepted values are `auto`, `https`, and `websocket`. Omitting the setting keeps
+Jcode's default. The setting is written into the guest's session configuration
+on launch. Existing retained sessions keep their saved configuration; use a new
+session to apply the project setting. HTTPS uses the existing OAuth login.
+This is a transport workaround, not a confirmed fix for concurrency failures.

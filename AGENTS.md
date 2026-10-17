@@ -113,7 +113,10 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo run -- --help
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
+
+The offline ArtCraft installer regressions require Python 3.11 or newer.
 
 ## Architecture
 

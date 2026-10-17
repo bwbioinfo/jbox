@@ -9,10 +9,10 @@
     },
     {
       "app": "vectorcraft",
-      "version": "0.11.0",
-      "url": "https://github.com/storytold/vectorcraft/releases/download/v0.11.0/vectorcraft-0.11.0-linux-x86_64.tar.gz",
-      "sha256": "83ca62a455bbb1d1c61c6b05133bc41ceda1d1d99e4be7509d287c364ceb8f39",
-      "binary": "vectorcraft-0.11.0-linux-x86_64/bin/vectorcraft-cli"
+      "version": "0.12.0",
+      "url": "https://github.com/storytold/vectorcraft/releases/download/v0.12.0/vectorcraft-0.12.0-linux-x86_64.tar.gz",
+      "sha256": "6750db109d3a253c51c82975af650f42384ba27a768f72529431edfb58508269",
+      "binary": "vectorcraft-0.12.0-linux-x86_64/bin/vectorcraft-cli"
     },
     {
       "app": "filmcraft",

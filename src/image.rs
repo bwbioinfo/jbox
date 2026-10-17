@@ -871,7 +871,7 @@ mod tests {
         expected.sort();
         assert_eq!(apps, expected);
         assert!(BASE_DOCKERFILE.contains("python /usr/local/lib/jbox/install-artcraft.py"));
-        assert!(BASE_DOCKERFILE.contains("\"$tool-cli\" --version"));
+        assert!(BASE_DOCKERFILE.contains("--verify-only"));
     }
 
     #[test]
