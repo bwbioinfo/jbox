@@ -2,14 +2,14 @@
 
 The default x86_64 Debian guest includes all 13 ArtCraft command-line tools.
 The suite was reviewed against the official [ArtCraft apps](https://getartcraft.com/apps)
-and [storytold repositories](https://github.com/storytold) on 2026-10-15.
+and [storytold repositories](https://github.com/storytold) on 2026-10-17.
 GitHub release tags, not the website's occasionally older download labels, are
 the source of the pinned versions below.
 
 | Command | Version | Main workflows |
 | --- | --- | --- |
 | `photocraft-cli` | 0.9.0 | Raster images, layered documents, conversion and batch actions |
-| `vectorcraft-cli` | 0.11.0 | Vector illustration and SVG, PDF and raster export |
+| `vectorcraft-cli` | 0.12.0 | Vector illustration and SVG, PDF and raster export |
 | `filmcraft-cli` | 0.8.0 | Video timelines, media inspection, rendering and encoding |
 | `lightcraft-cli` | 0.8.0 | Photo libraries, RAW development and export |
 | `pdfcraft-cli` | 0.8.0 | PDF inspection, text, editing, rendering and OCR |
@@ -99,7 +99,17 @@ prefix, inspect dynamic-library dependencies, and exercise representative
 headless workflows, including PdfCraft OCR asset discovery. A complete Docker
 build additionally verifies installation against a clean Debian base.
 
-## Validation on 2026-10-15
+## Validation on 2026-10-17
+
+The latest-release review found only VectorCraft needed updating, from 0.11.0
+to 0.12.0. Its Linux x86_64 tarball matched upstream `SHA256SUMS.txt` and the
+GitHub release asset digest. The real installer completed in a disposable
+prefix, all ELF dependencies resolved (`libc`, `libm` and `libgcc_s`), and
+headless SVG-to-PDF and SVG-to-PNG conversion passed. Reopening the exported
+PDF preserved the 128-by-96 artboard and both paths, with no import warnings.
+The other 12 release pins remain unchanged. Existing guests are not modified.
+
+### Previous full-suite validation on 2026-10-15
 
 The real checksum-verified installer completed for all 13 pinned releases on
 Debian 12 with no display. All binaries' ELF dependencies resolved to glibc and
@@ -113,5 +123,6 @@ and recognized text in an image-only PDF. Repository formatting, Clippy,
 
 A clean Docker build and new Kata guest could not be exercised inside the
 isolated development guest because Docker is unavailable. This host-only
-acceptance check is tracked as Beads issue `jbox-wnm`. No host runtime socket,
-device or credential mount was added to work around that boundary.
+acceptance check is tracked as Beads issue `jbox-10a` (replacing the unavailable
+`jbox-wnm` record). No host runtime socket, device or credential mount was added
+to work around that boundary.

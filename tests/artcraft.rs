@@ -120,6 +120,10 @@ fn releases_pin_all_thirteen_cli_archives() {
         assert_eq!(entry[0], app);
         assert_eq!(entry[1].split('.').count(), 3);
         assert!(entry[1].chars().all(|c| c.is_ascii_digit() || c == '.'));
+        assert!(
+            include_str!("../docs/artcraft.md")
+                .contains(&format!("| `{app}-cli` | {} |", entry[1]))
+        );
         assert_eq!(entry[2].len(), 64);
         assert!(entry[2].chars().all(|c| c.is_ascii_hexdigit()));
     }

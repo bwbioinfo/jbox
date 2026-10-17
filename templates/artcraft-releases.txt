@@ -1,7 +1,7 @@
-# Official storytold releases reviewed on 2026-10-15.
+# Official storytold releases reviewed on 2026-10-17.
 # app version SHA-256 of app-version-linux-x86_64.tar.gz
 photocraft 0.9.0 91300c1485ad710839604b085531c90e77ac7ebdb2a30259309ad74afcfdb90d
-vectorcraft 0.11.0 83ca62a455bbb1d1c61c6b05133bc41ceda1d1d99e4be7509d287c364ceb8f39
+vectorcraft 0.12.0 6750db109d3a253c51c82975af650f42384ba27a768f72529431edfb58508269
 filmcraft 0.8.0 b166877905ae8a1b5505066d6dde60d7ce05831cfb309bacd5d7970f4bb017e1
 lightcraft 0.8.0 9fe0ecc69b7f1f3a35a1c630429b3c52fdb4419ba208b5579b4501b938f518d1
 pdfcraft 0.8.0 3f4fd5ddd99802a3d349474c61cf3dabd1fb7198ea0df00d24cc310516bd1c2a
