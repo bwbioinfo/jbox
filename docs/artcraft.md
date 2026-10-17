@@ -112,8 +112,11 @@ from the transport branch. The former shell installer and text manifest were
 consolidated into this single installation path. Offline regression tests cover
 extraction safety, resource preservation, manifest/documentation consistency,
 startup failures and OCR readiness. The historical real-install checks below
-predate this consolidation and do not substitute for a new clean-image test.
-Clean Docker/Kata acceptance remains tracked as `jbox-10a`.
+predate this consolidation. Clean Docker and fresh Kata acceptance subsequently
+passed on this host, as recorded in [the acceptance report](acceptance-2026-10-17.md).
+All 13 CLIs passed verification inside the new guest, along with spreadsheet
+evaluation, PDF OCR readiness and VectorCraft SVG-to-PDF/PNG conversion. This
+closes `jbox-10a` without claiming a new full-workflow test for every application.
 
 ## Previous validation on 2026-10-17
 

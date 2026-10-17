@@ -51,7 +51,49 @@ fi
 
 const JBOX_ENTRYPOINT: &str = r#"#!/bin/sh
 set -eu
-mkdir -p /run/sshd
+/usr/bin/mkdir -p /run/sshd
+# OCI creates ancestors of nested bind mounts as root inside the tmpfs home.
+# Repair only these fixed guest directories, never a bind-mounted directory or
+# its contents. In particular, .jcode can itself be a persistent credential mount.
+guest_home_backing() {
+    /usr/bin/awk -v path="$1" '
+        length($5) > longest && ($5 == "/" || path == $5 || index(path, $5 "/") == 1) {
+            longest = length($5)
+            backing = $5
+            for (field = 6; field <= NF; field++) {
+                if ($field == "-") { kind = $(field + 1); break }
+            }
+        }
+        END { print backing, kind }
+    ' /proc/self/mountinfo
+}
+if [ -L /home/jbox ] || [ "$(guest_home_backing /home/jbox)" != "/home/jbox tmpfs" ]; then
+    echo 'jbox: refusing guest home initialization without its dedicated tmpfs' >&2
+    exit 1
+fi
+# Root deliberately lacks DAC_OVERRIDE and cannot traverse the user's 0700
+# home. Temporarily own only the dedicated tmpfs root while repairing it, then
+# restore its user ownership before starting any unprivileged guest process.
+/usr/bin/chown -h root:jbox /home/jbox
+trap '/usr/bin/chown -h jbox:jbox /home/jbox' EXIT
+prepared=
+for directory in /home/jbox/.local /home/jbox/.local/bin /home/jbox/.local/share /home/jbox/.jcode /home/jbox/.config /home/jbox/.config/gh /home/jbox/.pi /home/jbox/.ssh; do
+    if [ -L "$directory" ]; then
+        echo "jbox: refusing symlinked guest home directory $directory" >&2
+        exit 1
+    fi
+    # Longest-prefix lookup also excludes descendants of a reference mount.
+    if [ "$(guest_home_backing "$directory")" = "/home/jbox tmpfs" ]; then
+        /usr/bin/mkdir -p "$directory"
+        prepared="$directory $prepared"
+    fi
+done
+# Restore children before their parents, which OCI can create with mode 0700.
+for directory in $prepared; do
+    /usr/bin/chown -h jbox:jbox "$directory"
+done
+/usr/bin/chown -h jbox:jbox /home/jbox
+trap - EXIT
 if [ -x /usr/local/bin/jbox-toolchain-init ]; then
     su -s /bin/sh jbox -c /usr/local/bin/jbox-toolchain-init
 fi
@@ -756,6 +798,99 @@ mod tests {
             JBOX_ENTRYPOINT.find("jbox-toolchain-init").unwrap()
                 < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
         );
+    }
+
+    #[test]
+    fn guest_prepares_only_unmounted_home_ancestors_before_dropping_privileges() {
+        let prepare = JBOX_ENTRYPOINT
+            .split("for directory in ")
+            .nth(1)
+            .unwrap()
+            .split("\ndone\n")
+            .next()
+            .unwrap();
+        let directories = prepare.split("; do").next().unwrap();
+        assert_eq!(
+            directories.split_whitespace().collect::<Vec<_>>(),
+            vec![
+                "/home/jbox/.local",
+                "/home/jbox/.local/bin",
+                "/home/jbox/.local/share",
+                "/home/jbox/.jcode",
+                "/home/jbox/.config",
+                "/home/jbox/.config/gh",
+                "/home/jbox/.pi",
+                "/home/jbox/.ssh",
+            ]
+        );
+        assert!(prepare.contains("if [ -L \"$directory\" ]; then"));
+        assert!(JBOX_ENTRYPOINT.contains("/proc/self/mountinfo"));
+        assert!(prepare.contains(
+            "if [ \"$(guest_home_backing \"$directory\")\" = \"/home/jbox tmpfs\" ]; then"
+        ));
+        assert!(prepare.contains("prepared=\"$directory $prepared\""));
+        assert!(!prepare.contains("chown"));
+        assert!(JBOX_ENTRYPOINT.contains(
+            "for directory in $prepared; do\n    /usr/bin/chown -h jbox:jbox \"$directory\"\ndone"
+        ));
+        assert!(JBOX_ENTRYPOINT.contains(
+            "/usr/bin/chown -h root:jbox /home/jbox\ntrap '/usr/bin/chown -h jbox:jbox /home/jbox' EXIT"
+        ));
+        assert!(JBOX_ENTRYPOINT.contains(
+            "/usr/bin/chown -h jbox:jbox /home/jbox\ntrap - EXIT\nif [ -x /usr/local/bin/jbox-toolchain-init ]"
+        ));
+        assert!(!prepare.contains("chown -R"));
+        assert!(!prepare.contains("chmod"));
+        assert!(
+            JBOX_ENTRYPOINT.find("chown -h jbox:jbox").unwrap()
+                < JBOX_ENTRYPOINT
+                    .find("su -s /bin/sh jbox -c /usr/local/bin/jbox-toolchain-init")
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn home_backing_lookup_excludes_bind_mount_roots_and_descendants() {
+        let temp = tempfile::tempdir().unwrap();
+        let mountinfo = temp.path().join("mountinfo");
+        fs::write(
+            &mountinfo,
+            "1 0 0:1 / / rw - overlay overlay rw\n\
+             2 1 0:2 / /home/jbox rw - tmpfs tmpfs rw\n\
+             3 2 8:1 /reference /home/jbox/.local rw - ext4 /dev/test rw\n\
+             4 2 8:1 /credentials /home/jbox/.jcode rw - ext4 /dev/test rw\n\
+             5 2 8:1 /config /home/jbox/.config/gh/hosts.yml ro - ext4 /dev/test ro\n\
+             6 2 0:3 / /home/jbox/.pi rw - tmpfs tmpfs rw\n",
+        )
+        .unwrap();
+        let function = JBOX_ENTRYPOINT
+            .split("guest_home_backing() {")
+            .nth(1)
+            .unwrap()
+            .split("\n}\n")
+            .next()
+            .unwrap();
+        let script = format!("guest_home_backing() {{{function}\n}}\nguest_home_backing \"$1\"")
+            .replace("/proc/self/mountinfo", mountinfo.to_str().unwrap());
+        for (path, expected) in [
+            ("/home/jbox", "/home/jbox tmpfs"),
+            ("/home/jbox/.local", "/home/jbox/.local ext4"),
+            ("/home/jbox/.local/bin", "/home/jbox/.local ext4"),
+            ("/home/jbox/.local/share/new", "/home/jbox/.local ext4"),
+            ("/home/jbox/.jcode", "/home/jbox/.jcode ext4"),
+            ("/home/jbox/.jcode/new", "/home/jbox/.jcode ext4"),
+            ("/home/jbox/.pi/agent", "/home/jbox/.pi tmpfs"),
+            ("/home/jbox/.config/gh", "/home/jbox tmpfs"),
+            ("/home/jbox/.local-other", "/home/jbox tmpfs"),
+            ("/home/other", "/ overlay"),
+        ] {
+            let output = Command::new("sh")
+                .args(["-c", &script, "home-backing-test", path])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected);
+        }
     }
 
     #[test]
