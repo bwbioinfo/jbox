@@ -28,7 +28,11 @@ including bind-mounted descendants. Because root lacks `DAC_OVERRIDE`, it owns
 only the private home tmpfs root temporarily, prepares directories before
 restoring child-to-parent ownership, and restores the home owner on both success
 and shell exit. It does not change directory modes, recursively change owners,
-modify bind-mounted directories or add capabilities.
+modify bind-mounted directories or add capabilities. Configuration also rejects
+workspace, repository and extra mount targets equal to `/home/jbox` or its
+ancestors, including component-normalized aliases. Descendant mounts remain
+supported. This avoids depending on Docker's resolution of duplicate bind and
+tmpfs destinations to establish the dedicated-home invariant.
 
 The corrected image and project image were:
 
@@ -90,6 +94,17 @@ the two still-empty fixture directories were removed. An initial attempt to
 mount fixtures under the protected host `.jcode` directory was correctly
 rejected, without relaxing that policy.
 
+A subsequent actual CLI run used a new empty tmpfs-backed host source targeting
+`/home//jbox/./`. It failed with `mount target overlaps the reserved guest home
+root` before any session was created, with host owner, mode and nanosecond change
+timestamp unchanged. Automated public-CLI coverage also rejects `/home`,
+`/home/jbox` and that normalized alias for primary workspaces, additional
+repositories and extra mounts. The empty tmpfs fixture remains until host tmpfs
+cleanup because the tool safety gate disallowed removing a path under `/dev`.
+The final binary then launched `brisk-turtle-2301ee` with the supported descendant
+mounts, verified all 13 CLIs over SSH, preserved host mount metadata, and stopped
+and cleaned the session successfully. The disposable host repository was clean.
+
 ## Quality gates and evidence
 
 The final complete local gate passed:
@@ -103,7 +118,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 git diff --check
 ```
 
-Results: 178 Rust tests and 30 Python tests passed. New Rust coverage checks
+Results: 179 Rust tests and 30 Python tests passed. New Rust coverage checks
 mount classification, tmpfs-backed bind exclusion, fixed-path preparation and
 ownership restoration ordering. A separate read-only reviewer found no blocker
 in the final ownership repair.
@@ -116,7 +131,10 @@ Host-local transcripts are retained under `$JCODE_SCRATCH_DIR`:
 - `jbox-reconcile-acceptance/lifecycle.log`: stop and successful retained resume.
 - `jbox-reconcile-acceptance/accepted-clean.log`: vector exports, acceptance and cleanup.
 - `jbox-reconcile-acceptance/mount-boundaries-final.log`: actual mount preservation.
-- `jbox-live-final-quality.log`: final local quality gates.
+- `jbox-live-final-quality.log`: ownership-repair quality gates.
+- `jbox-reconcile-acceptance/reserved-home-rejection.log`: real whole-home alias rejection.
+- `jbox-reserved-home-quality.log`: final full gates including public mount rejection.
+- `jbox-reconcile-acceptance/final-supported-mounts.log`: final binary's positive Kata path.
 
 ## Limits and follow-up
 

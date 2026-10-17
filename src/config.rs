@@ -815,6 +815,12 @@ fn validate_guest_path(path: &str) -> Result<()> {
     if !path.starts_with('/') || path == "/" || path.contains("..") || path.contains('\0') {
         bail!("mount target must be an absolute, non-root path without `..`: {path}");
     }
+    // The entrypoint must own only its dedicated tmpfs, never a configured
+    // host mount. Compare components to reject aliases with repeated slashes
+    // or `.` while continuing to allow guarded mounts beneath the home.
+    if Path::new("/home/jbox").starts_with(path) {
+        bail!("mount target overlaps the reserved guest home root: {path}");
+    }
     Ok(())
 }
 /// Skills are fetched on the host with authenticated `gh`, so no guest Git
@@ -1400,6 +1406,16 @@ mod tests {
         assert!(validate_guest_path("relative").is_err());
         assert!(validate_guest_path("/workspace/../home").is_err());
         assert!(validate_guest_path("/workspace/project").is_ok());
+        for target in ["//", "/home", "/home/", "/home/jbox", "/home//jbox/./"] {
+            assert!(validate_guest_path(target).is_err(), "{target}");
+        }
+        for target in [
+            "/home/jbox/.local",
+            "/home/jbox/.config",
+            "/home/jbox-other",
+        ] {
+            assert!(validate_guest_path(target).is_ok(), "{target}");
+        }
     }
 
     #[test]

@@ -6,6 +6,73 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
+fn reserved_guest_home_mounts_fail_before_creating_a_workspace_or_guest() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("project");
+    fs::create_dir(&repository).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let secondary = temp.path().join("secondary");
+    fs::create_dir(&secondary).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&secondary)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let metadata = fs::metadata(&repository).unwrap();
+    for target in ["/home", "/home/jbox", "/home//jbox/./"] {
+        for section in [
+            format!("[workspace]\nmount = '{target}'\n"),
+            format!("[[repos]]\npath = '../secondary'\nmount = '{target}'\n"),
+            format!("[[mounts]]\nsource = '.'\ntarget = '{target}'\nwritable = true\n"),
+        ] {
+            fs::write(
+                repository.join(".jbox.toml"),
+                format!("version = 1\n{section}"),
+            )
+            .unwrap();
+            let output = Command::new(env!("CARGO_BIN_EXE_jbox"))
+                .args(["run", "--new", "--no-attach", "."])
+                .current_dir(&repository)
+                .env("XDG_DATA_HOME", temp.path().join("data"))
+                .env("XDG_CACHE_HOME", temp.path().join("cache"))
+                .env("XDG_CONFIG_HOME", temp.path().join("config"))
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{section}");
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains("mount target overlaps the reserved guest home root"),
+                "{section}: {error}"
+            );
+        }
+    }
+    let sessions = temp.path().join("data/jbox/sessions");
+    assert!(!sessions.exists() || fs::read_dir(sessions).unwrap().next().is_none());
+    let branches = Command::new("git")
+        .args(["branch", "--list", "jbox/*"])
+        .current_dir(&repository)
+        .output()
+        .unwrap();
+    assert!(branches.status.success());
+    assert!(branches.stdout.is_empty());
+    use std::os::unix::fs::MetadataExt;
+    let after = fs::metadata(&repository).unwrap();
+    assert_eq!(metadata.uid(), after.uid());
+    assert_eq!(metadata.gid(), after.gid());
+    assert_eq!(metadata.mode(), after.mode());
+}
+
+#[test]
 fn offline_network_fails_before_creating_a_workspace_or_guest() {
     let temp = tempfile::tempdir().unwrap();
     let repository = temp.path().join("project");

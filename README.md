@@ -336,9 +336,10 @@ locates its editable guest worktree, normally `/workspace/project`. Each
 `/workspace/infrastructure`. Relative host paths resolve from the primary
 repository root, not the guest's current directory. These worktrees are separate
 Git roots, not automatically submodules, and their common parent is not a Git
-repository. All guest paths are configurable. This repository's checked-in
-configuration uses `/workspace/jbox` for Jbox and `/workspace/skills` for the
-separate skills repository.
+repository. Guest mount paths are configurable except `/home/jbox` and its
+ancestors, which are reserved for the runtime's private home tmpfs. This
+repository's checked-in configuration uses `/workspace/jbox` for Jbox and
+`/workspace/skills` for the separate skills repository.
 
 Extra `[[mounts]]` entries map host `source` paths to guest `target` paths and
 default to `writable = false`. They supply data, not additional editable Git
