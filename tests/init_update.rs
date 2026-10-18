@@ -120,6 +120,22 @@ fn update_errors_and_tool_conflict_are_non_mutating_and_state_free() {
 }
 
 #[test]
+fn ordinary_init_advertises_quarto_in_default_image() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    repository(&project);
+    let output = cli(temp.path(), &project, &["init"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dockerfile = fs::read_to_string(project.join(".jbox/Dockerfile")).unwrap();
+    assert!(dockerfile.contains("Quarto and ArtCraft CLIs are already installed"));
+    assert!(!dockerfile.lines().any(|line| line.starts_with("RUN ")));
+}
+
+#[test]
 fn ordinary_init_then_update_preserves_image_and_existing_state_permissions() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");

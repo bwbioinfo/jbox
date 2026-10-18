@@ -130,6 +130,7 @@ just the Jcode runtime. No `--tool` arguments are needed for:
 | Data and transfers | sqlite3, rsync, rclone 1.75.2 |
 | Git and connectivity | Git, GitHub CLI (`gh`), OpenSSH client/server, curl, CA certificates |
 | Archives | tar, gzip, xz, zip, unzip |
+| Publishing | Quarto 1.10.19 with its bundled Pandoc and rendering resources |
 | Creative automation | All 13 ArtCraft headless CLIs, Fontconfig, DejaVu and Liberation fonts |
 | Agent workflow | Jcode, Beads (`bd`), guest-local Beads hydration and safe Git hook |
 
@@ -167,6 +168,16 @@ rclone's configuration stays guest-local unless you explicitly configure an
 approved credential mechanism. No host rclone config, cloud credentials, FUSE
 device, or additional container capabilities are imported or enabled. File
 transfer commands are available, but `rclone mount` is not enabled by default.
+
+Quarto uses the official Linux x86_64 tarball, pinned to 1.10.19 and SHA-256
+verified before extraction under `/opt/quarto`. This release was checked on
+**October 18, 2026**. The `quarto` command is on both Docker and SSH PATHs, and
+image builds verify a plain Markdown-to-HTML render as the non-root guest user.
+The complete upstream bundle is retained, including Pandoc and Deno. R/knitr,
+Julia, Jupyter and project Python packages, TeX/TinyTeX, and a headless browser
+are not installed by this addition. Install the engines and dependencies needed
+by your project explicitly. Plain HTML rendering does not require them. No
+publishing credentials or host Quarto configuration are imported.
 
 ArtCraft commands are `photocraft-cli`, `vectorcraft-cli`, `filmcraft-cli`,
 `lightcraft-cli`, `pdfcraft-cli`, `effectcraft-cli`, `designcraft-cli`,

@@ -78,6 +78,15 @@ RUN mkdir -p -m 0755 /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash && bd version
 
+# Official Linux x86_64 release, reviewed 2026-10-18. Keep the complete bundle
+# together so Quarto can discover its bundled Pandoc, Deno, and resources.
+RUN curl -fsSL --retry 3 https://github.com/quarto-dev/quarto-cli/releases/download/v1.10.19/quarto-1.10.19-linux-amd64.tar.gz -o /tmp/quarto.tar.gz \
+    && echo '8e38c2b2df6a6dbd369ea16e15acded6894545258d13a02f777f81ad18fd7973  /tmp/quarto.tar.gz' | sha256sum -c - \
+    && mkdir -p /opt/quarto \
+    && tar -xzf /tmp/quarto.tar.gz -C /opt/quarto --strip-components=1 \
+    && ln -s /opt/quarto/bin/quarto /usr/local/bin/quarto \
+    && rm -f /tmp/quarto.tar.gz
+
 COPY install-artcraft.py artcraft-releases.json /usr/local/lib/jbox/
 RUN python /usr/local/lib/jbox/install-artcraft.py --manifest /usr/local/lib/jbox/artcraft-releases.json
 
@@ -108,6 +117,9 @@ RUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/l
 # Fail image builds early if the non-root guest cannot use the toolchains.
 RUN su -s /bin/sh jbox -c 'set -eu; jbox-toolchain-init; rustc --version; cargo --version; cargo fmt --version; cargo clippy --version; rust-analyzer --version; python --version; python -m pip --version; python -c "import ssl, sqlite3, venv"; node --version; npm --version; npx --version; rg --version; jq --version; cmake --version; ninja --version; test -w "$RUSTUP_HOME"; test -w "$CARGO_HOME"; test -w "$NPM_CONFIG_PREFIX"'
 RUN su -s /bin/sh jbox -c 'set -eu; uv --version; uvx --version; pnpm --version; sqlite3 :memory: "SELECT 1;"; rsync --version; shellcheck --version; rclone version; test -w "$PNPM_HOME"'
+# Exercise bundled rendering resources, not just the launcher, without an
+# execution engine, browser, TeX installation, or network access.
+RUN su -s /bin/sh jbox -c 'set -eu; quarto --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; printf "# Jbox Quarto smoke test\n" > "$work/smoke.qmd"; quarto render "$work/smoke.qmd" --to html --no-execute; test -s "$work/smoke.html"'
 # Repeat startup and OCR discovery checks with the final non-root guest identity.
 RUN su -s /bin/sh jbox -c 'python /usr/local/lib/jbox/install-artcraft.py --manifest /usr/local/lib/jbox/artcraft-releases.json --verify-only'
 EXPOSE 2222

@@ -778,6 +778,27 @@ mod tests {
     }
 
     #[test]
+    fn base_image_installs_and_smoke_tests_pinned_quarto() {
+        for expected in [
+            "https://github.com/quarto-dev/quarto-cli/releases/download/v1.10.19/quarto-1.10.19-linux-amd64.tar.gz",
+            "8e38c2b2df6a6dbd369ea16e15acded6894545258d13a02f777f81ad18fd7973  /tmp/quarto.tar.gz",
+            "sha256sum -c -",
+            "tar -xzf /tmp/quarto.tar.gz -C /opt/quarto --strip-components=1",
+            "ln -s /opt/quarto/bin/quarto /usr/local/bin/quarto",
+            "rm -f /tmp/quarto.tar.gz",
+            "RUN su -s /bin/sh jbox -c 'set -eu; quarto --version;",
+            "quarto render \"$work/smoke.qmd\" --to html --no-execute",
+            "test -s \"$work/smoke.html\"",
+        ] {
+            assert!(BASE_DOCKERFILE.contains(expected), "missing {expected}");
+        }
+        let download = BASE_DOCKERFILE.find("RUN curl -fsSL --retry 3").unwrap();
+        let checksum = BASE_DOCKERFILE[download..].find("sha256sum -c -").unwrap();
+        let extraction = BASE_DOCKERFILE[download..].find("tar -xzf").unwrap();
+        assert!(checksum < extraction, "verify Quarto before extraction");
+    }
+
+    #[test]
     fn base_image_preserves_non_root_and_ssh_toolchain_access() {
         for expected in [
             "export RUSTUP_HOME=",
