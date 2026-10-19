@@ -110,6 +110,7 @@ COPY jbox-entrypoint /usr/local/bin/jbox-entrypoint
 COPY jbox-beads-pre-commit /usr/local/bin/jbox-beads-pre-commit
 COPY jbox-toolchain-init /usr/local/bin/jbox-toolchain-init
 RUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/local/bin/jbox-entrypoint /usr/local/bin/jbox-beads-pre-commit /usr/local/bin/jbox-toolchain-init \
+    && /usr/local/bin/jcode --no-update --version \
     && printf '%s\n' 'Port 2222' 'PasswordAuthentication no' 'PermitRootLogin no' 'AllowUsers jbox' 'AuthorizedKeysFile .ssh/authorized_keys' \
         'SetEnv PATH=/home/jbox/.cargo/bin:/home/jbox/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin RUSTUP_HOME=/home/jbox/.rustup CARGO_HOME=/home/jbox/.cargo NPM_CONFIG_PREFIX=/home/jbox/.local PNPM_HOME=/home/jbox/.local/bin' \
         > /etc/ssh/sshd_config.d/jbox.conf

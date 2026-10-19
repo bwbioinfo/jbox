@@ -1,7 +1,8 @@
 use crate::{config::Config, paths::JboxPaths};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::Path;
 use std::process::Command;
 
 pub struct ImageManager<'a> {
@@ -207,7 +208,7 @@ while [ "$index" -lt "${JBOX_BEADS_WORKSPACE_COUNT:-0}" ]; do
     fi
     index=$((index + 1))
 done
-su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode && jcode serve --server-name jbox --socket /home/jbox/.local/share/jcode/jbox.sock >/tmp/jcode-serve.log 2>&1 &'
+su -s /bin/sh jbox -c 'mkdir -p /home/jbox/.ssh /home/jbox/.local/share/jcode && /usr/local/bin/jcode --no-update serve --server-name jbox --socket /home/jbox/.local/share/jcode/jbox.sock >/tmp/jcode-serve.log 2>&1 &'
 exec /usr/sbin/sshd -D -e
 "#;
 
@@ -271,15 +272,6 @@ impl<'a> ImageManager<'a> {
     }
     fn base_image(&self) -> Result<String> {
         let (uid, gid) = current_user_ids()?;
-        // Include every bundled build input, including release pins and the
-        // installer, so tool upgrades also invalidate dependent project images.
-        let fingerprint = base_image_fingerprint(BASE_IMAGE_FILES);
-        let tag = format!("jbox/jcode:local-v11-{uid}-{gid}-{}", &fingerprint[..16]);
-        if self.exists(&tag) {
-            return Ok(tag);
-        }
-        let context = self.paths.cache.join("base-image");
-        std::fs::create_dir_all(&context)?;
         let jcode = Command::new("sh")
             .args(["-c", "command -v jcode"])
             .output()
@@ -287,32 +279,74 @@ impl<'a> ImageManager<'a> {
         if !jcode.status.success() {
             bail!("jcode must be installed locally or configure image.dockerfile");
         }
-        let jcode = PathBuf::from(String::from_utf8(jcode.stdout)?.trim())
-            .canonicalize()
-            .context("could not resolve local jcode launcher")?;
-        std::fs::copy(&jcode, context.join("jcode"))?;
-        let jcode_binary = jcode
-            .parent()
-            .context("jcode executable has no parent directory")?
-            .join("jcode-linux-x86_64.bin");
-        if !jcode_binary.is_file() {
-            bail!(
-                "jcode distribution is incomplete: expected {} next to its launcher",
-                jcode_binary.display()
-            );
-        }
-        std::fs::copy(&jcode_binary, context.join("jcode-linux-x86_64.bin"))?;
-        for (name, contents) in BASE_IMAGE_FILES {
-            std::fs::write(context.join(name), contents)?;
+        // Snapshot before hashing or consulting Docker. Hash exactly the bytes
+        // Docker will consume, not a version string or a mutable host path.
+        // Private contexts also prevent concurrent builds overwriting inputs.
+        let context = stage_base_image(
+            &self.paths.cache,
+            Path::new(String::from_utf8(jcode.stdout)?.trim()),
+        )?;
+        let fingerprint = staged_image_fingerprint(context.path())?;
+        let tag = format!("jbox/jcode:local-v11-{uid}-{gid}-{}", &fingerprint[..16]);
+        if self.exists(&tag) {
+            return Ok(tag);
         }
         run_build(
-            &context,
-            &context.join("Dockerfile"),
+            context.path(),
+            &context.path().join("Dockerfile"),
             &tag,
             &[format!("JBOX_UID={uid}"), format!("JBOX_GID={gid}")],
         )?;
         Ok(tag)
     }
+}
+
+fn stage_base_image(cache: &Path, launcher: &Path) -> Result<tempfile::TempDir> {
+    let launcher = launcher
+        .canonicalize()
+        .context("could not resolve local jcode launcher")?;
+    let executable = launcher
+        .parent()
+        .context("jcode executable has no parent directory")?
+        .join("jcode-linux-x86_64.bin");
+    if !executable.is_file() {
+        bail!(
+            "jcode distribution is incomplete: expected {} next to its launcher",
+            executable.display()
+        );
+    }
+    std::fs::create_dir_all(cache)?;
+    let context = tempfile::Builder::new()
+        .prefix("base-image-")
+        .tempdir_in(cache)?;
+    std::fs::copy(launcher, context.path().join("jcode"))?;
+    std::fs::copy(executable, context.path().join("jcode-linux-x86_64.bin"))?;
+    for (name, contents) in BASE_IMAGE_FILES {
+        std::fs::write(context.path().join(name), contents)?;
+    }
+    Ok(context)
+}
+
+fn staged_image_fingerprint(context: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(base_image_fingerprint(BASE_IMAGE_FILES).as_bytes());
+    // Stream the executable, which can be hundreds of MB. Include the launcher
+    // independently so wrapper-only upgrades invalidate the cache as well.
+    for name in ["jcode", "jcode-linux-x86_64.bin"] {
+        let mut file = std::fs::File::open(context.join(name))?;
+        hasher.update((name.len() as u64).to_be_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update(file.metadata()?.len().to_be_bytes());
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn base_image_fingerprint(files: &[(&str, &str)]) -> String {
@@ -380,7 +414,9 @@ mod tests {
         assert!(!JBOX_ENTRYPOINT.contains("failed to install configured GitHub skill source"));
         assert!(
             JBOX_ENTRYPOINT.find("gh auth setup-git").unwrap()
-                < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
+                < JBOX_ENTRYPOINT
+                    .find("/usr/local/bin/jcode --no-update serve")
+                    .unwrap()
         );
     }
 
@@ -418,7 +454,9 @@ mod tests {
             JBOX_ENTRYPOINT
                 .find("bd init --sandbox --stealth --from-jsonl")
                 .unwrap()
-                < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
+                < JBOX_ENTRYPOINT
+                    .find("/usr/local/bin/jcode --no-update serve")
+                    .unwrap()
         );
     }
 
@@ -817,7 +855,9 @@ mod tests {
         }
         assert!(
             JBOX_ENTRYPOINT.find("jbox-toolchain-init").unwrap()
-                < JBOX_ENTRYPOINT.find("jcode serve").unwrap()
+                < JBOX_ENTRYPOINT
+                    .find("/usr/local/bin/jcode --no-update serve")
+                    .unwrap()
         );
     }
 
@@ -929,6 +969,102 @@ mod tests {
             base_image_fingerprint(&[("a", "bc")]),
             base_image_fingerprint(&[("ab", "c")])
         );
+    }
+
+    fn fake_distribution(root: &Path, launcher: &str, executable: &[u8]) -> std::path::PathBuf {
+        fs::create_dir_all(root).unwrap();
+        fs::write(root.join("jcode"), launcher).unwrap();
+        fs::write(root.join("jcode-linux-x86_64.bin"), executable).unwrap();
+        root.join("jcode")
+    }
+
+    #[test]
+    fn jcode_launcher_and_binary_contents_invalidate_base_and_project_images() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let launcher = fake_distribution(&temp.path().join("dist"), "launcher-a", b"binary-a");
+        let original = stage_base_image(&cache, &launcher).unwrap();
+        let original_hash = staged_image_fingerprint(original.path()).unwrap();
+        let unchanged = stage_base_image(&cache, &launcher).unwrap();
+        assert_ne!(original.path(), unchanged.path());
+        assert_eq!(
+            original_hash,
+            staged_image_fingerprint(unchanged.path()).unwrap()
+        );
+
+        // Same path, length and version label, but new executable bytes.
+        fs::write(
+            launcher.with_file_name("jcode-linux-x86_64.bin"),
+            b"binary-b",
+        )
+        .unwrap();
+        let upgraded = stage_base_image(&cache, &launcher).unwrap();
+        let upgraded_hash = staged_image_fingerprint(upgraded.path()).unwrap();
+        assert_ne!(original_hash, upgraded_hash);
+        let dockerfile = temp.path().join("project.Dockerfile");
+        fs::write(
+            &dockerfile,
+            "ARG JBOX_BASE_IMAGE\nFROM ${JBOX_BASE_IMAGE}\n",
+        )
+        .unwrap();
+        assert_ne!(
+            hash_file_with_context(&dockerfile, original_hash.as_bytes()).unwrap(),
+            hash_file_with_context(&dockerfile, upgraded_hash.as_bytes()).unwrap()
+        );
+
+        fs::write(&launcher, "launcher-b").unwrap();
+        let wrapper_upgrade = stage_base_image(&cache, &launcher).unwrap();
+        assert_ne!(
+            upgraded_hash,
+            staged_image_fingerprint(wrapper_upgrade.path()).unwrap()
+        );
+        // Neither an upgrade nor a concurrent stage can alter existing inputs.
+        assert_eq!(
+            original_hash,
+            staged_image_fingerprint(original.path()).unwrap()
+        );
+        assert_eq!(
+            fs::read(original.path().join("jcode-linux-x86_64.bin")).unwrap(),
+            b"binary-a"
+        );
+        assert!(BASE_DOCKERFILE.contains("/usr/local/bin/jcode --no-update --version"));
+    }
+
+    #[test]
+    fn symlinked_jcode_resolves_its_matching_adjacent_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let first = fake_distribution(&temp.path().join("v1"), "launcher", b"binary-1");
+        let second = fake_distribution(&temp.path().join("v2"), "launcher", b"binary-2");
+        let selected = temp.path().join("jcode");
+        std::os::unix::fs::symlink(&first, &selected).unwrap();
+        let original = stage_base_image(&cache, &selected).unwrap();
+        fs::remove_file(&selected).unwrap();
+        std::os::unix::fs::symlink(&second, &selected).unwrap();
+        let upgraded = stage_base_image(&cache, &selected).unwrap();
+        assert_ne!(
+            staged_image_fingerprint(original.path()).unwrap(),
+            staged_image_fingerprint(upgraded.path()).unwrap()
+        );
+        assert_eq!(
+            fs::read(upgraded.path().join("jcode-linux-x86_64.bin")).unwrap(),
+            b"binary-2"
+        );
+    }
+
+    #[test]
+    fn incomplete_jcode_distribution_fails_before_cache_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = fake_distribution(&temp.path().join("dist"), "launcher", b"binary");
+        let cache = temp.path().join("cache");
+        let staged = stage_base_image(&cache, &launcher).unwrap();
+        let path = staged.path().to_owned();
+        drop(staged);
+        assert!(!path.exists(), "temporary image context leaked");
+        fs::remove_file(launcher.with_file_name("jcode-linux-x86_64.bin")).unwrap();
+        let error = stage_base_image(&cache, &launcher).unwrap_err().to_string();
+        assert!(error.contains("distribution is incomplete"), "{error}");
+        assert_eq!(fs::read_dir(cache).unwrap().count(), 0);
     }
 
     #[test]

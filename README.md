@@ -138,6 +138,8 @@ The compiler/interpreter versions above were checked against official releases
 on **October 15, 2026** and pinned in `templates/base.Dockerfile`. They are not
 silently upgraded during guest startup. Updating a bundled Dockerfile, installer,
 or ArtCraft release pin invalidates the base and dependent project image caches.
+The local Jcode launcher and executable contents are also part of the cache key,
+so a Jcode upgrade or rebuild selects a new base and dependent project image.
 An upgraded Jbox builds the new image for fresh sessions. Existing running or
 retained guests are unchanged. `jbox init --update` does not refresh images.
 Project `rust-toolchain.toml` files can still select their own Rust toolchains.
@@ -568,7 +570,34 @@ session-local skills. To recover from a guest image startup bug after upgrading
 jbox, run `jbox resume <session> --refresh-image`. This explicitly rebuilds the
 image from the current configuration and jbox code, and changes the session's
 pinned image only after startup succeeds. Without the flag, resume never rebuilds
-the image. To preserve data, resume refuses a
+the image.
+
+### Jcode client/server version mismatch
+
+The client runs on the host, while the server runs the Jcode version baked into
+the guest image. Upgrading local Jcode does not update an already-running or
+retained guest. Before attaching, jbox checks both versions, including their
+build identity, and refuses a mismatch rather than sending unsupported protocol
+requests such as `account_usage` to an older server. A failed version query also
+leaves the guest running without launching the client.
+Jbox disables automatic Jcode update checks for its daemon and client launches,
+keeping the selected image/client pair stable until an explicit upgrade.
+
+After installing the updated jbox, explicitly stop and refresh the affected
+session from a participating repository:
+
+```bash
+jbox stop <session>
+jbox resume <session> --refresh-image
+```
+
+The refresh keeps the existing worktrees and session branches. Saved Jcode
+conversations resume when `jcode.persistent_credentials = true` (the default).
+With persistence disabled, stopping the guest discards its tmpfs-only Jcode
+history. Review and checkpoint any dirty worktrees when prompted. Jbox never
+automatically restarts a running guest to resolve a mismatch.
+
+To preserve data, resume refuses a
 retained worktree with uncommitted changes because recreating guest-only Git
 metadata requires a hard reset. In an interactive terminal, jbox lists those
 worktrees and offers to checkpoint their changes onto only their session

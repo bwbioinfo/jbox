@@ -58,7 +58,7 @@ pub fn validate_ssh_network(network: &Network) -> Result<()> {
 /// Returns `(success, stdout, stderr)` without bailing on a non-zero exit so
 /// callers that treat a failed exit as a data signal (e.g. `docker port` when
 /// the port is not yet published) can inspect the result themselves.
-fn run_timed_raw(
+pub(crate) fn run_timed_raw(
     mut cmd: Command,
     timeout: Duration,
     label: &str,
@@ -110,11 +110,7 @@ fn run_timed_raw(
                 if remaining.is_zero() {
                     let _ = child.kill();
                     let _ = child.wait(); // reap zombie so no fd/pid leak
-                    bail!(
-                        "`{label}` timed out after {}s; is the Docker daemon responsive? \
-                         Run `docker info` to check.",
-                        timeout.as_secs()
-                    );
+                    bail!("`{label}` timed out after {}s", timeout.as_secs());
                 }
                 thread::sleep(Duration::from_millis(50).min(remaining));
             }

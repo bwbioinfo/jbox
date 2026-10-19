@@ -3,6 +3,7 @@ pub mod engine;
 pub mod git;
 pub mod image;
 pub mod init;
+mod jcode;
 pub mod paths;
 pub mod skills;
 pub mod state;
@@ -800,6 +801,7 @@ impl App {
                 session.id
             );
         }
+        jcode::ensure_compatible(&self.paths, session)?;
         self.touch(session)?;
         render_jbox_session_chrome(&session.id, mount)?;
         let ssh_socket = self.paths.session_ssh_dir(&session.id).join("agent.sock");
@@ -3613,6 +3615,8 @@ fn jcode_attach_args(
     resume_session: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
+        // Keep the checked client version for the lifetime of this attachment.
+        "--no-update".into(),
         "--ssh".into(),
         format!("jbox@{ssh_host}"),
         "--ssh-binary".into(),
@@ -5021,6 +5025,7 @@ allowed_operations = ["clone"]
         assert_eq!(
             jcode_attach_args("127.0.0.2", "/workspace/project", None),
             vec![
+                "--no-update",
                 "--ssh",
                 "jbox@127.0.0.2",
                 "--ssh-binary",
