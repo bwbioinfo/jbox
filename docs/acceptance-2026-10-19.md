@@ -85,6 +85,39 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -
 git diff --check
 ```
 
+## Old-versus-fixed outcome comparison
+
+A second acceptance pass on October 19 used the preserved **installed Jbox
+0.15.1 executable** and the newly **installed Jbox 0.15.2 executable**, not a
+synthetic replacement. Both ran equivalent credential-free scratch project
+configurations with the same actual host Jcode `v0.99.0 (774613c90)`, the same
+Docker image cache, and real Kata startup. The test explicitly asserted the
+negative control's mismatch and the fixed executable's exact version equality.
+
+| Executable under test | Observed fresh guest | Result |
+| --- | --- | --- |
+| Preserved Jbox 0.15.1 | `hidden-turtle-6c9794`, project image `65230d1c0a5068e6`, Jcode `v0.98.1 (1c7426eb1)` | Reproduced the reported defect despite a current `0.99.0` host client. The old CLI selected cached base `local-v11-1001-1001-1accb846529b4ba4`. |
+| Installed Jbox 0.15.2 | `hidden-shark-716173`, project image `31253bceeeffc84b`, Jcode `v0.99.0 (774613c90)` | Exact host/guest match. Actual native SSH handshake independently reported the running daemon version `v0.99.0 (774613c90)` and workspace `/workspace/project`. |
+
+The fixed-path check required the positive `Remote: ... | workspace: ... |
+v0.99.0 (774613c90)` handshake line, not merely the absence of an error. The
+client subsequently refused the intentionally noninteractive terminal, as
+expected. A repeated `run --no-attach` retained the same fixed-version container.
+Both owned test guests were stopped and cleaned. The original user's
+`crisp-yak-beeaf9` VM was not restarted or replaced.
+
+Concrete comparison logs:
+
+```text
+Old CLI:   /home/geonic/.jcode/scratch/vf.5dDuMy/acceptance.log
+Fixed CLI: /home/geonic/.jcode/scratch/vf.E91FUW/acceptance.log
+```
+
+This closes the version-selection feedback loop: the old installed executable
+reproduces stale selection, while the fixed installed executable selects and
+connects to a matching real daemon under the same relevant conditions. It does
+not claim a provider inference test or automatic migration of an active VM.
+
 ## Existing-session recovery
 
 Jbox does not automatically interrupt running sessions. After installing the
