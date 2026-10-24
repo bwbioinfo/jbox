@@ -421,10 +421,24 @@ mod tests {
     }
 
     #[test]
-    fn base_image_installs_beads() {
-        assert!(BASE_DOCKERFILE.contains("curl"));
-        assert!(BASE_DOCKERFILE.contains("gastownhall/beads/main/scripts/install.sh"));
-        assert!(BASE_DOCKERFILE.contains("bd version"));
+    fn base_image_installs_checksum_pinned_beads() {
+        for expected in [
+            "https://github.com/gastownhall/beads/releases/download/v1.3.2/beads_1.3.2_linux_amd64.tar.gz",
+            "c6ea3281f6ff82628351b2d0967c9eb85862c8a0ec0ebc24e63e645c8b02462e  /tmp/beads.tar.gz",
+            "tar -xzf /tmp/beads.tar.gz -C /opt/beads bd LICENSE README.md CHANGELOG.md",
+            "ln -s /opt/beads/bd /usr/local/bin/bd",
+            "rm -f /tmp/beads.tar.gz",
+            "bd version",
+        ] {
+            assert!(BASE_DOCKERFILE.contains(expected), "missing {expected}");
+        }
+        assert!(!BASE_DOCKERFILE.contains("gastownhall/beads/main/scripts/install.sh"));
+        let download = BASE_DOCKERFILE
+            .find("https://github.com/gastownhall/beads/releases/download/")
+            .unwrap();
+        let checksum = BASE_DOCKERFILE[download..].find("sha256sum -c -").unwrap();
+        let extraction = BASE_DOCKERFILE[download..].find("tar -xzf").unwrap();
+        assert!(checksum < extraction, "verify Beads before extraction");
     }
 
     #[test]
@@ -773,10 +787,10 @@ mod tests {
     #[test]
     fn base_image_installs_pinned_development_toolchains() {
         for expected in [
-            "FROM rust:1.99.0-slim-bookworm AS rust",
+            "FROM rust:1.99.1-slim-bookworm AS rust",
             "rustup component add rustfmt clippy rust-analyzer",
-            "FROM node:26.12.0-bookworm-slim AS node",
-            "FROM python:3.15.0-slim-bookworm",
+            "FROM node:26.12.1-bookworm-slim AS node",
+            "FROM python:3.15.1-slim-bookworm",
             "build-essential",
             "cmake",
             "ninja-build",
@@ -793,9 +807,9 @@ mod tests {
     #[test]
     fn base_image_installs_package_managers_and_transfer_tools() {
         for expected in [
-            "FROM ghcr.io/astral-sh/uv:0.13.1 AS uv",
+            "FROM ghcr.io/astral-sh/uv:0.13.5 AS uv",
             "COPY --from=uv /uv /uvx /usr/local/bin/",
-            "npm install --global --prefix /usr/local pnpm@12.11.2 --no-audit --no-fund",
+            "npm install --global --prefix /usr/local npm@11.21.1 pnpm@12.15.0 --allow-scripts=pnpm --no-audit --no-fund",
             "../lib/node_modules/pnpm/pnpm /usr/local/bin/pnpm",
             "../lib/node_modules/pnpm/pnpx /usr/local/bin/pnpx",
             "FROM rclone/rclone:1.75.2 AS rclone",
@@ -804,6 +818,7 @@ mod tests {
             "        shellcheck \\",
             "        sqlite3 \\",
             "uv --version; uvx --version; pnpm --version",
+            "rclone version; bd version; test -w",
             "sqlite3 :memory: \"SELECT 1;\"; rsync --version; shellcheck --version; rclone version",
             "PNPM_HOME=/home/jbox/.local/bin",
             "test -w \"$PNPM_HOME\"",
@@ -812,6 +827,7 @@ mod tests {
         }
         // Disabling these scripts leaves pnpm 12's native executable uninstalled.
         assert!(!BASE_DOCKERFILE.contains("--ignore-scripts"));
+        assert!(!BASE_DOCKERFILE.contains("--dangerously-allow-all-scripts"));
         assert!(!BASE_DOCKERFILE.contains("COPY --from=rclone /config"));
     }
 
@@ -830,7 +846,9 @@ mod tests {
         ] {
             assert!(BASE_DOCKERFILE.contains(expected), "missing {expected}");
         }
-        let download = BASE_DOCKERFILE.find("RUN curl -fsSL --retry 3").unwrap();
+        let download = BASE_DOCKERFILE
+            .find("https://github.com/quarto-dev/quarto-cli/releases/download/")
+            .unwrap();
         let checksum = BASE_DOCKERFILE[download..].find("sha256sum -c -").unwrap();
         let extraction = BASE_DOCKERFILE[download..].find("tar -xzf").unwrap();
         assert!(checksum < extraction, "verify Quarto before extraction");

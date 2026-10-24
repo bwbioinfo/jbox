@@ -1,19 +1,19 @@
-# Reviewed stable upstream releases as of 2026-10-15. Keep Debian suites aligned.
+# Reviewed stable upstream releases as of 2026-10-24. Keep Debian suites aligned.
 # Pin versions so a Jbox upgrade invalidates the content-addressed image cache.
-FROM rust:1.99.0-slim-bookworm AS rust
+FROM rust:1.99.1-slim-bookworm AS rust
 RUN rustup component add rustfmt clippy rust-analyzer
 
-FROM node:26.12.0-bookworm-slim AS node
-# pnpm 12 installs a native binary through its package lifecycle scripts.
-RUN npm install --global --prefix /usr/local pnpm@12.11.2 --no-audit --no-fund \
-    && pnpm --version \
+FROM node:26.12.1-bookworm-slim AS node
+# Approve only pnpm's lifecycle scripts, which install its native binary.
+RUN npm install --global --prefix /usr/local npm@11.21.1 pnpm@12.15.0 --allow-scripts=pnpm --no-audit --no-fund \
+    && npm --version && pnpm --version \
     && npm cache clean --force
 
-FROM ghcr.io/astral-sh/uv:0.13.1 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
 FROM rclone/rclone:1.75.2 AS rclone
 
 # The official Python image includes pip, venv, headers, and runtime libraries.
-FROM python:3.15.0-slim-bookworm
+FROM python:3.15.1-slim-bookworm
 ARG JBOX_UID=1000
 ARG JBOX_GID=1000
 
@@ -76,9 +76,17 @@ RUN mkdir -p -m 0755 /etc/apt/keyrings \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash && bd version
+# Pin Beads instead of executing a floating installer with source-build fallbacks.
+# Preserve upstream license and release notes alongside the verified binary.
+RUN curl -fsSL --retry 3 https://github.com/gastownhall/beads/releases/download/v1.3.2/beads_1.3.2_linux_amd64.tar.gz -o /tmp/beads.tar.gz \
+    && echo 'c6ea3281f6ff82628351b2d0967c9eb85862c8a0ec0ebc24e63e645c8b02462e  /tmp/beads.tar.gz' | sha256sum -c - \
+    && mkdir -p /opt/beads \
+    && tar -xzf /tmp/beads.tar.gz -C /opt/beads bd LICENSE README.md CHANGELOG.md \
+    && ln -s /opt/beads/bd /usr/local/bin/bd \
+    && rm -f /tmp/beads.tar.gz \
+    && bd version
 
-# Official Linux x86_64 release, reviewed 2026-10-18. Keep the complete bundle
+# Official Linux x86_64 release, reviewed 2026-10-24. Keep the complete bundle
 # together so Quarto can discover its bundled Pandoc, Deno, and resources.
 RUN curl -fsSL --retry 3 https://github.com/quarto-dev/quarto-cli/releases/download/v1.10.19/quarto-1.10.19-linux-amd64.tar.gz -o /tmp/quarto.tar.gz \
     && echo '8e38c2b2df6a6dbd369ea16e15acded6894545258d13a02f777f81ad18fd7973  /tmp/quarto.tar.gz' | sha256sum -c - \
@@ -117,7 +125,7 @@ RUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/l
 
 # Fail image builds early if the non-root guest cannot use the toolchains.
 RUN su -s /bin/sh jbox -c 'set -eu; jbox-toolchain-init; rustc --version; cargo --version; cargo fmt --version; cargo clippy --version; rust-analyzer --version; python --version; python -m pip --version; python -c "import ssl, sqlite3, venv"; node --version; npm --version; npx --version; rg --version; jq --version; cmake --version; ninja --version; test -w "$RUSTUP_HOME"; test -w "$CARGO_HOME"; test -w "$NPM_CONFIG_PREFIX"'
-RUN su -s /bin/sh jbox -c 'set -eu; uv --version; uvx --version; pnpm --version; sqlite3 :memory: "SELECT 1;"; rsync --version; shellcheck --version; rclone version; test -w "$PNPM_HOME"'
+RUN su -s /bin/sh jbox -c 'set -eu; uv --version; uvx --version; pnpm --version; sqlite3 :memory: "SELECT 1;"; rsync --version; shellcheck --version; rclone version; bd version; test -w "$PNPM_HOME"'
 # Exercise bundled rendering resources, not just the launcher, without an
 # execution engine, browser, TeX installation, or network access.
 RUN su -s /bin/sh jbox -c 'set -eu; quarto --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; printf "# Jbox Quarto smoke test\n" > "$work/smoke.qmd"; quarto render "$work/smoke.qmd" --to html --no-execute; test -s "$work/smoke.html"'

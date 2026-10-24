@@ -122,20 +122,20 @@ just the Jcode runtime. No `--tool` arguments are needed for:
 
 | Area | Included tools |
 | --- | --- |
-| Rust | Rust 1.99.0, Cargo, rustup, rustfmt, Clippy, rust-analyzer |
+| Rust | Rust 1.99.1, Cargo, rustup, rustfmt, Clippy, rust-analyzer |
 | Native builds | GCC/G++, Make (`build-essential`), CMake, Ninja, pkg-config, OpenSSL development headers |
-| Python | Python 3.15.0, pip, venv, development headers, uv/uvx 0.13.1 |
-| JavaScript | Node.js 26.12.0 (Current), npm, npx, pnpm/pnpx 12.11.2 |
+| Python | Python 3.15.1, pip 26.2.2, venv, development headers, uv/uvx 0.13.5 |
+| JavaScript | Node.js 26.12.1 (Current), npm/npx 11.21.1, pnpm/pnpx 12.15.0 |
 | Shell and inspection | Bash, ripgrep (`rg`), jq, file, less, procps, ShellCheck |
 | Data and transfers | sqlite3, rsync, rclone 1.75.2 |
 | Git and connectivity | Git, GitHub CLI (`gh`), OpenSSH client/server, curl, CA certificates |
 | Archives | tar, gzip, xz, zip, unzip |
 | Publishing | Quarto 1.10.19 with its bundled Pandoc and rendering resources |
 | Creative automation | All 13 ArtCraft headless CLIs, Fontconfig, DejaVu and Liberation fonts |
-| Agent workflow | Jcode, Beads (`bd`), guest-local Beads hydration and safe Git hook |
+| Agent workflow | Jcode, Beads (`bd`) 1.3.2, guest-local Beads hydration and safe Git hook |
 
 The compiler/interpreter versions above were checked against official releases
-on **October 15, 2026** and pinned in `templates/base.Dockerfile`. They are not
+on **October 24, 2026** and pinned in `templates/base.Dockerfile`. They are not
 silently upgraded during guest startup. Updating a bundled Dockerfile, installer,
 or ArtCraft release pin invalidates the base and dependent project image caches.
 The local Jcode launcher and executable contents are also part of the cache key,
@@ -163,8 +163,16 @@ sessions, keeping pnpm's global binaries writable and discoverable. uv uses its
 normal user-local cache, tool directory, and `~/.local/bin` entry points. Use
 project virtual environments for Python dependencies. uv and rclone binaries
 come from version-pinned official images. pnpm is installed at its pinned
-version in the Node build stage with the lifecycle scripts its native binary
-requires. sqlite3, rsync, and ShellCheck use Debian Bookworm packages.
+version in the Node build stage with explicit package-scoped approval for the
+lifecycle scripts its native binary requires. npm/npx are explicitly pinned
+within Node's existing npm 11 major line instead of adopting npm 12
+automatically. sqlite3, rsync, ShellCheck and the native build tools use Debian
+Bookworm packages from the configured repositories at image-build time,
+including Debian's security backports. GitHub CLI uses its official
+APT repository. Beads uses a version- and SHA-256-pinned official archive,
+with release notes and license retained under `/opt/beads`, rather than a
+floating shell installer. See [the default-tool review](docs/default-tools.md)
+for upstream sources, update decisions and validation limits.
 
 rclone's configuration stays guest-local unless you explicitly configure an
 approved credential mechanism. No host rclone config, cloud credentials, FUSE
@@ -173,7 +181,7 @@ transfer commands are available, but `rclone mount` is not enabled by default.
 
 Quarto uses the official Linux x86_64 tarball, pinned to 1.10.19 and SHA-256
 verified before extraction under `/opt/quarto`. This release was checked on
-**October 18, 2026**. The `quarto` command is on both Docker and SSH PATHs, and
+**October 24, 2026**. The `quarto` command is on both Docker and SSH PATHs, and
 image builds verify a plain Markdown-to-HTML render as the non-root guest user.
 The complete upstream bundle is retained, including Pandoc and Deno. R/knitr,
 Julia, Jupyter and project Python packages, TeX/TinyTeX, and a headless browser
