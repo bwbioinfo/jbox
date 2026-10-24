@@ -2,25 +2,25 @@
 
 The default x86_64 Debian guest includes all 13 ArtCraft command-line tools.
 The suite was reviewed against the official [ArtCraft apps](https://getartcraft.com/apps)
-and [storytold repositories](https://github.com/storytold) on 2026-10-17.
+and [storytold repositories](https://github.com/storytold) on 2026-10-24.
 GitHub release tags, not the website's occasionally older download labels, are
 the source of the pinned versions below.
 
 | Command | Version | Main workflows |
 | --- | --- | --- |
-| `photocraft-cli` | 0.9.0 | Raster images, layered documents, conversion and batch actions |
-| `vectorcraft-cli` | 0.12.0 | Vector illustration and SVG, PDF and raster export |
-| `filmcraft-cli` | 0.8.0 | Video timelines, media inspection, rendering and encoding |
-| `lightcraft-cli` | 0.8.0 | Photo libraries, RAW development and export |
-| `pdfcraft-cli` | 0.8.0 | PDF inspection, text, editing, rendering and OCR |
-| `effectcraft-cli` | 0.10.0 | Compositing, animation, effects and frame/video rendering |
-| `designcraft-cli` | 0.8.0 | Page layout, document scripting and publishing |
-| `figcraft-cli` | 0.6.0 | Interface design documents, conversion and frame export |
-| `wordcraft-cli` | 0.7.0 | Word-processing documents, conversion and rendering |
-| `soundcraft-cli` | 0.7.0 | Audio files, session editing and offline bounce |
-| `deckcraft-cli` | 0.7.0 | Slide decks, rendering and conversion |
-| `cadcraft-cli` | 0.7.0 | CAD drawings, inspection and interchange |
-| `gridcraft-cli` | 0.7.0 | Spreadsheets, formulas and workbook interchange |
+| `photocraft-cli` | 0.15.1 | Raster images, layered documents, conversion and batch actions |
+| `vectorcraft-cli` | 0.16.0 | Vector illustration and SVG, PDF and raster export |
+| `filmcraft-cli` | 0.12.0 | Video timelines, media inspection, rendering and encoding |
+| `lightcraft-cli` | 0.13.0 | Photo libraries, RAW development and export |
+| `pdfcraft-cli` | 0.13.0 | PDF inspection, text, editing, rendering and OCR |
+| `effectcraft-cli` | 0.16.0 | Compositing, animation, effects and frame/video rendering |
+| `designcraft-cli` | 0.12.0 | Page layout, document scripting and publishing |
+| `figcraft-cli` | 0.10.0 | Interface design documents, conversion and frame export |
+| `wordcraft-cli` | 0.10.0 | Word-processing documents, conversion and rendering |
+| `soundcraft-cli` | 0.12.1 | Audio files, session editing and offline bounce |
+| `deckcraft-cli` | 0.10.0 | Slide decks, rendering and conversion |
+| `cadcraft-cli` | 0.12.0 | CAD drawings, inspection and interchange |
+| `gridcraft-cli` | 0.11.1 | Spreadsheets, formulas and workbook interchange |
 
 ## Installation and dependencies
 
@@ -103,6 +103,34 @@ Run the repository quality gates plus a real installation into a disposable
 prefix, inspect dynamic-library dependencies, and exercise representative
 headless workflows, including PdfCraft OCR asset discovery. A complete Docker
 build additionally verifies installation against a clean Debian base.
+
+## Release refresh on 2026-10-24
+
+All 13 applications had newer stable releases, published on 2026-10-22 or
+2026-10-23. Each pinned Linux x86_64 archive's checksum was checked against both
+the upstream `SHA256SUMS.txt` and GitHub's release asset digest. The default
+package definitions in `templates/base.Dockerfile` were also reviewed for the
+suite's runtime requirements. No additional Debian packages or changes to the
+other toolchain pins were needed for this ArtCraft refresh.
+
+A real installation into a disposable prefix on Debian 12 passed checksum
+verification, safe extraction and bounded startup checks for every application.
+The installed suite also passed `--verify-only` as the non-root guest user.
+All ELF dependencies resolved to glibc and `libgcc_s`, and PdfCraft reported its
+bundled OCR models available. GridCraft evaluated `SUM(1,2,3)` as `6.0`.
+VectorCraft converted a two-path SVG to PDF and PNG without warnings, then
+reopened the PDF with both paths and its 128-by-96 artboard intact. The installed
+headless payload is approximately 826 MiB before image compression.
+
+Repository formatting, Clippy with warnings denied, all 187 Rust tests, CLI
+help, and all 30 offline Python installer regressions passed with the pinned
+Rust 1.98.1 toolchain.
+
+These are startup and representative workflow checks, not a new full-workflow
+test for every app. Docker is unavailable in this isolated guest, so a clean
+image build and fresh Kata session still require host-side acceptance for these
+new pins, tracked in `jbox-mau`. Existing guests and their installed applications
+are unchanged.
 
 ### Branch reconciliation on 2026-10-17
 

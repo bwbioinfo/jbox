@@ -198,7 +198,7 @@ GUI/GPU workflows and every creative export format are not implied by these
 headless smoke checks.
 The PDF OCR model files carry CC-BY-SA-4.0 notices distinct from the applications'
 MIT/Apache-2.0 code and the fonts' OFL licenses; these notices are retained.
-The verified headless ArtCraft payload is approximately **788 MiB before image
+The verified headless ArtCraft payload is approximately **826 MiB before image
 compression**, in addition to the language toolchains. Initial builds require
 network access to the official image/package/release sources, while installed
 tools do not need to be downloaded again when a guest starts.

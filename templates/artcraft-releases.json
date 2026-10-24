@@ -2,94 +2,94 @@
   "releases": [
     {
       "app": "photocraft",
-      "version": "0.9.0",
-      "url": "https://github.com/storytold/photocraft/releases/download/v0.9.0/photocraft-0.9.0-linux-x86_64.tar.gz",
-      "sha256": "91300c1485ad710839604b085531c90e77ac7ebdb2a30259309ad74afcfdb90d",
-      "binary": "photocraft-0.9.0-linux-x86_64/bin/photocraft-cli"
+      "version": "0.15.1",
+      "url": "https://github.com/storytold/photocraft/releases/download/v0.15.1/photocraft-0.15.1-linux-x86_64.tar.gz",
+      "sha256": "b622be40355513056f8152afe895d0a05c1bc3c344a027f772a9a12fa3d1c223",
+      "binary": "photocraft-0.15.1-linux-x86_64/bin/photocraft-cli"
     },
     {
       "app": "vectorcraft",
-      "version": "0.12.0",
-      "url": "https://github.com/storytold/vectorcraft/releases/download/v0.12.0/vectorcraft-0.12.0-linux-x86_64.tar.gz",
-      "sha256": "6750db109d3a253c51c82975af650f42384ba27a768f72529431edfb58508269",
-      "binary": "vectorcraft-0.12.0-linux-x86_64/bin/vectorcraft-cli"
+      "version": "0.16.0",
+      "url": "https://github.com/storytold/vectorcraft/releases/download/v0.16.0/vectorcraft-0.16.0-linux-x86_64.tar.gz",
+      "sha256": "651fac17255271ad1dbc8ba1e8287db9f28e529ba9a14dd0383eca93a2cc5aa6",
+      "binary": "vectorcraft-0.16.0-linux-x86_64/bin/vectorcraft-cli"
     },
     {
       "app": "filmcraft",
-      "version": "0.8.0",
-      "url": "https://github.com/storytold/filmcraft/releases/download/v0.8.0/filmcraft-0.8.0-linux-x86_64.tar.gz",
-      "sha256": "b166877905ae8a1b5505066d6dde60d7ce05831cfb309bacd5d7970f4bb017e1",
-      "binary": "filmcraft-0.8.0-linux-x86_64/bin/filmcraft-cli"
+      "version": "0.12.0",
+      "url": "https://github.com/storytold/filmcraft/releases/download/v0.12.0/filmcraft-0.12.0-linux-x86_64.tar.gz",
+      "sha256": "ddff0a2ec0d89e5e9e65644ed724b5b79959600b1602fd4ea6653b5a54bf88fd",
+      "binary": "filmcraft-0.12.0-linux-x86_64/bin/filmcraft-cli"
     },
     {
       "app": "lightcraft",
-      "version": "0.8.0",
-      "url": "https://github.com/storytold/lightcraft/releases/download/v0.8.0/lightcraft-0.8.0-linux-x86_64.tar.gz",
-      "sha256": "9fe0ecc69b7f1f3a35a1c630429b3c52fdb4419ba208b5579b4501b938f518d1",
-      "binary": "lightcraft-0.8.0-linux-x86_64/bin/lightcraft-cli"
+      "version": "0.13.0",
+      "url": "https://github.com/storytold/lightcraft/releases/download/v0.13.0/lightcraft-0.13.0-linux-x86_64.tar.gz",
+      "sha256": "873c795e641ea8c345e02e4895f6c2659015e531420f68352ca3421aa9b8edcd",
+      "binary": "lightcraft-0.13.0-linux-x86_64/bin/lightcraft-cli"
     },
     {
       "app": "pdfcraft",
-      "version": "0.8.0",
-      "url": "https://github.com/storytold/pdfcraft/releases/download/v0.8.0/pdfcraft-0.8.0-linux-x86_64.tar.gz",
-      "sha256": "3f4fd5ddd99802a3d349474c61cf3dabd1fb7198ea0df00d24cc310516bd1c2a",
-      "binary": "pdfcraft-0.8.0-linux-x86_64/bin/pdfcraft-cli"
+      "version": "0.13.0",
+      "url": "https://github.com/storytold/pdfcraft/releases/download/v0.13.0/pdfcraft-0.13.0-linux-x86_64.tar.gz",
+      "sha256": "598519ea2bc77c66ca9a906241e1fe3eccf745f50627ce3cdbd5b5e675a456d3",
+      "binary": "pdfcraft-0.13.0-linux-x86_64/bin/pdfcraft-cli"
     },
     {
       "app": "effectcraft",
-      "version": "0.10.0",
-      "url": "https://github.com/storytold/effectcraft/releases/download/v0.10.0/effectcraft-0.10.0-linux-x86_64.tar.gz",
-      "sha256": "76fbfc0a9ad34399701a18efeb1c178557d01d0a0f4b403514f2dac5d887572e",
-      "binary": "effectcraft-0.10.0-linux-x86_64/bin/effectcraft-cli"
+      "version": "0.16.0",
+      "url": "https://github.com/storytold/effectcraft/releases/download/v0.16.0/effectcraft-0.16.0-linux-x86_64.tar.gz",
+      "sha256": "91b40da9e18be49157467a96db7b2fbf7c20b5182d8c415c59bed51591bc1de0",
+      "binary": "effectcraft-0.16.0-linux-x86_64/bin/effectcraft-cli"
     },
     {
       "app": "designcraft",
-      "version": "0.8.0",
-      "url": "https://github.com/storytold/designcraft/releases/download/v0.8.0/designcraft-0.8.0-linux-x86_64.tar.gz",
-      "sha256": "96a835fd89ebf6970b7dec93652e1b2f081123a69c78e19998ca6c84ca322d77",
-      "binary": "designcraft-0.8.0-linux-x86_64/bin/designcraft-cli"
+      "version": "0.12.0",
+      "url": "https://github.com/storytold/designcraft/releases/download/v0.12.0/designcraft-0.12.0-linux-x86_64.tar.gz",
+      "sha256": "0e7bbe349670f8d5eb178fa9bd4a1bf1c7c51d6a54e1b802b8dcdbb2ae68fe1d",
+      "binary": "designcraft-0.12.0-linux-x86_64/bin/designcraft-cli"
     },
     {
       "app": "figcraft",
-      "version": "0.6.0",
-      "url": "https://github.com/storytold/figcraft/releases/download/v0.6.0/figcraft-0.6.0-linux-x86_64.tar.gz",
-      "sha256": "b66dfa68fa5ee54e275f9270168974d54cdbe8b1f431c8b0e962cb7b6baa0660",
-      "binary": "figcraft-0.6.0-linux-x86_64/bin/figcraft-cli"
+      "version": "0.10.0",
+      "url": "https://github.com/storytold/figcraft/releases/download/v0.10.0/figcraft-0.10.0-linux-x86_64.tar.gz",
+      "sha256": "b3e2ffdab54d203a3f6ed1a0018b8325300bd22dbed6a02f0af6757f3eb669da",
+      "binary": "figcraft-0.10.0-linux-x86_64/bin/figcraft-cli"
     },
     {
       "app": "wordcraft",
-      "version": "0.7.0",
-      "url": "https://github.com/storytold/wordcraft/releases/download/v0.7.0/wordcraft-0.7.0-linux-x86_64.tar.gz",
-      "sha256": "63009f88e3dbaea70ac1378fabc8555ae14775d32829175c5da2551abe03932f",
-      "binary": "wordcraft-0.7.0-linux-x86_64/bin/wordcraft-cli"
+      "version": "0.10.0",
+      "url": "https://github.com/storytold/wordcraft/releases/download/v0.10.0/wordcraft-0.10.0-linux-x86_64.tar.gz",
+      "sha256": "ca99ea350ba0aea4103fc8020cad98f051c58d9e9fcf670c119d810108cc45ff",
+      "binary": "wordcraft-0.10.0-linux-x86_64/bin/wordcraft-cli"
     },
     {
       "app": "soundcraft",
-      "version": "0.7.0",
-      "url": "https://github.com/storytold/soundcraft/releases/download/v0.7.0/soundcraft-0.7.0-linux-x86_64.tar.gz",
-      "sha256": "8d7afbe5fe433cb338b7ccee0820285d6ce1bfc8c006d551ca8840c27a911ab2",
-      "binary": "soundcraft-0.7.0-linux-x86_64/bin/soundcraft-cli"
+      "version": "0.12.1",
+      "url": "https://github.com/storytold/soundcraft/releases/download/v0.12.1/soundcraft-0.12.1-linux-x86_64.tar.gz",
+      "sha256": "b0a56bd6b5d27de6b12e354580c362be6f59125ea58f573044c84f6a7da87780",
+      "binary": "soundcraft-0.12.1-linux-x86_64/bin/soundcraft-cli"
     },
     {
       "app": "deckcraft",
-      "version": "0.7.0",
-      "url": "https://github.com/storytold/deckcraft/releases/download/v0.7.0/deckcraft-0.7.0-linux-x86_64.tar.gz",
-      "sha256": "330a2fb2ef8890daded91084e5bfd29dfa411e33a2b27c01ac3b9e520ff98d9f",
-      "binary": "deckcraft-0.7.0-linux-x86_64/bin/deckcraft-cli"
+      "version": "0.10.0",
+      "url": "https://github.com/storytold/deckcraft/releases/download/v0.10.0/deckcraft-0.10.0-linux-x86_64.tar.gz",
+      "sha256": "546616eb2300ce8efb20b44a53e60abfe6b96d71ac606b452a36fd21c6b1ff28",
+      "binary": "deckcraft-0.10.0-linux-x86_64/bin/deckcraft-cli"
     },
     {
       "app": "cadcraft",
-      "version": "0.7.0",
-      "url": "https://github.com/storytold/cadcraft/releases/download/v0.7.0/cadcraft-0.7.0-linux-x86_64.tar.gz",
-      "sha256": "cf8d4aa86d046f34eb770ae6cd2df3eee17d1f3b129257f1558543046c955cc0",
-      "binary": "cadcraft-0.7.0-linux-x86_64/bin/cadcraft-cli"
+      "version": "0.12.0",
+      "url": "https://github.com/storytold/cadcraft/releases/download/v0.12.0/cadcraft-0.12.0-linux-x86_64.tar.gz",
+      "sha256": "6ae27b9eabc3608caef356a00f69b9fdccbf1e408d6308b5614b6e6b256308de",
+      "binary": "cadcraft-0.12.0-linux-x86_64/bin/cadcraft-cli"
     },
     {
       "app": "gridcraft",
-      "version": "0.7.0",
-      "url": "https://github.com/storytold/gridcraft/releases/download/v0.7.0/gridcraft-0.7.0-linux-x86_64.tar.gz",
-      "sha256": "c01bc2dc4295556f53810dfed4a85a3f58388552c157a103e10626c069b39e1c",
-      "binary": "gridcraft-0.7.0-linux-x86_64/bin/gridcraft-cli"
+      "version": "0.11.1",
+      "url": "https://github.com/storytold/gridcraft/releases/download/v0.11.1/gridcraft-0.11.1-linux-x86_64.tar.gz",
+      "sha256": "f2c83e6c26449a6c45983e903bf32c1d4c302b2042f263ead995271129c70e87",
+      "binary": "gridcraft-0.11.1-linux-x86_64/bin/gridcraft-cli"
     }
   ]
 }
