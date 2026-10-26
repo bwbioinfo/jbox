@@ -143,12 +143,15 @@ The improvement is stronger, directly measured evidence and recovery guidance,
 not a claim that application startup was repaired or made faster. No startup
 implementation changed, and `jbox-rpd` remains open.
 
-The actual nanite 544-record snapshot and its full multi-repository configuration
-were not supplied in the review request or exercised here. Passing the real
-Jbox repository workload does not establish that the original nanite timeout is
-fixed or identify its slow command. Existing user sessions were not restarted,
-reconfigured, or cleaned. Interactive Jcode TUI operation and authenticated
-provider inference are also outside this bootstrap/SSH acceptance scope.
+The initial validation above did not exercise the actual nanite 544-record
+snapshot or its full multi-repository configuration. Passing the real Jbox
+repository workload alone did not establish that the original timeout was fixed
+or identify its slow command. A later recurrence review located the exact local
+nanite commit, reproduced the cumulative timeout, and passed a finite-budget
+control. Those subsequent observations and their narrower single-repository
+limits are recorded in `review-recurring-bootstrap-2026-10-26.md`. Existing user
+sessions were not restarted, reconfigured, or cleaned. Interactive Jcode TUI
+operation and authenticated provider inference remain outside acceptance scope.
 
 ## Local evidence artifacts
 
