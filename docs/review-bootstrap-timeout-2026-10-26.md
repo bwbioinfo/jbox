@@ -98,6 +98,58 @@ An independent read-only source review using the OpenAI `gpt-5.6-terra` route
 confirmed the core timeout and sequencing findings. The earlier preferred
 reviewer route failed before inspecting the source and supplied no evidence.
 
+## Actual public CLI, Kata, and SSH acceptance
+
+Follow-up `jbox-546` addresses the earlier validation gap: direct Docker and
+extracted-shell checks alone do not exercise the end-user launch path. Slurm
+job **1472** completed with exit `0:0` after **76 seconds**, driving the real
+`target/debug/jbox` executable through public commands. No Jbox source was
+copied into a replacement harness or mocked. The orchestration script only
+invoked the actual CLI, collected its output, and asserted observations.
+
+The workload was a no-hardlink clone of this real repository at `4d7b4ad`,
+including its **59 real tracked task records**, not newly generated issue
+fixtures. Only the clone's configuration was narrowed to one repository, no
+skills, no Git credentials or Git networking, no provider credentials, and an
+ephemeral Jcode home. HOME, XDG state, SSH keys, and known-host entries were
+private to `/home/geonic/.jcode/scratch/ka.pmucbs6_`.
+
+The first public `run --new --no-attach` with `network.internet=false` exited 1
+with the documented unsupported-offline-SSH error, before session creation.
+The positive control explicitly enabled Jbox's supported bridge transport.
+It therefore did permit network egress, unlike the earlier direct-Docker check.
+No authenticated service, provider inference, credential import, host firewall
+change, or additional runtime capability was requested.
+
+Actual session **`nimble-otter-7b4c4a`** used existing immutable image
+`jbox/jcode:local-v11-1001-1001-1d35700d120d911e`:
+
+| Public-interface requirement | Observed behavior |
+| --- | --- |
+| Fresh launch reaches SSH through the complete entrypoint | `jbox run --new --no-attach` exited 0 in **40.773 seconds**, publishing `127.0.0.198:22`. |
+| Actual runtime isolation | Docker inspection showed `kata`, a read-only root, no privileged mode, and every bind source beneath the isolated acceptance root. |
+| Correct workspace and non-root SSH user | Public `jbox shell SESSION` reported `/workspace/project` and UID `1001`. The guest Docker socket was absent. |
+| Real task snapshot survives hydration | `bd export --include-memories` invoked inside the public shell returned **exactly the same 59 IDs** as the real tracked export. |
+| Inspection does not expose bootstrap noise as edits | Public `status` and `diff` succeeded, with empty uncommitted and staged diffs and no unique commits. |
+| Repeated launch reuses the running guest | A second public `run --no-attach` exited 0 in **0.117 seconds**, and Docker inspection confirmed the exact same container ID. |
+| Retained restart actually rehydrates and reaches SSH | Public `stop` retained worktrees, and public `run --no-attach` resumed the same session in **20.526 seconds**. This uses Jbox's normal retained-session restart flow. |
+| Retained task records survive | A second public `shell` export returned exactly the original 59 IDs, verified against both the fresh export and tracked snapshot. |
+| Original source task data is unchanged | The clone's JSONL remained byte-identical to `git show 4d7b4ad:.beads/issues.jsonl`, SHA-256 `c1454a4066b70b619da2bf0a127ecf3f687348f49c2dc25bf760891aa94630b7`. |
+| Owned resources are removed by public cleanup | Public `stop` and `clean` exited 0, public `ls --all` reported no sessions, Docker had no matching container, and `git worktree list` contained only the original clone. |
+
+This closes the **validation-path** gap with observable end-user behavior,
+rather than treating a mock or direct container launch as Jbox acceptance.
+The improvement is stronger, directly measured evidence and recovery guidance,
+not a claim that application startup was repaired or made faster. No startup
+implementation changed, and `jbox-rpd` remains open.
+
+The actual nanite 544-record snapshot and its full multi-repository configuration
+were not supplied in the review request or exercised here. Passing the real
+Jbox repository workload does not establish that the original nanite timeout is
+fixed or identify its slow command. Existing user sessions were not restarted,
+reconfigured, or cleaned. Interactive Jcode TUI operation and authenticated
+provider inference are also outside this bootstrap/SSH acceptance scope.
+
 ## Local evidence artifacts
 
 Artifacts are local validation outputs, not repository fixtures:
@@ -107,6 +159,9 @@ Artifacts are local validation outputs, not repository fixtures:
 - `/home/geonic/.jcode/scratch/jbox-real-beads-repeat-validation-1470.log`
 - `/home/geonic/.jcode/scratch/jbox-extra-timeout-validation.py`
 - `/home/geonic/.jcode/scratch/jbox-real-beads-synthetic-validation.py`
+- `/home/geonic/.jcode/scratch/jbox-public-kata-acceptance-1472.log`
+- `/home/geonic/.jcode/scratch/ka.pmucbs6_/acceptance.log`
+- `/home/geonic/.jcode/scratch/jbox-public-kata-acceptance.py`
 
 Slurm controller records were checked with `scontrol show job`. The local
 accounting daemon was unavailable to `sacct`, so no accounting-history claim is
