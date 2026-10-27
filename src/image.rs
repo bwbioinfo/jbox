@@ -1019,7 +1019,11 @@ mod tests {
             assert!(BASE_DOCKERFILE.contains(expected), "missing {expected}");
         }
         // Disabling these scripts leaves pnpm 12's native executable uninstalled.
-        assert!(!BASE_DOCKERFILE.contains("--ignore-scripts"));
+        let pnpm_install = BASE_DOCKERFILE
+            .lines()
+            .find(|line| line.contains("npm@11.21.1 pnpm@12.15.0"))
+            .unwrap();
+        assert!(!pnpm_install.contains("--ignore-scripts"));
         assert!(!BASE_DOCKERFILE.contains("--dangerously-allow-all-scripts"));
         assert!(!BASE_DOCKERFILE.contains("COPY --from=rclone /config"));
     }
@@ -1380,6 +1384,31 @@ mod tests {
     #[test]
     fn base_image_creates_jcode_config_mount_parent() {
         assert!(BASE_DOCKERFILE.contains("/home/jbox/.jcode"));
+    }
+
+    #[test]
+    fn frontend_defaults_include_pinned_tools_and_shared_browsers() {
+        for required in [
+            "typescript@7.0.2",
+            "vite@8.3.5",
+            "eslint@10.13.0",
+            "react@19.3.1",
+            "react-dom@19.3.1",
+            "@playwright/test@1.64.1",
+            "--ignore-scripts --no-audit --no-fund",
+            "playwright install --with-deps chromium firefox webkit",
+            "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright",
+            "tsc --version; vite --version; eslint --version; playwright --version",
+        ] {
+            assert!(BASE_DOCKERFILE.contains(required), "missing {required}");
+        }
+        assert_eq!(
+            BASE_DOCKERFILE
+                .matches("PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright")
+                .count(),
+            2,
+            "Docker and SSH must select the same browser cache"
+        );
     }
 
     #[test]

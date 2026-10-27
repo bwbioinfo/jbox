@@ -3983,7 +3983,7 @@ fn init_dockerfile(tools: &[String]) -> String {
     );
     if tools.is_empty() {
         dockerfile.push_str(
-            "# Rust, Python/uv, Node/pnpm, native build tools, ripgrep, jq, sqlite3, rsync, ShellCheck, rclone, Quarto and ArtCraft CLIs are already installed.\n# Add project-specific tools with a command such as:\n# RUN apt-get update && apt-get install -y --no-install-recommends tree wget && rm -rf /var/lib/apt/lists/*\n",
+            "# Rust, Python/uv, Node/pnpm, TypeScript, Vite, ESLint, Playwright, native build tools, ripgrep, jq, sqlite3, rsync, ShellCheck, rclone, Quarto and ArtCraft CLIs are already installed.\n# Add project-specific tools with a command such as:\n# RUN apt-get update && apt-get install -y --no-install-recommends tree wget && rm -rf /var/lib/apt/lists/*\n",
         );
     } else {
         dockerfile.push_str(

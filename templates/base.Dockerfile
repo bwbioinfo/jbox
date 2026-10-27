@@ -8,6 +8,11 @@ FROM node:26.12.1-bookworm-slim AS node
 RUN npm install --global --prefix /usr/local npm@11.21.1 pnpm@12.15.0 --allow-scripts=pnpm --no-audit --no-fund \
     && npm --version && pnpm --version \
     && npm cache clean --force
+# Frontend CLIs are convenience defaults. Applications still install their own
+# dependencies and lockfile-selected versions locally.
+RUN npm install --global --prefix /usr/local --ignore-scripts --no-audit --no-fund \
+        typescript@7.0.2 vite@8.3.5 eslint@10.13.0 react@19.3.1 react-dom@19.3.1 @playwright/test@1.64.1 \
+    && npm cache clean --force
 
 FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
 FROM rclone/rclone:1.75.2 AS rclone
@@ -58,7 +63,18 @@ COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && ln -s ../lib/node_modules/pnpm/pnpm /usr/local/bin/pnpm \
-    && ln -s ../lib/node_modules/pnpm/pnpx /usr/local/bin/pnpx
+    && ln -s ../lib/node_modules/pnpm/pnpx /usr/local/bin/pnpx \
+    && ln -s ../lib/node_modules/typescript/bin/tsc /usr/local/bin/tsc \
+    && ln -s ../lib/node_modules/vite/bin/vite.js /usr/local/bin/vite \
+    && ln -s ../lib/node_modules/eslint/bin/eslint.js /usr/local/bin/eslint \
+    && ln -s ../lib/node_modules/@playwright/test/cli.js /usr/local/bin/playwright
+
+# Browser revisions are tied to Playwright's version and shared read-only with
+# the guest. Project-local Playwright versions may require other revisions.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN playwright install --with-deps chromium firefox webkit \
+    && chmod -R a+rX /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
 
 # SSH remote commands do not reliably retain Docker ENV or read shell profiles.
 # Wrappers keep rustup's toolchains discoverable while Cargo caches stay per-user.
@@ -120,12 +136,13 @@ COPY jbox-toolchain-init /usr/local/bin/jbox-toolchain-init
 RUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/local/bin/jbox-entrypoint /usr/local/bin/jbox-beads-pre-commit /usr/local/bin/jbox-toolchain-init \
     && /usr/local/bin/jcode --no-update --version \
     && printf '%s\n' 'Port 2222' 'PasswordAuthentication no' 'PermitRootLogin no' 'AllowUsers jbox' 'AuthorizedKeysFile .ssh/authorized_keys' \
-        'SetEnv PATH=/home/jbox/.cargo/bin:/home/jbox/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin RUSTUP_HOME=/home/jbox/.rustup CARGO_HOME=/home/jbox/.cargo NPM_CONFIG_PREFIX=/home/jbox/.local PNPM_HOME=/home/jbox/.local/bin' \
+        'SetEnv PATH=/home/jbox/.cargo/bin:/home/jbox/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin RUSTUP_HOME=/home/jbox/.rustup CARGO_HOME=/home/jbox/.cargo NPM_CONFIG_PREFIX=/home/jbox/.local PNPM_HOME=/home/jbox/.local/bin PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright' \
         > /etc/ssh/sshd_config.d/jbox.conf
 
 # Fail image builds early if the non-root guest cannot use the toolchains.
 RUN su -s /bin/sh jbox -c 'set -eu; jbox-toolchain-init; rustc --version; cargo --version; cargo fmt --version; cargo clippy --version; rust-analyzer --version; python --version; python -m pip --version; python -c "import ssl, sqlite3, venv"; node --version; npm --version; npx --version; rg --version; jq --version; cmake --version; ninja --version; test -w "$RUSTUP_HOME"; test -w "$CARGO_HOME"; test -w "$NPM_CONFIG_PREFIX"'
 RUN su -s /bin/sh jbox -c 'set -eu; uv --version; uvx --version; pnpm --version; sqlite3 :memory: "SELECT 1;"; rsync --version; shellcheck --version; rclone version; bd version; test -w "$PNPM_HOME"'
+RUN su -s /bin/sh jbox -c 'set -eu; tsc --version; vite --version; eslint --version; playwright --version; node -e "const p = require(\"/usr/local/lib/node_modules/@playwright/test\"); for (const b of [p.chromium, p.firefox, p.webkit]) require(\"fs\").accessSync(b.executablePath(), require(\"fs\").constants.X_OK); require(\"/usr/local/lib/node_modules/react\"); require(\"/usr/local/lib/node_modules/react-dom\");"'
 # Exercise bundled rendering resources, not just the launcher, without an
 # execution engine, browser, TeX installation, or network access.
 RUN su -s /bin/sh jbox -c 'set -eu; quarto --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; printf "# Jbox Quarto smoke test\n" > "$work/smoke.qmd"; quarto render "$work/smoke.qmd" --to html --no-execute; test -s "$work/smoke.html"'

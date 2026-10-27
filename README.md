@@ -126,6 +126,7 @@ just the Jcode runtime. No `--tool` arguments are needed for:
 | Native builds | GCC/G++, Make (`build-essential`), CMake, Ninja, pkg-config, OpenSSL development headers |
 | Python | Python 3.15.1, pip 26.2.2, venv, development headers, uv/uvx 0.13.5 |
 | JavaScript | Node.js 26.12.1 (Current), npm/npx 11.21.1, pnpm/pnpx 12.15.0 |
+| Frontend | TypeScript 7.0.2 (`tsc`), Vite 8.3.5, ESLint 10.13.0, React and React DOM 19.3.1, Playwright Test 1.64.1 with Chromium, Firefox and WebKit |
 | Shell and inspection | Bash, ripgrep (`rg`), jq, file, less, procps, ShellCheck |
 | Data and transfers | sqlite3, rsync, rclone 1.75.2 |
 | Git and connectivity | Git, GitHub CLI (`gh`), OpenSSH client/server, curl, CA certificates |
@@ -173,6 +174,28 @@ APT repository. Beads uses a version- and SHA-256-pinned official archive,
 with release notes and license retained under `/opt/beads`, rather than a
 floating shell installer. See [the default-tool review](docs/default-tools.md)
 for upstream sources, update decisions and validation limits.
+
+The frontend CLIs are available globally for convenience, and React and React
+DOM are included in the global package store. **Global packages do not replace
+project dependencies**: Node's normal module resolution, Vite builds, ESLint
+plugins and Playwright tests use the application's own `node_modules`. Install
+the dependencies in its `package.json` using its lockfile, for example `npm ci`
+or `pnpm install --frozen-lockfile`. This also installs any other application
+packages and project-specific plugins, rather than guessing them in the image.
+The baked Playwright browsers are shared at `/opt/ms-playwright` for both Docker
+and SSH sessions. They match Playwright 1.64.1; another project version can need
+different browser revisions. For that project, use a writable cache and install
+the matching browsers, for example:
+
+```bash
+export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
+npx playwright install
+```
+
+Keep that environment variable set when running the project's tests. Browser
+downloads require network access, and a version with new system requirements
+may need additional image customization. The browser cache and dependencies
+increase image size; existing guests do not receive them automatically.
 
 rclone's configuration stays guest-local unless you explicitly configure an
 approved credential mechanism. No host rclone config, cloud credentials, FUSE
