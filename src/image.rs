@@ -1430,6 +1430,20 @@ mod tests {
     }
 
     #[test]
+    fn cuda_compiler_is_pinned_and_tested_as_guest_user() {
+        for required in [
+            "cuda-keyring_1.1-1_all.deb",
+            "e7f219eab6fe4819cdb5c15b98233dc3420302d9c00883219cd3d896857cf48d",
+            "cuda-compiler-13-3=13.3.1-1 cuda-nvcc-13-3=13.3.73-1",
+            "exec /usr/local/cuda-13.3/bin/nvcc",
+            "nvcc --version; work=$(mktemp -d)",
+            "nvcc \"$work/smoke.cu\" -o \"$work/smoke\"",
+        ] {
+            assert!(BASE_DOCKERFILE.contains(required), "missing {required}");
+        }
+    }
+
+    #[test]
     fn image_build_streams_progress_and_reports_exit_code_on_failure() {
         // run_build must pass --progress=plain so docker emits each build step
         // to the inherited terminal rather than buffering everything silently.

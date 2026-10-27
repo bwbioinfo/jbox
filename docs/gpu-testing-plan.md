@@ -18,8 +18,15 @@ guest kernel and driver. Its examples use `ctr`, not Jbox's Docker integration.
 The newer [Kata NVIDIA QEMU reference design](https://github.com/kata-containers/kata-containers/blob/main/docs/use-cases/NVIDIA-GPU-passthrough-and-Kata-QEMU.md)
 describes cold-plug, host and guest CDI, and Kubernetes allocation. Do not
 assume its Kubernetes-specific discovery and annotations work with Docker.
-Confirm the exact Docker, Kata runtime-rs and device-injection path experimentally
-before implementing it. vGPU, MIG and shared-device use are out of initial scope.
+The locally installed runtime-rs 4.3.1 source contains standalone OCI-device
+discovery for VFIO cold-plug, so Kubernetes is not necessarily required. This
+is source-level evidence, not a successful Docker or Jbox hardware test.
+The packaged NVIDIA configuration sets `shared_fs = "none"`, whereas Jbox
+needs worktree and runtime bind mounts. A compatible, independently configured
+GPU runtime must preserve those mounts and the existing isolation properties.
+Guest-side GPU device and driver injection must also be verified. Confirm the
+exact Docker, Kata runtime-rs and device-injection path experimentally before
+implementing it. vGPU, MIG and shared-device use are out of initial scope.
 
 ### Local, read-only observations
 
@@ -60,8 +67,9 @@ generally removes the assigned GPU from normal host use while assigned.
    tests for defaults, malformed requests, contention and lifecycle failures.
    Existing no-GPU sessions must remain unchanged. Do not switch all guests to
    a GPU runtime or silently fall back to weaker isolation.
-4. **CUDA tooling (`jbox-ru6`).** Choose pinned, compatible toolkit and guest
-   driver/user-space versions after the runtime architecture is known. Keep
+4. **CUDA tooling (`jbox-efk`, `jbox-ru6`).** The default image provides a
+   CUDA compiler and runtime development files. Complete the guest-driver and
+   user-space integration after the runtime architecture is known. Keep
    project-specific frameworks and dependencies in project environments.
    Verify version and license compatibility, updates and image size. Do not
    claim that `nvcc` or a host NVIDIA driver alone enables the guest GPU.

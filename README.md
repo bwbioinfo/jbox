@@ -128,6 +128,7 @@ just the Jcode runtime. No `--tool` arguments are needed for:
 | JavaScript | Node.js 26.12.1 (Current), npm/npx 11.21.1, pnpm/pnpx 12.15.0 |
 | Frontend | TypeScript 7.0.2 (`tsc`), Vite 8.3.5, ESLint 10.13.0, React and React DOM 19.3.1, Playwright Test 1.64.1 with Chromium, Firefox and WebKit |
 | GPU diagnostics and builds | `lspci`, `clinfo`, `vulkaninfo`, `glslangValidator`, Vulkan and OpenCL development headers/loaders, Mesa Vulkan drivers |
+| CUDA development | CUDA 13.3 compiler (`nvcc`) and runtime development files, installed from NVIDIA's Debian repository |
 | Shell and inspection | Bash, ripgrep (`rg`), jq, file, less, procps, ShellCheck |
 | Data and transfers | sqlite3, rsync, rclone 1.75.2 |
 | Git and connectivity | Git, GitHub CLI (`gh`), OpenSSH client/server, curl, CA certificates |
@@ -136,8 +137,9 @@ just the Jcode runtime. No `--tool` arguments are needed for:
 | Creative automation | All 13 ArtCraft headless CLIs, Fontconfig, DejaVu and Liberation fonts |
 | Agent workflow | Jcode, Beads (`bd`) 1.3.2, guest-local Beads hydration and safe Git hook |
 
-The compiler/interpreter versions above were checked against official releases
-on **October 24, 2026** and pinned in `templates/base.Dockerfile`. They are not
+The Rust, Python and Node versions were checked against official releases on
+**October 24, 2026**. CUDA compiler packages were checked on October 27, 2026.
+Their selected versions are recorded in `templates/base.Dockerfile`. They are not
 silently upgraded during guest startup. Updating a bundled Dockerfile, installer,
 or ArtCraft release pin invalidates the base and dependent project image caches.
 The local Jcode launcher and executable contents are also part of the cache key,
@@ -208,12 +210,13 @@ functional tests but is not evidence of GPU acceleration. OpenCL's loader and
 headers do not include a vendor OpenCL implementation, so an empty device list
 is expected in an unconfigured guest.
 
-Jbox does **not** currently pass host GPUs to Kata guests. These packages do not
-install CUDA, `nvcc`, `nvidia-smi`, NVIDIA drivers, or machine-learning
-frameworks, and cannot run CUDA hardware tests on their own. Configure those
-project-specific dependencies in a compatible project image only after a GPU
-access path is available. Real GPU use requires an explicitly designed and
-configured Kata device-passthrough path, compatible guest kernel and drivers,
+Jbox does **not** currently pass host GPUs to Kata guests. The CUDA compiler and
+runtime development files can compile CUDA programs, but they do not install
+`nvidia-smi`, NVIDIA drivers, the full CUDA library suite, or machine-learning
+frameworks, and cannot run CUDA hardware tests on their own. The compiler meta-
+package and `nvcc` are version-pinned; their dependencies are selected from
+NVIDIA's signed Debian repository at image-build time. Real GPU use requires an
+explicitly designed and configured Kata device-passthrough path, compatible guest kernel and drivers,
 and host prerequisites. It can affect the host GPU and isolation boundary, so
 Jbox does not configure or enable it automatically. See the
 [GPU testing plan](docs/gpu-testing-plan.md) for the staged work, safety

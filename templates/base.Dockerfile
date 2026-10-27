@@ -60,6 +60,18 @@ RUN apt-get update \
         zip \
     && rm -rf /var/lib/apt/lists/*
 
+# Install the CUDA compiler and runtime development files, not an NVIDIA kernel
+# driver. A working GPU still requires a separately configured Kata guest.
+RUN curl -fsSL --retry 3 https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb -o /tmp/cuda-keyring.deb \
+    && echo 'e7f219eab6fe4819cdb5c15b98233dc3420302d9c00883219cd3d896857cf48d  /tmp/cuda-keyring.deb' | sha256sum -c - \
+    && dpkg -i /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cuda-compiler-13-3=13.3.1-1 cuda-nvcc-13-3=13.3.73-1 \
+    && printf '%s\n' '#!/bin/sh' 'exec /usr/local/cuda-13.3/bin/nvcc "$@"' > /usr/local/bin/nvcc \
+    && chmod 0755 /usr/local/bin/nvcc \
+    && rm -f /tmp/cuda-keyring.deb \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=rust /usr/local/cargo /usr/local/cargo
 COPY --from=rust /usr/local/rustup /usr/local/rustup
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
@@ -153,6 +165,7 @@ RUN su -s /bin/sh jbox -c 'set -eu; tsc --version; vite --version; eslint --vers
 # No GPU is exposed by default. Check the discovery tools and shader compiler
 # without asserting that a physical device or OpenCL implementation exists.
 RUN su -s /bin/sh jbox -c 'set -eu; lspci --version; clinfo --version; clinfo -l; glslangValidator --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; XDG_RUNTIME_DIR="$work" vulkaninfo --summary'
+RUN su -s /bin/sh jbox -c 'set -eu; nvcc --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; printf "__global__ void k(int *p) { *p = 1; }\nint main() { return 0; }\n" > "$work/smoke.cu"; nvcc "$work/smoke.cu" -o "$work/smoke"; "$work/smoke"'
 # Exercise bundled rendering resources, not just the launcher, without an
 # execution engine, browser, TeX installation, or network access.
 RUN su -s /bin/sh jbox -c 'set -eu; quarto --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; printf "# Jbox Quarto smoke test\n" > "$work/smoke.qmd"; quarto render "$work/smoke.qmd" --to html --no-execute; test -s "$work/smoke.html"'
