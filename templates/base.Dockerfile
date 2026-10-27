@@ -27,6 +27,7 @@ RUN apt-get update \
         bash \
         build-essential \
         ca-certificates \
+        clinfo \
         cmake \
         curl \
         file \
@@ -34,13 +35,18 @@ RUN apt-get update \
         fonts-dejavu-core \
         fonts-liberation \
         git \
+        glslang-tools \
         gzip \
         jq \
         less \
         libssl-dev \
+        libvulkan-dev \
+        mesa-vulkan-drivers \
         ninja-build \
         openssh-client \
         openssh-server \
+        ocl-icd-opencl-dev \
+        pciutils \
         pkg-config \
         procps \
         ripgrep \
@@ -49,6 +55,7 @@ RUN apt-get update \
         sqlite3 \
         tar \
         unzip \
+        vulkan-tools \
         xz-utils \
         zip \
     && rm -rf /var/lib/apt/lists/*
@@ -143,6 +150,9 @@ RUN chmod 0755 /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin /usr/l
 RUN su -s /bin/sh jbox -c 'set -eu; jbox-toolchain-init; rustc --version; cargo --version; cargo fmt --version; cargo clippy --version; rust-analyzer --version; python --version; python -m pip --version; python -c "import ssl, sqlite3, venv"; node --version; npm --version; npx --version; rg --version; jq --version; cmake --version; ninja --version; test -w "$RUSTUP_HOME"; test -w "$CARGO_HOME"; test -w "$NPM_CONFIG_PREFIX"'
 RUN su -s /bin/sh jbox -c 'set -eu; uv --version; uvx --version; pnpm --version; sqlite3 :memory: "SELECT 1;"; rsync --version; shellcheck --version; rclone version; bd version; test -w "$PNPM_HOME"'
 RUN su -s /bin/sh jbox -c 'set -eu; tsc --version; vite --version; eslint --version; playwright --version; node -e "const p = require(\"/usr/local/lib/node_modules/@playwright/test\"); for (const b of [p.chromium, p.firefox, p.webkit]) require(\"fs\").accessSync(b.executablePath(), require(\"fs\").constants.X_OK); require(\"/usr/local/lib/node_modules/react\"); require(\"/usr/local/lib/node_modules/react-dom\");"'
+# No GPU is exposed by default. Check the discovery tools and shader compiler
+# without asserting that a physical device or OpenCL implementation exists.
+RUN su -s /bin/sh jbox -c 'set -eu; lspci --version; clinfo --version; clinfo -l; glslangValidator --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; XDG_RUNTIME_DIR="$work" vulkaninfo --summary'
 # Exercise bundled rendering resources, not just the launcher, without an
 # execution engine, browser, TeX installation, or network access.
 RUN su -s /bin/sh jbox -c 'set -eu; quarto --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; printf "# Jbox Quarto smoke test\n" > "$work/smoke.qmd"; quarto render "$work/smoke.qmd" --to html --no-execute; test -s "$work/smoke.html"'

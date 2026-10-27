@@ -1412,6 +1412,24 @@ mod tests {
     }
 
     #[test]
+    fn gpu_diagnostic_tools_are_installed_without_gpu_access() {
+        for required in [
+            "        clinfo \\",
+            "        pciutils \\",
+            "        vulkan-tools \\",
+            "        mesa-vulkan-drivers \\",
+            "        libvulkan-dev \\",
+            "        ocl-icd-opencl-dev \\",
+            "        glslang-tools \\",
+            "lspci --version; clinfo --version; clinfo -l; glslangValidator --version",
+            "vulkaninfo --summary",
+        ] {
+            assert!(BASE_DOCKERFILE.contains(required), "missing {required}");
+        }
+        assert!(!BASE_DOCKERFILE.contains("nvidia-driver"));
+    }
+
+    #[test]
     fn image_build_streams_progress_and_reports_exit_code_on_failure() {
         // run_build must pass --progress=plain so docker emits each build step
         // to the inherited terminal rather than buffering everything silently.

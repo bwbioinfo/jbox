@@ -127,6 +127,7 @@ just the Jcode runtime. No `--tool` arguments are needed for:
 | Python | Python 3.15.1, pip 26.2.2, venv, development headers, uv/uvx 0.13.5 |
 | JavaScript | Node.js 26.12.1 (Current), npm/npx 11.21.1, pnpm/pnpx 12.15.0 |
 | Frontend | TypeScript 7.0.2 (`tsc`), Vite 8.3.5, ESLint 10.13.0, React and React DOM 19.3.1, Playwright Test 1.64.1 with Chromium, Firefox and WebKit |
+| GPU diagnostics and builds | `lspci`, `clinfo`, `vulkaninfo`, `glslangValidator`, Vulkan and OpenCL development headers/loaders, Mesa Vulkan drivers |
 | Shell and inspection | Bash, ripgrep (`rg`), jq, file, less, procps, ShellCheck |
 | Data and transfers | sqlite3, rsync, rclone 1.75.2 |
 | Git and connectivity | Git, GitHub CLI (`gh`), OpenSSH client/server, curl, CA certificates |
@@ -196,6 +197,25 @@ Keep that environment variable set when running the project's tests. Browser
 downloads require network access, and a version with new system requirements
 may need additional image customization. The browser cache and dependencies
 increase image size; existing guests do not receive them automatically.
+
+### GPU testing limits
+
+The default image includes PCI, OpenCL and Vulkan discovery tools and headers,
+plus a GLSL-to-SPIR-V compiler. Try `lspci`, `clinfo -l` and
+`vulkaninfo --summary` to inspect what the guest can actually see. Mesa may
+report a **software** Vulkan device such as llvmpipe, which is useful for
+functional tests but is not evidence of GPU acceleration. OpenCL's loader and
+headers do not include a vendor OpenCL implementation, so an empty device list
+is expected in an unconfigured guest.
+
+Jbox does **not** currently pass host GPUs to Kata guests. These packages do not
+install CUDA, `nvcc`, `nvidia-smi`, NVIDIA drivers, or machine-learning
+frameworks, and cannot run CUDA hardware tests on their own. Configure those
+project-specific dependencies in a compatible project image only after a GPU
+access path is available. Real GPU use requires an explicitly designed and
+configured Kata device-passthrough path, compatible guest kernel and drivers,
+and host prerequisites. It can affect the host GPU and isolation boundary, so
+Jbox does not configure or enable it automatically.
 
 rclone's configuration stays guest-local unless you explicitly configure an
 approved credential mechanism. No host rclone config, cloud credentials, FUSE
