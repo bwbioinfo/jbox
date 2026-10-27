@@ -165,7 +165,7 @@ RUN su -s /bin/sh jbox -c 'set -eu; tsc --version; vite --version; eslint --vers
 # No GPU is exposed by default. Check the discovery tools and shader compiler
 # without asserting that a physical device or OpenCL implementation exists.
 RUN su -s /bin/sh jbox -c 'set -eu; lspci --version; clinfo --version; clinfo -l; glslangValidator --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; XDG_RUNTIME_DIR="$work" vulkaninfo --summary'
-RUN su -s /bin/sh jbox -c 'set -eu; nvcc --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; printf "__global__ void k(int *p) { *p = 1; }\nint main() { return 0; }\n" > "$work/smoke.cu"; nvcc "$work/smoke.cu" -o "$work/smoke"; "$work/smoke"'
+RUN su -s /bin/sh jbox -c 'set -eu; nvcc --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; printf "__global__ void k(int *p) { *p = 1; }\nint main() { return 0; }\n" > "$work/smoke.cu"; nvcc "$work/smoke.cu" -o "$work/smoke"; "$work/smoke"; nvcc -cudart shared "$work/smoke.cu" -o "$work/shared"; "$work/shared"'
 # Exercise bundled rendering resources, not just the launcher, without an
 # execution engine, browser, TeX installation, or network access.
 RUN su -s /bin/sh jbox -c 'set -eu; quarto --version; work=$(mktemp -d); trap '\''rm -rf "$work"'\'' EXIT; printf "# Jbox Quarto smoke test\n" > "$work/smoke.qmd"; quarto render "$work/smoke.qmd" --to html --no-execute; test -s "$work/smoke.html"'

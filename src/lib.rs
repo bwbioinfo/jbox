@@ -4200,6 +4200,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unsupported_gpu_create_and_resume_fail_before_workspace_or_image_changes() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("source");
+        fs::create_dir(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        fs::write(
+            source.join(".jbox.toml"),
+            "version = 1\n[gpu]\nexperimental_vfio = true\npci_bdf = '0000:01:00.0'\n",
+        )
+        .unwrap();
+        let mut app = test_app(root.path());
+        app.engine = TestDockerEngine::Stale;
+        let before = git(&source, &["status", "--porcelain"]);
+        let error = app.create(&source, false, &source).unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field `gpu`"));
+        assert!(!app.paths.data.exists());
+        assert!(!app.paths.cache.exists());
+        assert_eq!(git(&source, &["status", "--porcelain"]), before);
+
+        let session = test_session("gpu-policy", source.clone());
+        app.state.save(&session).unwrap();
+        let session_path = app.paths.sessions.join(&session.id);
+        let entries_before = fs::read_dir(&session_path).unwrap().count();
+        // Image refresh must not build or mutate anything before policy refusal.
+        let error = app
+            .restart_session_with_image_refresh(&session.id, true)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field `gpu`"));
+        assert_eq!(fs::read_dir(&session_path).unwrap().count(), entries_before);
+        assert!(!app.paths.cache.exists());
+        assert!(!session.repos[0].worktree.exists());
+        assert_eq!(
+            app.load_session(&session.id).unwrap().state,
+            SessionState::Stopped
+        );
+        assert_eq!(git(&source, &["status", "--porcelain"]), before);
+    }
+
     fn git(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .arg("-C")

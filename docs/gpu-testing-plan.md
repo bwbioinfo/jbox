@@ -48,6 +48,25 @@ which may include devices other than the selected GPU. Granting access to a VFIO
 group can have broader effects than the selected function. Passthrough also
 generally removes the assigned GPU from normal host use while assigned.
 
+### Launch-path questions that remain open
+
+- The host administrator must configure a separate GPU-capable Kata runtime
+  without changing the existing `kata` default, and confirm that its filesystem
+  transport supports Jbox's worktree and SSH/runtime mounts. The packaged
+  NVIDIA QEMU configuration is not a drop-in replacement for Jbox.
+- A device request needs an explicitly selected PCI function and a verified
+  IOMMU group. Every member of the group must be reviewed, including companion
+  functions; an arbitrary `/dev` path, `/dev/vfio/vfio` alone or Docker's
+  `--gpus all` does not establish the correct Kata VM assignment.
+- Device allocation needs durable exclusion and recovery. A Docker start can
+  time out even though the daemon later creates the VM; failed stop, process
+  crashes and retained sessions must not make an uncertain GPU look available.
+  The ownership policy must also account for other users and non-Jbox clients.
+- GPU-capable guest drivers, device injection and non-root CUDA access must be
+  validated together. Matching a host `nvidia-smi` result does not prove that
+  the Kata guest can access the GPU. The host display device should not be
+  detached without explicit approval and a recovery plan.
+
 ## Staged work
 
 1. **Read-only readiness (`jbox-tng`).** Report detected PCI display devices,

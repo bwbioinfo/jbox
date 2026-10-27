@@ -1438,6 +1438,7 @@ mod tests {
             "exec /usr/local/cuda-13.3/bin/nvcc",
             "nvcc --version; work=$(mktemp -d)",
             "nvcc \"$work/smoke.cu\" -o \"$work/smoke\"",
+            "nvcc -cudart shared \"$work/smoke.cu\" -o \"$work/shared\"",
         ] {
             assert!(BASE_DOCKERFILE.contains(required), "missing {required}");
         }
