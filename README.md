@@ -429,9 +429,31 @@ On a cold guest, Jbox reports SSH readiness progress while the guest prepares it
 workspaces. If the guest exits before SSH starts, startup fails rather than
 waiting for the full readiness deadline. A Docker command that stops responding
 also fails with an explicit timeout instead of leaving reconnection silent.
-Newly built guest images bound Beads hydration to 60 seconds per workspace and
-report a bootstrap failure before SSH starts. Retained sessions reuse their saved
-image unless explicitly restarted with `jbox resume SESSION --refresh-image`.
+Newly built guest images allow **180 seconds per Beads workspace** for the full
+bootstrap, including import, export, integrity checks, and hook setup. Override
+this in the primary repository's `.jbox.toml` when a large database needs more
+time:
+
+```toml
+[beads]
+bootstrap_timeout_seconds = 600
+```
+
+The value must be an integer from 1 to 3600 seconds. Zero does not disable the
+deadline. Startup remains fail-closed: SSH starts only after every workspace
+passes its checks. Logs identify workspace, active phase, elapsed time, and exit
+status. Host SSH readiness automatically allows 60 seconds of headroom plus
+`(bootstrap_timeout_seconds + 5) * Beads_workspace_count`; it no longer truncates
+multi-repository hydration at a fixed 300-second ceiling. A failed workspace
+still stops startup immediately rather than spending every workspace's budget.
+
+Retained sessions reuse their saved image. Updating `.jbox.toml` alone cannot
+change an old image's hard-coded 60-second bootstrap. With the updated Jbox CLI,
+stop a retained session and explicitly restart with
+`jbox resume SESSION --refresh-image`. A failed first launch may leave no saved
+session, in which case use `jbox run --new PATH`. No host Beads database reset or
+integrity-check bypass is needed. Real four-repository validation and its scope
+are recorded in the [bootstrap acceptance report](docs/acceptance-bootstrap-timeout-2026-10-27.md).
 If a repository tracks server-mode Beads metadata for the host, jbox rewrites
 only the isolated guest worktree's copy to embedded mode before importing the
 portable JSONL. A stale server database is left intact, not mounted from the
@@ -746,6 +768,9 @@ cpus = 8
 memory = "16G"
 disk = "40G"   # recorded for future VM disk sizing, not enforced by Docker/Kata yet
 ttl = "24h"
+
+[beads]
+bootstrap_timeout_seconds = 180 # Per workspace, including all integrity checks. Valid: 1..3600.
 
 [image]
 dockerfile = ".jbox/Dockerfile"

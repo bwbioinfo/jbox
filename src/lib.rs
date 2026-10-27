@@ -87,6 +87,13 @@ struct SessionLaunch {
     ssh_host: String,
 }
 
+fn beads_workspace_count(repos: &[RepoState]) -> usize {
+    repos
+        .iter()
+        .filter(|repo| repo.worktree.join(".beads/issues.jsonl").is_file())
+        .count()
+}
+
 impl App {
     pub fn open() -> Result<Self> {
         let paths = JboxPaths::discover()?;
@@ -367,13 +374,11 @@ impl App {
                     Ok(true) => snapshots.push(Some(snapshot)),
                     Ok(false) => snapshots.push(None),
                     Err(error) => {
-                        let _ = std::fs::remove_dir_all(&session_dir);
-                        return Err(error).with_context(|| {
-                            format!(
-                                "could not snapshot uncommitted host changes for {}",
-                                repo.source.display()
-                            )
-                        });
+                        let error = error.context(format!(
+                            "could not snapshot uncommitted host changes for {}",
+                            repo.source.display()
+                        ));
+                        return Err(self.rollback_failed_launch(&session_dir, &[], error));
                     }
                 }
             }
@@ -392,14 +397,24 @@ impl App {
             {
                 Ok(created) => created,
                 Err(error) => {
-                    for created_repo in &repos {
-                        let _ = self.git.remove_worktree(
-                            &created_repo.source,
-                            &created_repo.worktree,
-                            false,
-                        );
+                    // A failed `git worktree add` may still have registered
+                    // or populated the path. Force-cleaning it is safe: it is
+                    // a fresh path inside this session's storage.
+                    let mut owned = repos.clone();
+                    if worktree.exists() {
+                        owned.push(RepoState {
+                            name: repo.name.clone(),
+                            source: repo.source.clone(),
+                            worktree: worktree.clone(),
+                            mount: repo.mount.clone(),
+                            branch: String::new(),
+                            base_commit: String::new(),
+                            host_gitfile: PathBuf::new(),
+                            beads_snapshot: None,
+                            beads_bootstrap: Vec::new(),
+                        });
                     }
-                    return Err(error);
+                    return Err(self.rollback_failed_launch(&session_dir, &owned, error));
                 }
             };
             println!(
@@ -409,6 +424,25 @@ impl App {
             let host_gitfile = session_dir
                 .join("host-gitfiles")
                 .join(format!("{}.git", repo.name));
+            // Every later failure for this repository rolls back the fresh
+            // worktree together with those created before it. Metadata
+            // restoration is a no-op until isolation has swapped `.git`.
+            let provisional = RepoState {
+                name: repo.name.clone(),
+                source: repo.source.clone(),
+                worktree: worktree.clone(),
+                mount: repo.mount.clone(),
+                branch: created.branch.clone(),
+                base_commit: created.commit.clone(),
+                host_gitfile: host_gitfile.clone(),
+                beads_snapshot: None,
+                beads_bootstrap: Vec::new(),
+            };
+            let rollback_with_current = |error: anyhow::Error| {
+                let mut owned = repos.clone();
+                owned.push(provisional.clone());
+                self.rollback_failed_launch(&session_dir, &owned, error)
+            };
             if let Err(error) = self.git.isolate_guest_metadata(
                 &repo.source,
                 &worktree,
@@ -417,35 +451,18 @@ impl App {
                 &host_gitfile,
                 &git_author,
             ) {
-                let _ = self.git.remove_worktree(&repo.source, &worktree, false);
-                self.cleanup_worktrees(&repos);
-                let _ = std::fs::remove_dir_all(&session_dir);
-                return Err(error).context("could not prepare isolated guest Git metadata");
+                return Err(rollback_with_current(
+                    error.context("could not prepare isolated guest Git metadata"),
+                ));
             }
             if let Some(snapshot) = snapshot
                 && let Err(error) = self.git.apply_host_changes(&worktree, snapshot)
             {
-                let provisional = RepoState {
-                    name: repo.name.clone(),
-                    source: repo.source.clone(),
-                    worktree: worktree.clone(),
-                    mount: repo.mount.clone(),
-                    branch: created.branch.clone(),
-                    base_commit: created.commit.clone(),
-                    host_gitfile: host_gitfile.clone(),
-                    beads_snapshot: None,
-                    beads_bootstrap: Vec::new(),
-                };
-                let _ = self.git.restore_guest_metadata(&provisional);
-                let _ = self.git.remove_worktree(&repo.source, &worktree, false);
-                self.cleanup_worktrees(&repos);
-                let _ = std::fs::remove_dir_all(&session_dir);
-                return Err(error).with_context(|| {
-                    format!(
-                        "could not apply the host-change snapshot to generated worktree {}",
-                        worktree.display()
-                    )
-                });
+                let error = error.context(format!(
+                    "could not apply the host-change snapshot to generated worktree {}",
+                    worktree.display()
+                ));
+                return Err(rollback_with_current(error));
             }
             if snapshot.is_some() {
                 println!(
@@ -460,27 +477,11 @@ impl App {
             let beads_snapshot = match self.git.snapshot_beads_export(&repo.source, &worktree) {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
-                    let provisional = RepoState {
-                        name: repo.name.clone(),
-                        source: repo.source.clone(),
-                        worktree: worktree.clone(),
-                        mount: repo.mount.clone(),
-                        branch: created.branch.clone(),
-                        base_commit: created.commit.clone(),
-                        host_gitfile: host_gitfile.clone(),
-                        beads_snapshot: None,
-                        beads_bootstrap: Vec::new(),
-                    };
-                    let _ = self.git.restore_guest_metadata(&provisional);
-                    let _ = self.git.remove_worktree(&repo.source, &worktree, false);
-                    self.cleanup_worktrees(&repos);
-                    let _ = std::fs::remove_dir_all(&session_dir);
-                    return Err(error).with_context(|| {
-                        format!(
-                            "could not snapshot Beads task context for {}",
-                            repo.source.display()
-                        )
-                    });
+                    let error = error.context(format!(
+                        "could not snapshot Beads task context for {}",
+                        repo.source.display()
+                    ));
+                    return Err(rollback_with_current(error));
                 }
             };
             repos.push(RepoState {
@@ -498,17 +499,12 @@ impl App {
 
         let ssh = self.paths.session_ssh_dir(&session_id);
         if let Err(error) = self.paths.create_session_ssh(&ssh) {
-            self.cleanup_worktrees(&repos);
-            let _ = std::fs::remove_dir_all(&session_dir);
-            return Err(error).context("could not create session SSH credentials");
+            let error = error.context("could not create session SSH credentials");
+            return Err(self.rollback_failed_launch(&session_dir, &repos, error));
         }
         let ssh_agent_pid = match self.paths.start_session_ssh_agent(&ssh) {
             Ok(pid) => pid,
-            Err(error) => {
-                self.cleanup_worktrees(&repos);
-                let _ = std::fs::remove_dir_all(&session_dir);
-                return Err(error);
-            }
+            Err(error) => return Err(self.rollback_failed_launch(&session_dir, &repos, error)),
         };
         let container_name = format!("jbox-{session_id}");
         let spec = match self.container_spec(
@@ -523,36 +519,80 @@ impl App {
         ) {
             Ok(spec) => spec,
             Err(error) => {
-                self.cleanup_worktrees(&repos);
                 self.paths.stop_session_ssh_agent(ssh_agent_pid);
-                let _ = std::fs::remove_dir_all(&session_dir);
-                return Err(error);
+                return Err(self.rollback_failed_launch(&session_dir, &repos, error));
             }
         };
+        let beads_count = beads_workspace_count(&repos);
         let port = match self.engine.start(&spec) {
             Ok(port) => port,
             Err(error) => {
-                self.cleanup_worktrees(&repos);
                 self.paths.stop_session_ssh_agent(ssh_agent_pid);
-                let _ = std::fs::remove_dir_all(&session_dir);
-                return Err(error);
+                if error.is::<engine::GuestStartUncertain>() {
+                    // A timed-out/failed client does not cancel Docker's
+                    // daemon-side request. Even an absent container now could
+                    // appear later with these worktrees mounted.
+                    return Err(self.preserve_failed_launch(
+                        &session_dir,
+                        &container_name,
+                        "Docker run did not confirm completion and guest creation may still be in flight",
+                        error,
+                    ));
+                }
+                // Confirmed client completion can still be followed by an
+                // engine cleanup failure. Never force-stop by name here: a
+                // collision could belong to an unrelated container. Remove
+                // storage only once no container with this name exists.
+                return Err(match self.guest_confirmed_absent(&container_name) {
+                    Ok(true) => self.rollback_failed_launch(&session_dir, &repos, error),
+                    Ok(false) => self.preserve_failed_launch(
+                        &session_dir,
+                        &container_name,
+                        "a container with the guest's name still exists after the failed start",
+                        error,
+                    ),
+                    Err(probe) => self.preserve_failed_launch(
+                        &session_dir,
+                        &container_name,
+                        &format!("guest absence could not be confirmed ({probe:#})"),
+                        error,
+                    ),
+                });
             }
         };
-        let known_hosts_tag =
-            match self
-                .paths
-                .trust_session_host(&ssh_host, &session_id, repos.len(), || {
-                    self.guest_running_for_ssh(&container_name)
-                }) {
-                Ok(tag) => tag,
-                Err(error) => {
-                    let _ = self.engine.stop(&container_name);
-                    self.paths.stop_session_ssh_agent(ssh_agent_pid);
-                    self.cleanup_worktrees(&repos);
-                    let _ = std::fs::remove_dir_all(&session_dir);
-                    return Err(error);
-                }
-            };
+        let known_hosts_tag = match self.paths.trust_session_host(
+            &ssh_host,
+            &session_id,
+            beads_count,
+            config.beads.bootstrap_timeout_seconds,
+            || self.engine.is_running(&container_name),
+        ) {
+            Ok(tag) => tag,
+            Err(error) => {
+                // `engine.start` succeeded, so this launch owns the guest.
+                let error = self.ssh_startup_error(&container_name, error);
+                self.paths.stop_session_ssh_agent(ssh_agent_pid);
+                let stopped = self
+                    .engine
+                    .stop(&container_name)
+                    .and_then(|()| self.guest_confirmed_absent(&container_name));
+                return Err(match stopped {
+                    Ok(true) => self.rollback_failed_launch(&session_dir, &repos, error),
+                    Ok(false) => self.preserve_failed_launch(
+                        &session_dir,
+                        &container_name,
+                        "the guest still exists after removal was requested",
+                        error,
+                    ),
+                    Err(stop) => self.preserve_failed_launch(
+                        &session_dir,
+                        &container_name,
+                        &format!("the guest could not be removed ({stop:#})"),
+                        error,
+                    ),
+                });
+            }
+        };
         // Capture the host-visible result of trusted bootstrap before a local
         // TUI can connect. Those files are jbox infrastructure, not agent
         // edits, and their exact digests remain the safety boundary.
@@ -611,7 +651,10 @@ impl App {
         launch: SessionLaunch,
     ) -> Result<ContainerSpec> {
         let mut mounts = Vec::new();
-        let mut environment = Vec::new();
+        let mut environment = vec![(
+            "JBOX_BEADS_BOOTSTRAP_TIMEOUT_SECONDS".into(),
+            config.beads.bootstrap_timeout_seconds.to_string(),
+        )];
         for repo in repos {
             mounts.push((repo.worktree.clone(), safe_target(&repo.mount)?, true));
         }
@@ -2690,6 +2733,7 @@ done | LC_ALL=C sort -r | head -n 20
                 return Err(error);
             }
         };
+        let beads_count = beads_workspace_count(&session.repos);
         let port = match self.engine.start(&spec) {
             Ok(port) => port,
             Err(error) => {
@@ -2701,11 +2745,13 @@ done | LC_ALL=C sort -r | head -n 20
         let known_hosts_tag = match self.paths.trust_session_host(
             &session.ssh_host,
             &session.id,
-            session.repos.len(),
-            || self.guest_running_for_ssh(&session.container_name),
+            beads_count,
+            config.beads.bootstrap_timeout_seconds,
+            || self.engine.is_running(&session.container_name),
         ) {
             Ok(tag) => tag,
             Err(error) => {
+                let error = self.ssh_startup_error(&session.container_name, error);
                 let _ = self.engine.stop(&session.container_name);
                 self.paths.stop_session_ssh_agent(ssh_agent_pid);
                 self.restore_retained_metadata(&session.repos);
@@ -3042,15 +3088,14 @@ done | LC_ALL=C sort -r | head -n 20
         Ok(())
     }
 
-    fn guest_running_for_ssh(&self, container_name: &str) -> Result<bool> {
-        if !self.engine.is_running(container_name)? {
-            let logs = self
-                .engine
-                .startup_logs(container_name)
-                .unwrap_or_else(|error| format!("could not retrieve guest logs: {error:#}"));
-            bail!("guest exited before SSH was ready: {logs}");
-        }
-        Ok(true)
+    fn ssh_startup_error(&self, container_name: &str, error: anyhow::Error) -> anyhow::Error {
+        // Fetch logs even when the guest is still running at the host deadline.
+        // Cleanup removes the container, so this must happen before stop().
+        let logs = self
+            .engine
+            .startup_logs(container_name)
+            .unwrap_or_else(|error| format!("could not retrieve guest logs: {error:#}"));
+        error.context(format!("guest SSH startup failed. Container logs:\n{logs}"))
     }
 
     fn require_running(&self, session: &Session) -> Result<()> {
@@ -3127,13 +3172,141 @@ done | LC_ALL=C sort -r | head -n 20
             .collect()
     }
 
-    fn cleanup_worktrees(&self, repos: &[RepoState]) {
-        for repo in repos {
-            let _ = self.git.restore_guest_metadata(repo);
-            let _ = self
-                .git
-                .remove_worktree(&repo.source, &repo.worktree, false);
+    /// Confirm that no container with `name` exists, running or not. Any
+    /// inspection failure other than Docker's explicit "No such object" is
+    /// treated as unknown so callers preserve mounted storage.
+    fn guest_confirmed_absent(&self, name: &str) -> Result<bool> {
+        let mut cmd = Command::new("docker");
+        cmd.args([
+            "inspect",
+            "--type",
+            "container",
+            "--format",
+            "{{.Id}}",
+            "--",
+            name,
+        ]);
+        let (ok, _, stderr) =
+            engine::run_timed_raw(cmd, std::time::Duration::from_secs(10), "docker inspect")?;
+        if ok {
+            return Ok(false);
         }
+        if stderr.contains("No such object") || stderr.contains("No such container") {
+            return Ok(true);
+        }
+        bail!("could not determine whether container {name} exists: {stderr}")
+    }
+
+    /// Restore host Git metadata and force-remove worktrees owned by a failed,
+    /// never-published initial launch. Returns an error describing every
+    /// worktree that could not be fully restored and unregistered, so callers
+    /// can preserve the enclosing session directory instead of deleting a
+    /// worktree whose Git registration would then dangle.
+    ///
+    /// Only failed initial launches call this, before publishing a session or
+    /// allowing an agent to edit it. Bootstrap can dirty tracked files, which
+    /// is why removal is forced. Never use this path for retained sessions,
+    /// which must preserve guest work on resume failure.
+    fn cleanup_unpublished_worktrees(&self, repos: &[RepoState]) -> Result<()> {
+        let mut failures = Vec::new();
+        for repo in repos {
+            let owned = repo.worktree.starts_with(&self.paths.sessions)
+                && !repo
+                    .worktree
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir));
+            if !owned {
+                failures.push(format!(
+                    "refused to remove {}: it is outside Jbox session storage",
+                    repo.worktree.display()
+                ));
+                continue;
+            }
+            // `restore_guest_metadata` deletes the isolated `.git` directory
+            // before copying the saved link back. Verify the saved link is a
+            // readable regular gitfile first so a failure cannot destroy the
+            // only remaining guest history.
+            if repo.worktree.join(".git").is_dir() {
+                let saved = std::fs::symlink_metadata(&repo.host_gitfile)
+                    .ok()
+                    .filter(|metadata| metadata.file_type().is_file())
+                    .and_then(|_| std::fs::read_to_string(&repo.host_gitfile).ok());
+                if !saved.is_some_and(|link| link.starts_with("gitdir: ")) {
+                    failures.push(format!(
+                        "could not restore host Git metadata for {} ({}): saved host gitfile {} is missing, not a regular file, or unreadable; the isolated .git directory was left intact",
+                        repo.name,
+                        repo.worktree.display(),
+                        repo.host_gitfile.display()
+                    ));
+                    continue;
+                }
+            }
+            if let Err(error) = self.git.restore_guest_metadata(repo) {
+                failures.push(format!(
+                    "could not restore host Git metadata for {} ({}): {error:#}",
+                    repo.name,
+                    repo.worktree.display()
+                ));
+                continue;
+            }
+            if let Err(error) = self.git.remove_worktree(&repo.source, &repo.worktree, true) {
+                failures.push(format!(
+                    "could not unregister worktree {} from {}: {error:#}",
+                    repo.worktree.display(),
+                    repo.source.display()
+                ));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            bail!(
+                "unpublished worktree cleanup was incomplete:\n  {}",
+                failures.join("\n  ")
+            )
+        }
+    }
+
+    /// Roll back a failed initial launch whose guest is confirmed absent (or
+    /// was never started). The session directory is deleted only when every
+    /// owned worktree was restored and unregistered. The original error is
+    /// always returned, annotated with recovery guidance when storage remains.
+    fn rollback_failed_launch(
+        &self,
+        session_dir: &Path,
+        repos: &[RepoState],
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        match self.cleanup_unpublished_worktrees(repos) {
+            Ok(()) => match std::fs::remove_dir_all(session_dir) {
+                Ok(()) => error,
+                Err(remove) if remove.kind() == io::ErrorKind::NotFound => error,
+                Err(remove) => error.context(format!(
+                    "launch failed; worktrees were unregistered but session storage {} could not be removed ({remove}). Remove it manually",
+                    session_dir.display()
+                )),
+            },
+            Err(cleanup) => error.context(format!(
+                "launch failed and session storage was preserved at {} because rollback was incomplete. {cleanup:#}\nResolve the listed repositories (for example `git -C <source> worktree remove --force <worktree>`), then remove the preserved directory",
+                session_dir.display()
+            )),
+        }
+    }
+
+    /// Preserve every owned resource when the guest may still exist and hold
+    /// the session worktrees mounted. Nothing is deleted or force-stopped.
+    fn preserve_failed_launch(
+        &self,
+        session_dir: &Path,
+        container_name: &str,
+        reason: &str,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        error.context(format!(
+            "launch failed and session storage was preserved at {} because {reason}. Confirm container `{container_name}` is a Jbox guest for this session, remove it with `docker rm -f {container_name}`, verify `docker ps -a --filter name={container_name}` lists nothing, then unregister the worktrees under {} with `git worktree remove --force` and remove the directory",
+            session_dir.display(),
+            session_dir.join("worktrees").display()
+        ))
     }
 
     fn host_overlay_path(&self, session_id: &str, repo: &RepoState) -> PathBuf {
@@ -4638,6 +4811,270 @@ merge = "user-confirmed"
         assert!(output.contains(&format!("\t{}\n", launch_directory.display())));
         assert!(output.contains("legacy-session\tStopped"));
         assert!(output.contains("\t-\n"));
+    }
+
+    #[test]
+    fn failed_initial_bootstrap_unregisters_dirty_owned_worktrees_only() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        git(&source, &["config", "user.name", "Test"]);
+        git(&source, &["config", "user.email", "test@example.invalid"]);
+        std::fs::write(source.join("tracked"), "original\n").unwrap();
+        git(&source, &["add", "tracked"]);
+        git(&source, &["commit", "-qm", "base"]);
+        std::fs::write(source.join("tracked"), "host changes stay\n").unwrap();
+        let worktree = app.paths.sessions.join("failed/worktrees/source");
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        let created = app
+            .git
+            .add_worktree(&source, &worktree, "failed", "source")
+            .unwrap();
+        let mut repo = test_session("failed", source.clone()).repos.remove(0);
+        repo.worktree = worktree.clone();
+        repo.branch = created.branch;
+        repo.base_commit = created.commit;
+        repo.host_gitfile = temp.path().join("saved.git");
+        app.git
+            .isolate_guest_metadata(
+                &source,
+                &worktree,
+                &repo.branch,
+                &repo.base_commit,
+                &repo.host_gitfile,
+                &config::ResolvedGitAuthor::default(),
+            )
+            .unwrap();
+        std::fs::write(worktree.join("tracked"), "bootstrap changes\n").unwrap();
+        std::fs::write(worktree.join("untracked"), "bootstrap state\n").unwrap();
+        app.cleanup_unpublished_worktrees(std::slice::from_ref(&repo))
+            .unwrap();
+        assert!(!worktree.exists());
+        assert_eq!(
+            git(&source, &["worktree", "list", "--porcelain"])
+                .matches("worktree ")
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("tracked")).unwrap(),
+            "host changes stay\n"
+        );
+        // Even accidental reuse of this private helper must not force-remove
+        // a repository outside the unpublished session-storage boundary.
+        repo.worktree = source.clone();
+        let error = app.cleanup_unpublished_worktrees(&[repo]).unwrap_err();
+        assert!(format!("{error:#}").contains("outside Jbox session storage"));
+        assert!(source.join("tracked").exists());
+    }
+
+    /// Build a fresh, isolated session worktree as initial launch would.
+    fn isolated_unpublished_repo(app: &App, root: &Path, session: &str) -> (RepoState, PathBuf) {
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        git(&source, &["config", "user.name", "Test"]);
+        git(&source, &["config", "user.email", "test@example.invalid"]);
+        std::fs::write(source.join("tracked"), "original\n").unwrap();
+        git(&source, &["add", "tracked"]);
+        git(&source, &["commit", "-qm", "base"]);
+        let session_dir = app.paths.sessions.join(session);
+        let worktree = session_dir.join("worktrees/source");
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        let created = app
+            .git
+            .add_worktree(&source, &worktree, session, "source")
+            .unwrap();
+        let mut repo = test_session(session, source).repos.remove(0);
+        repo.worktree = worktree;
+        repo.branch = created.branch;
+        repo.base_commit = created.commit;
+        repo.host_gitfile = session_dir.join("host-gitfiles/source.git");
+        app.git
+            .isolate_guest_metadata(
+                &repo.source,
+                &repo.worktree,
+                &repo.branch,
+                &repo.base_commit,
+                &repo.host_gitfile,
+                &config::ResolvedGitAuthor::default(),
+            )
+            .unwrap();
+        (repo, session_dir)
+    }
+
+    fn registered_worktrees(source: &Path) -> usize {
+        git(source, &["worktree", "list", "--porcelain"])
+            .matches("worktree ")
+            .count()
+    }
+
+    #[test]
+    fn failed_metadata_restore_preserves_session_storage_and_registration() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let (mut repo, session_dir) = isolated_unpublished_repo(&app, temp.path(), "restore");
+        // Losing the saved host gitfile makes restoration impossible.
+        repo.host_gitfile = temp.path().join("missing.git");
+        let error = app.rollback_failed_launch(
+            &session_dir,
+            std::slice::from_ref(&repo),
+            anyhow::anyhow!("original launch failure"),
+        );
+        let message = format!("{error:#}");
+        assert!(message.contains("original launch failure"), "{message}");
+        assert!(
+            message.contains("session storage was preserved"),
+            "{message}"
+        );
+        assert!(
+            message.contains("could not restore host Git metadata"),
+            "{message}"
+        );
+        assert!(session_dir.exists());
+        assert!(repo.worktree.join(".git").is_dir());
+        assert!(repo.worktree.join(".git/HEAD").is_file());
+        assert_eq!(registered_worktrees(&repo.source), 2);
+    }
+
+    #[test]
+    fn failed_worktree_removal_preserves_session_storage() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let (mut repo, session_dir) = isolated_unpublished_repo(&app, temp.path(), "remove");
+        let real_source = repo.source.clone();
+        // Metadata restores, but `git worktree remove` cannot run in a
+        // non-repository, so the registration must not be orphaned.
+        let bogus = temp.path().join("not-a-repo");
+        std::fs::create_dir_all(&bogus).unwrap();
+        repo.source = bogus;
+        let error = app.rollback_failed_launch(
+            &session_dir,
+            std::slice::from_ref(&repo),
+            anyhow::anyhow!("original launch failure"),
+        );
+        let message = format!("{error:#}");
+        assert!(message.contains("original launch failure"), "{message}");
+        assert!(
+            message.contains("could not unregister worktree"),
+            "{message}"
+        );
+        assert!(session_dir.exists());
+        assert!(repo.worktree.exists());
+        assert_eq!(registered_worktrees(&real_source), 2);
+    }
+
+    #[test]
+    fn complete_rollback_removes_session_storage_and_keeps_original_error() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let (repo, session_dir) = isolated_unpublished_repo(&app, temp.path(), "complete");
+        std::fs::write(repo.worktree.join("tracked"), "dirty bootstrap\n").unwrap();
+        let error = app.rollback_failed_launch(
+            &session_dir,
+            std::slice::from_ref(&repo),
+            anyhow::anyhow!("original launch failure"),
+        );
+        assert_eq!(format!("{error:#}"), "original launch failure");
+        assert!(!session_dir.exists());
+        assert_eq!(registered_worktrees(&repo.source), 1);
+    }
+
+    #[test]
+    fn out_of_root_rollback_preserves_storage_and_target() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let (mut repo, session_dir) = isolated_unpublished_repo(&app, temp.path(), "escape");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "keep\n").unwrap();
+        // Lexically under sessions, but escapes it through `..`.
+        repo.worktree = app.paths.sessions.join("../../outside");
+        let error = app.rollback_failed_launch(
+            &session_dir,
+            &[repo],
+            anyhow::anyhow!("original launch failure"),
+        );
+        assert!(format!("{error:#}").contains("outside Jbox session storage"));
+        assert!(outside.join("keep").exists());
+        assert!(session_dir.exists());
+    }
+
+    #[test]
+    fn preserved_launch_keeps_original_error_and_recovery_guidance() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let session_dir = app.paths.sessions.join("ambiguous");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let error = app.preserve_failed_launch(
+            &session_dir,
+            "jbox-ambiguous",
+            "guest absence could not be confirmed",
+            anyhow::anyhow!("docker run timed out"),
+        );
+        let message = format!("{error:#}");
+        assert!(message.contains("docker run timed out"), "{message}");
+        assert!(message.contains("docker rm -f jbox-ambiguous"), "{message}");
+        assert!(session_dir.exists());
+    }
+
+    #[test]
+    fn container_spec_forwards_beads_budget_and_counts_only_portable_snapshots() {
+        let temp = tempdir().unwrap();
+        let app = test_app(temp.path());
+        let mut first = test_session("budget", temp.path().join("first"))
+            .repos
+            .remove(0);
+        let mut second = first.clone();
+        second.name = "second".into();
+        second.worktree = temp.path().join("second-worktree");
+        second.mount = "/workspace/second".into();
+        let mut absent = first.clone();
+        absent.name = "absent".into();
+        absent.worktree = temp.path().join("absent-worktree");
+        absent.mount = "/workspace/absent".into();
+        first.worktree = temp.path().join("first-worktree");
+        let repos = [first, second, absent];
+        for repo in &repos[..2] {
+            std::fs::create_dir_all(repo.worktree.join(".beads")).unwrap();
+            std::fs::write(repo.worktree.join(".beads/issues.jsonl"), "{}\n").unwrap();
+        }
+        assert_eq!(beads_workspace_count(&repos), 2);
+        let ssh = temp.path().join("session/ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        for policy in ["", "[beads]\nbootstrap_timeout_seconds=600\n"] {
+            let config = Config::from_toml(&format!(
+                "version=1\n[jcode]\npersistent_credentials=false\n[git]\nnetwork=false\ncredentials='none'\n{policy}"
+            ))
+            .unwrap();
+            let spec = app
+                .container_spec(
+                    &config,
+                    &repos,
+                    "jbox-budget",
+                    &ssh,
+                    SessionLaunch {
+                        image: "test-image".into(),
+                        ssh_host: "127.0.0.2".into(),
+                    },
+                )
+                .unwrap();
+            let env = spec
+                .environment
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashMap<_, _>>();
+            assert_eq!(env["JBOX_BEADS_WORKSPACE_COUNT"], "2");
+            assert_eq!(
+                env["JBOX_BEADS_BOOTSTRAP_TIMEOUT_SECONDS"],
+                config.beads.bootstrap_timeout_seconds.to_string()
+            );
+            assert_eq!(env["JBOX_BEADS_WORKSPACE_0"], "/workspace/repo");
+            assert_eq!(env["JBOX_BEADS_WORKSPACE_1"], "/workspace/second");
+            assert!(!env.contains_key("JBOX_BEADS_WORKSPACE_2"));
+        }
     }
 
     #[test]

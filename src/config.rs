@@ -21,6 +21,8 @@ pub struct Config {
     #[serde(default)]
     pub resources: Resources,
     #[serde(default)]
+    pub beads: Beads,
+    #[serde(default)]
     pub image: Image,
     #[serde(default)]
     pub workspace: Workspace,
@@ -87,6 +89,25 @@ impl Default for Resources {
             disk: disk(),
             ttl: ttl(),
             ttl_seconds: 86_400,
+        }
+    }
+}
+
+pub const DEFAULT_BEADS_BOOTSTRAP_TIMEOUT_SECONDS: u64 = 180;
+pub const MAX_BEADS_BOOTSTRAP_TIMEOUT_SECONDS: u64 = 3600;
+pub const BEADS_BOOTSTRAP_KILL_GRACE_SECONDS: u64 = 5;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Beads {
+    /// Finite per-workspace budget for hydration and all integrity checks.
+    pub bootstrap_timeout_seconds: u64,
+}
+
+impl Default for Beads {
+    fn default() -> Self {
+        Self {
+            bootstrap_timeout_seconds: DEFAULT_BEADS_BOOTSTRAP_TIMEOUT_SECONDS,
         }
     }
 }
@@ -616,6 +637,13 @@ impl Config {
         config.resources.ttl_seconds = parse_duration(&config.resources.ttl)?;
         if config.resources.cpus == 0 {
             bail!("resources.cpus must be greater than zero");
+        }
+        if !(1..=MAX_BEADS_BOOTSTRAP_TIMEOUT_SECONDS)
+            .contains(&config.beads.bootstrap_timeout_seconds)
+        {
+            bail!(
+                "beads.bootstrap_timeout_seconds must be an integer between 1 and {MAX_BEADS_BOOTSTRAP_TIMEOUT_SECONDS}"
+            );
         }
         if config.resources.memory.trim().is_empty() || config.resources.disk.trim().is_empty() {
             bail!("resources.memory and resources.disk must be non-empty OCI quantities");
@@ -1201,6 +1229,31 @@ fn parse_duration(input: &str) -> Result<i64> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn beads_bootstrap_policy_defaults_and_bounds() {
+        for text in ["version = 1", "version = 1\n[beads]\n"] {
+            let config = Config::from_toml(text).unwrap();
+            assert_eq!(config.beads.bootstrap_timeout_seconds, 180);
+        }
+        for seconds in [1, 60, 180, 600, 3600] {
+            let config = Config::from_toml(&format!(
+                "version = 1\n[beads]\nbootstrap_timeout_seconds = {seconds}\n"
+            ))
+            .unwrap();
+            assert_eq!(config.beads.bootstrap_timeout_seconds, seconds);
+        }
+        for value in ["0", "3601", "-1", "1.5", "'180'", "true"] {
+            assert!(
+                Config::from_toml(&format!(
+                    "version = 1\n[beads]\nbootstrap_timeout_seconds = {value}\n"
+                ))
+                .is_err(),
+                "accepted invalid timeout {value}"
+            );
+        }
+        assert!(Config::from_toml("version = 1\n[beads]\ntimeout_seconds = 300").is_err());
+    }
 
     #[test]
     fn legacy_agent_instructions_remain_optional_and_unchanged() {

@@ -10,6 +10,10 @@ memory = "16G"
 disk = "40G" # Recorded for future VM disk sizing, not enforced by Docker/Kata yet.
 ttl = "24h"
 
+[beads]
+# Finite per-workspace budget for initialization, import, export and integrity checks.
+bootstrap_timeout_seconds = 180
+
 [image]
 dockerfile = ".jbox/Dockerfile"
 

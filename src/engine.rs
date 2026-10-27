@@ -269,6 +269,7 @@ impl Engine for DockerEngine {
             .arg("/usr/local/bin/jbox-entrypoint");
         eprintln!("Starting Kata guest {} (up to 120s)...", spec.name);
         run_timed(command, RUN_TIMEOUT, "docker run")
+            .map_err(|error| error.context(GuestStartUncertain))
             .context("could not start Jbox Kata session")?;
 
         // A successful `docker run -d` merely means the runtime accepted the
@@ -278,60 +279,56 @@ impl Engine for DockerEngine {
             "Waiting for Kata guest {} SSH port (up to 30s)...",
             spec.name
         );
-        let port_deadline = Instant::now() + PORT_DEADLINE;
-        loop {
-            let remaining = port_deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                let _ = self.stop(&spec.name);
-                bail!("Kata session did not publish its SSH port within 30 seconds");
-            }
-            let mut inspect = Self::command();
-            inspect.args(["inspect", "--format", "{{.State.Running}}", &spec.name]);
-            let (inspected, running, _) =
-                run_timed_raw(inspect, CMD_TIMEOUT.min(remaining), "docker inspect")?;
-            if !inspected || running != "true" {
-                // Container exited during startup: grab logs and report them.
-                let logs = self
-                    .startup_logs(&spec.name)
-                    .unwrap_or_else(|error| format!("could not retrieve guest logs: {error:#}"));
-                let _ = self.stop(&spec.name);
-                bail!(
-                    "Kata session exited during startup.\nContainer logs:\n{logs}\n\
+        let result = (|| {
+            let port_deadline = Instant::now() + PORT_DEADLINE;
+            loop {
+                let remaining = port_deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    bail!("Kata session did not publish its SSH port within 30 seconds");
+                }
+                let mut inspect = Self::command();
+                inspect.args(["inspect", "--format", "{{.State.Running}}", &spec.name]);
+                let (inspected, running, _) =
+                    run_timed_raw(inspect, CMD_TIMEOUT.min(remaining), "docker inspect")?;
+                if !inspected || running != "true" {
+                    bail!(
+                        "Kata session exited during startup. \
                      Check that the guest image has a valid entrypoint."
-                );
-            }
+                    );
+                }
 
-            let mut port_cmd = Self::command();
-            port_cmd.args(["port", &spec.name, "2222/tcp"]);
-            let remaining = port_deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                let _ = self.stop(&spec.name);
-                bail!("Kata session did not publish its SSH port within 30 seconds");
-            }
-            let (ok, port_out, _) =
-                run_timed_raw(port_cmd, CMD_TIMEOUT.min(remaining), "docker port")?;
-            if ok && !port_out.is_empty() {
-                return port_out
-                    .rsplit(':')
-                    .next()
-                    .context("Docker did not report an SSH port")?
-                    .trim()
-                    .parse()
-                    .context("Docker reported an invalid SSH port number");
-            }
+                let mut port_cmd = Self::command();
+                port_cmd.args(["port", &spec.name, "2222/tcp"]);
+                let remaining = port_deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    bail!("Kata session did not publish its SSH port within 30 seconds");
+                }
+                let (ok, port_out, _) =
+                    run_timed_raw(port_cmd, CMD_TIMEOUT.min(remaining), "docker port")?;
+                if ok && !port_out.is_empty() {
+                    return port_out
+                        .rsplit(':')
+                        .next()
+                        .context("Docker did not report an SSH port")?
+                        .trim()
+                        .parse()
+                        .context("Docker reported an invalid SSH port number");
+                }
 
-            let remaining = port_deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                let _ = self.stop(&spec.name);
-                bail!(
-                    "Kata session did not publish its SSH port within {}s. \
-                     Check that the guest image entrypoint starts sshd on port 2222 \
-                     and that the kata runtime is installed correctly.",
-                    PORT_DEADLINE.as_secs()
-                );
+                let remaining = port_deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    bail!("Kata session did not publish its SSH port within 30 seconds");
+                }
+                thread::sleep(PORT_POLL.min(remaining));
             }
-            thread::sleep(PORT_POLL.min(remaining));
-        }
+        })();
+        // Once Docker has accepted our guest, all polling errors must collect
+        // evidence and stop it before callers remove its mounted worktrees.
+        finish_startup(
+            result,
+            || self.startup_logs(&spec.name),
+            || self.stop(&spec.name),
+        )
     }
 
     fn stop(&self, name: &str) -> Result<()> {
@@ -367,16 +364,104 @@ impl Engine for DockerEngine {
 
 impl DockerEngine {
     /// Retrieve the most recent container log lines for post-mortem diagnostics.
+    ///
+    /// Docker returns stdout and stderr on separate pipes. Requesting
+    /// timestamps lets us restore their chronological interleaving.
     pub fn startup_logs(&self, name: &str) -> Result<String> {
         let mut cmd = Self::command();
-        cmd.args(["logs", "--tail", "50", "--", name]);
+        cmd.args(startup_logs_args(name));
         let (ok, stdout, stderr) = run_timed_raw(cmd, CMD_TIMEOUT, "docker logs")?;
         if !ok {
             bail!("docker logs failed: {stderr}");
         }
-        let combined = format!("{stdout}\n{stderr}");
-        Ok(combined.trim().to_owned())
+        Ok(merge_timestamped_logs(&stdout, &stderr, STARTUP_LOG_LINES))
     }
+}
+
+/// A failed Docker client may leave a daemon-side create request in flight.
+/// Immediate absence is not sufficient evidence to delete its bind sources.
+#[derive(Debug)]
+pub(crate) struct GuestStartUncertain;
+
+impl std::fmt::Display for GuestStartUncertain {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "Docker run did not confirm completion. Guest creation may still be in flight",
+        )
+    }
+}
+
+impl std::error::Error for GuestStartUncertain {}
+
+fn finish_startup(
+    result: Result<u16>,
+    logs: impl FnOnce() -> Result<String>,
+    stop: impl FnOnce() -> Result<()>,
+) -> Result<u16> {
+    result.map_err(|error| {
+        let logs =
+            logs().unwrap_or_else(|error| format!("could not retrieve guest logs: {error:#}"));
+        let cleanup = match stop() {
+            Ok(()) => String::new(),
+            Err(error) => format!("\nGuest cleanup also failed: {error:#}"),
+        };
+        error.context(format!(
+            "guest startup failed. Container logs:\n{logs}{cleanup}"
+        ))
+    })
+}
+
+/// Maximum number of startup log lines requested from Docker and kept after merging.
+const STARTUP_LOG_LINES: usize = 200;
+
+fn startup_logs_args(name: &str) -> Vec<String> {
+    vec![
+        "logs".into(),
+        "--timestamps".into(),
+        "--tail".into(),
+        STARTUP_LOG_LINES.to_string(),
+        "--".into(),
+        name.into(),
+    ]
+}
+
+/// Merge Docker `--timestamps` output from stdout and stderr chronologically.
+///
+/// Docker emits RFC3339Nano UTC timestamps with trailing zeros trimmed, so
+/// timestamps are compared by parsed (seconds, nanoseconds) rather than
+/// lexically. Ties keep stdout before stderr and preserve per-stream order.
+/// Lines without a parseable timestamp inherit their predecessor's key. Only
+/// the latest `limit` merged lines are returned.
+fn merge_timestamped_logs(stdout: &str, stderr: &str, limit: usize) -> String {
+    fn keyed(text: &str, stream: u8) -> Vec<((i64, u32), u8, usize, &str)> {
+        let mut last = (i64::MIN, 0u32);
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .enumerate()
+            .map(|(index, line)| {
+                if let Some(key) = line.split_once(' ').and_then(|(ts, _)| parse_rfc3339(ts)) {
+                    last = key;
+                }
+                (last, stream, index, line)
+            })
+            .collect()
+    }
+    let mut lines = keyed(stdout, 0);
+    lines.extend(keyed(stderr, 1));
+    lines.sort_by_key(|(key, stream, index, _)| (*key, *stream, *index));
+    let skip = lines.len().saturating_sub(limit);
+    lines
+        .into_iter()
+        .skip(skip)
+        .map(|(_, _, _, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Parse a Docker RFC3339 timestamp into a sortable (seconds, nanos) key.
+fn parse_rfc3339(ts: &str) -> Option<(i64, u32)> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(ts).ok()?;
+    Some((parsed.timestamp(), parsed.timestamp_subsec_nanos()))
 }
 
 fn current_id(flag: &str) -> Result<String> {
@@ -416,6 +501,145 @@ mod tests {
             })
             .is_ok()
         );
+    }
+
+    // --- startup log merging -------------------------------------------------
+
+    #[test]
+    fn uncertain_start_marker_survives_error_context_and_keeps_cause() {
+        let error = anyhow::anyhow!("docker run timed out after 120 seconds")
+            .context(GuestStartUncertain)
+            .context("could not start Jbox Kata session");
+        assert!(error.is::<GuestStartUncertain>());
+        let message = format!("{error:#}");
+        assert!(message.contains("may still be in flight"));
+        assert!(message.contains("docker run timed out after 120 seconds"));
+        assert!(!anyhow::anyhow!("SSH port unavailable").is::<GuestStartUncertain>());
+    }
+
+    #[test]
+    fn startup_command_timeout_collects_logs_before_stopping() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut command = Command::new("sleep");
+        command.arg("1");
+        let result =
+            run_timed_raw(command, Duration::from_millis(20), "docker inspect").map(|_| 22);
+        let error = finish_startup(
+            result,
+            || {
+                events.borrow_mut().push("logs");
+                Ok("phase=init START".into())
+            },
+            || {
+                events.borrow_mut().push("stop");
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(*events.borrow(), ["logs", "stop"]);
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("docker inspect") && text.contains("timed out"),
+            "{text}"
+        );
+        assert!(text.contains("phase=init START"));
+    }
+
+    #[test]
+    fn malformed_port_keeps_original_error_when_logs_and_cleanup_fail() {
+        let result = "not-a-port"
+            .parse::<u16>()
+            .context("Docker reported an invalid SSH port number");
+        let error = finish_startup(
+            result,
+            || anyhow::bail!("logs unavailable"),
+            || anyhow::bail!("remove failed"),
+        )
+        .unwrap_err();
+        let text = format!("{error:#}");
+        for expected in ["invalid SSH port", "logs unavailable", "remove failed"] {
+            assert!(text.contains(expected), "{text}");
+        }
+    }
+
+    #[test]
+    fn successful_startup_does_not_read_logs_or_stop_guest() {
+        assert_eq!(
+            finish_startup(
+                Ok(22),
+                || panic!("unexpected logs"),
+                || panic!("unexpected stop")
+            )
+            .unwrap(),
+            22
+        );
+    }
+
+    #[test]
+    fn startup_logs_args_are_bounded_and_timestamped() {
+        assert_eq!(
+            startup_logs_args("-x"),
+            ["logs", "--timestamps", "--tail", "200", "--", "-x"]
+        );
+    }
+
+    #[test]
+    fn merge_interleaves_streams_chronologically() {
+        let out = "2026-01-01T00:00:01Z out-a\n2026-01-01T00:00:03.5Z out-b";
+        let err = "2026-01-01T00:00:02.000000001Z err-a\n2026-01-01T00:00:03.25Z err-b";
+        assert_eq!(
+            merge_timestamped_logs(out, err, 200),
+            "2026-01-01T00:00:01Z out-a\n2026-01-01T00:00:02.000000001Z err-a\n\
+             2026-01-01T00:00:03.25Z err-b\n2026-01-01T00:00:03.5Z out-b"
+        );
+    }
+
+    #[test]
+    fn merge_equal_timestamps_is_stable() {
+        let ts = "2026-01-01T00:00:01.1Z";
+        let out = format!("{ts} o1\n{ts} o2");
+        let err = format!("{ts} e1\n{ts} e2");
+        assert_eq!(
+            merge_timestamped_logs(&out, &err, 200),
+            format!("{ts} o1\n{ts} o2\n{ts} e1\n{ts} e2")
+        );
+    }
+
+    #[test]
+    fn merge_compares_trimmed_fractions_numerically_across_days() {
+        // Trimmed fractions (.10 == .1 < .9) and day rollover order by value.
+        let out = "2026-02-28T23:59:59.9Z late\n2026-03-01T00:00:00Z next";
+        let err = "2026-02-28T23:59:59.10Z early";
+        assert_eq!(
+            merge_timestamped_logs(out, err, 200),
+            "2026-02-28T23:59:59.10Z early\n2026-02-28T23:59:59.9Z late\n2026-03-01T00:00:00Z next"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_only_latest_lines_and_untimestamped_follow_predecessor() {
+        let out = "2026-01-01T00:00:01Z a\ncontinuation\n2026-01-01T00:00:05Z c";
+        let err = "2026-01-01T00:00:02Z b";
+        assert_eq!(
+            merge_timestamped_logs(out, err, 2),
+            "2026-01-01T00:00:02Z b\n2026-01-01T00:00:05Z c"
+        );
+        assert_eq!(
+            merge_timestamped_logs(out, err, 3),
+            "continuation\n2026-01-01T00:00:02Z b\n2026-01-01T00:00:05Z c"
+        );
+        assert_eq!(merge_timestamped_logs("", "", 200), "");
+    }
+
+    #[test]
+    fn rfc3339_rejects_malformed() {
+        assert!(parse_rfc3339("2026-13-01T00:00:00Z").is_none());
+        assert!(parse_rfc3339("2026-01-01T00:00:00").is_none());
+        assert!(parse_rfc3339("2026-02-30T00:00:00Z").is_none());
+        assert!(parse_rfc3339("99999999999-01-01T00:00:00Z").is_none());
+        assert!(parse_rfc3339("2026-01-01T25:00:00Z").is_none());
+        assert!(parse_rfc3339("garbage").is_none());
+        assert!(parse_rfc3339("1970-01-01T00:00:01.5Z") == Some((1, 500_000_000)));
     }
 
     // --- run_timed_raw -------------------------------------------------------

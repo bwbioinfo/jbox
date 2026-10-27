@@ -1,4 +1,4 @@
-use crate::state::Session;
+use crate::{config::BEADS_BOOTSTRAP_KILL_GRACE_SECONDS, state::Session};
 use anyhow::{Context, Result, bail};
 use directories::BaseDirs;
 use sha2::{Digest, Sha256};
@@ -574,6 +574,7 @@ impl JboxPaths {
         host: &str,
         session_id: &str,
         workspace_count: usize,
+        bootstrap_timeout_seconds: u64,
         mut guest_running: impl FnMut() -> Result<bool>,
     ) -> Result<String> {
         if !guest_running()? {
@@ -589,12 +590,14 @@ impl JboxPaths {
         // ssh-keyscan's one-second connection timeout contributes to each
         // attempt. This is only readiness probing of a per-session loopback
         // address, before we publish any session state.
-        // Guest bootstrap may hydrate several independent Beads databases
-        // before sshd starts. A single workspace should not silently wait five
-        // minutes, but leave more time when multiple workspaces need hydration.
-        let ssh_ready_timeout_seconds = ssh_ready_timeout_seconds(workspace_count);
+        // Account for every serial Beads workspace plus runtime/SSH headroom.
+        // A fixed ceiling would undercut a larger configured guest budget.
+        let ssh_ready_timeout_seconds =
+            ssh_ready_timeout_seconds(workspace_count, bootstrap_timeout_seconds);
         let started = std::time::Instant::now();
-        let deadline = started + std::time::Duration::from_secs(ssh_ready_timeout_seconds);
+        let deadline = started
+            .checked_add(std::time::Duration::from_secs(ssh_ready_timeout_seconds))
+            .context("configured cumulative SSH readiness deadline is too large")?;
         let mut next_progress = started + std::time::Duration::from_secs(5);
         let mut key = None;
         let mut last_error = None;
@@ -687,8 +690,14 @@ impl JboxPaths {
     }
 }
 
-fn ssh_ready_timeout_seconds(workspace_count: usize) -> u64 {
-    (60_u64 + 60_u64.saturating_mul(workspace_count.max(1) as u64)).min(300)
+fn ssh_ready_timeout_seconds(workspace_count: usize, bootstrap_timeout_seconds: u64) -> u64 {
+    // Grace is conservative headroom, not an assertion that all workspaces can
+    // time out: the first failed workspace still exits the guest immediately.
+    60_u64.saturating_add(
+        bootstrap_timeout_seconds
+            .saturating_add(BEADS_BOOTSTRAP_KILL_GRACE_SECONDS)
+            .saturating_mul(workspace_count as u64),
+    )
 }
 
 fn valid_jcode_session_id(value: &str) -> bool {
@@ -1017,16 +1026,20 @@ mod tests {
             credentials: temp.path().join("credentials"),
         };
         let error = paths
-            .trust_session_host("127.0.0.2", "test-guest", 1, || Ok(false))
+            .trust_session_host("127.0.0.2", "test-guest", 1, 180, || Ok(false))
             .unwrap_err();
         assert!(error.to_string().contains("exited before SSH became ready"));
     }
 
     #[test]
-    fn ssh_readiness_budget_scales_with_workspaces_but_remains_bounded() {
-        assert_eq!(ssh_ready_timeout_seconds(1), 120);
-        assert_eq!(ssh_ready_timeout_seconds(3), 240);
-        assert_eq!(ssh_ready_timeout_seconds(100), 300);
+    fn ssh_readiness_budget_covers_configured_serial_bootstrap() {
+        assert_eq!(ssh_ready_timeout_seconds(0, 180), 60);
+        assert_eq!(ssh_ready_timeout_seconds(1, 180), 245);
+        assert_eq!(ssh_ready_timeout_seconds(4, 180), 800);
+        assert_eq!(ssh_ready_timeout_seconds(5, 180), 985);
+        assert_eq!(ssh_ready_timeout_seconds(4, 600), 2480);
+        assert_eq!(ssh_ready_timeout_seconds(100, 3600), 360560);
+        assert_eq!(ssh_ready_timeout_seconds(usize::MAX, u64::MAX), u64::MAX);
     }
 
     #[test]
