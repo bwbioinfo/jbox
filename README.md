@@ -215,7 +215,11 @@ project-specific dependencies in a compatible project image only after a GPU
 access path is available. Real GPU use requires an explicitly designed and
 configured Kata device-passthrough path, compatible guest kernel and drivers,
 and host prerequisites. It can affect the host GPU and isolation boundary, so
-Jbox does not configure or enable it automatically.
+Jbox does not configure or enable it automatically. See the
+[GPU testing plan](docs/gpu-testing-plan.md) for the staged work, safety
+constraints and current validation gaps. On the host, `jbox doctor` reports
+read-only PCI, IOMMU group and VFIO observations. These do not prove that
+passthrough is ready or that GPU access is enabled.
 
 rclone's configuration stays guest-local unless you explicitly configure an
 approved credential mechanism. No host rclone config, cloud credentials, FUSE

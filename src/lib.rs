@@ -1,6 +1,7 @@
 pub mod config;
 pub mod engine;
 pub mod git;
+pub mod gpu;
 pub mod image;
 pub mod init;
 mod jcode;
@@ -124,6 +125,7 @@ impl App {
                 "missing: run `jbox prime`"
             }
         );
+        println!("{}", gpu::diagnostics());
         let vhost_net = module_loaded("vhost_net");
         println!(
             "Kata guest networking: {}",
