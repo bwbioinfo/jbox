@@ -134,7 +134,7 @@ just the Jcode runtime. No `--tool` arguments are needed for:
 | Git and connectivity | Git, GitHub CLI (`gh`), OpenSSH client/server, curl, CA certificates |
 | Archives | tar, gzip, xz, zip, unzip |
 | Publishing | Quarto 1.10.19 with its bundled Pandoc and rendering resources |
-| Creative automation | All 13 ArtCraft headless CLIs, Fontconfig, DejaVu and Liberation fonts |
+| Creative automation | All 16 ArtCraft headless CLIs, Fontconfig, DejaVu and Liberation fonts |
 | Agent workflow | Jcode, Beads (`bd`) 1.3.2, guest-local Beads hydration and safe Git hook |
 
 The Rust, Python and Node versions were checked against official releases on
@@ -242,7 +242,8 @@ publishing credentials or host Quarto configuration are imported.
 ArtCraft commands are `photocraft-cli`, `vectorcraft-cli`, `filmcraft-cli`,
 `lightcraft-cli`, `pdfcraft-cli`, `effectcraft-cli`, `designcraft-cli`,
 `figcraft-cli`, `wordcraft-cli`, `soundcraft-cli`, `deckcraft-cli`, `cadcraft-cli`,
-and `gridcraft-cli`. These are official Linux x86_64 prebuilt releases, not GUI
+`gridcraft-cli`, `texturecraft-cli`, `craft-anything-cli`, and community-maintained
+`solidcraft-cli`. These are official Linux x86_64 prebuilt releases, not GUI
 applications or a desktop launcher. `templates/artcraft-releases.json` pins each
 archive URL and SHA-256. The installer checks the checksum before safe extraction,
 omits desktop executables, and preserves relative resources, OCR models, fonts,
@@ -256,8 +257,11 @@ GUI/GPU workflows and every creative export format are not implied by these
 headless smoke checks.
 The PDF OCR model files carry CC-BY-SA-4.0 notices distinct from the applications'
 MIT/Apache-2.0 code and the fonts' OFL licenses; these notices are retained.
-The verified headless ArtCraft payload is approximately **826 MiB before image
-compression**, in addition to the language toolchains. Initial builds require
+The verified headless ArtCraft payload is approximately **1,146 MiB before image
+compression**, in addition to the language toolchains. See the
+[2026-11-02 acceptance report](docs/artcraft-acceptance-2026-11-02.md) for real
+artifact checks, workflow results and the remaining host-only Docker/Kata gate.
+Initial builds require
 network access to the official image/package/release sources, while installed
 tools do not need to be downloaded again when a guest starts.
 

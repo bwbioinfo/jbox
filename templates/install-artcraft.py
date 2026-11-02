@@ -18,13 +18,17 @@ from urllib.request import Request, urlopen
 APPS = (
     "photocraft", "vectorcraft", "filmcraft", "lightcraft", "pdfcraft",
     "effectcraft", "designcraft", "figcraft", "wordcraft", "soundcraft",
-    "deckcraft", "cadcraft", "gridcraft",
+    "deckcraft", "cadcraft", "gridcraft", "texturecraft", "craft-anything", "solidcraft",
 )
+# Trusted upstream owner per application. SolidCraft is a community-maintained
+# member of the official suite catalog and is the only non-storytold owner.
+OWNERS = {app: "storytold" for app in APPS}
+OWNERS["solidcraft"] = "tangency-labs"
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_EXTRACT_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 10_000
 CLI_TIMEOUT_SECONDS = 30
-PDFCRAFT_MODELS = ("text-detection.rten", "text-recognition.rten")
+PDFCRAFT_MODELS = ("text-detection.onnx", "text-recognition.onnx")
 
 
 def validate_release(release):
@@ -35,7 +39,7 @@ def validate_release(release):
         raise ValueError(f"{app}: a pinned SHA-256 checksum is required")
     url = urlparse(release["url"])
     if (url.scheme != "https" or url.netloc != "github.com"
-            or not url.path.startswith(f"/storytold/{app}/releases/download/")
+            or not url.path.startswith(f"/{OWNERS[app]}/{app}/releases/download/")
             or not url.path.endswith(".tar.gz") or url.query or url.fragment):
         raise ValueError(f"{app}: expected an official GitHub release tarball")
     binary = PurePosixPath(release["binary"])
@@ -49,7 +53,7 @@ def load_releases(manifest):
     for release in releases:
         validate_release(release)
     if sorted(release["app"] for release in releases) != sorted(APPS):
-        raise ValueError("ArtCraft manifest must contain each of the 13 applications exactly once")
+        raise ValueError("ArtCraft manifest must contain each of the 16 applications exactly once")
     return releases
 
 
@@ -168,13 +172,13 @@ def main():
             if not link.is_symlink() or link.resolve(strict=True) != binary.resolve(strict=True):
                 raise ValueError(f"{release['app']}: installed CLI link does not match manifest")
             verify_cli(link, release["app"])
-        print("Verified all 13 ArtCraft CLIs", flush=True)
+        print("Verified all 16 ArtCraft CLIs", flush=True)
         return
     for release in releases:
         install_release(release, args.prefix.resolve(), args.bin_dir.resolve())
     # Record the exact installed versions and checksums for later inspection.
     shutil.copyfile(args.manifest, args.prefix / "releases.json")
-    print("Installed all 13 ArtCraft CLIs", flush=True)
+    print("Installed all 16 ArtCraft CLIs", flush=True)
 
 
 if __name__ == "__main__":

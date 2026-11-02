@@ -1343,8 +1343,13 @@ mod tests {
             .map(|release| {
                 let app = release["app"].as_str().unwrap();
                 let url = release["url"].as_str().unwrap();
+                let owner = if app == "solidcraft" {
+                    "tangency-labs"
+                } else {
+                    "storytold"
+                };
                 assert!(url.starts_with(&format!(
-                    "https://github.com/storytold/{app}/releases/download/"
+                    "https://github.com/{owner}/{app}/releases/download/"
                 )));
                 assert!(url.ends_with("-linux-x86_64.tar.gz"));
                 let checksum = release["sha256"].as_str().unwrap();
@@ -1374,6 +1379,9 @@ mod tests {
             "deckcraft",
             "cadcraft",
             "gridcraft",
+            "texturecraft",
+            "craft-anything",
+            "solidcraft",
         ];
         expected.sort();
         assert_eq!(apps, expected);

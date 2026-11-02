@@ -1,26 +1,29 @@
 # ArtCraft headless tools in Jbox
 
-The default x86_64 Debian guest includes all 13 ArtCraft command-line tools.
+The default x86_64 Debian guest includes all 16 ArtCraft command-line tools.
 The suite was reviewed against the official [ArtCraft apps](https://getartcraft.com/apps)
-and [storytold repositories](https://github.com/storytold) on 2026-10-24.
+and [storytold repositories](https://github.com/storytold) on 2026-11-02.
 GitHub release tags, not the website's occasionally older download labels, are
 the source of the pinned versions below.
 
 | Command | Version | Main workflows |
 | --- | --- | --- |
-| `photocraft-cli` | 0.15.1 | Raster images, layered documents, conversion and batch actions |
-| `vectorcraft-cli` | 0.16.0 | Vector illustration and SVG, PDF and raster export |
-| `filmcraft-cli` | 0.12.0 | Video timelines, media inspection, rendering and encoding |
-| `lightcraft-cli` | 0.13.0 | Photo libraries, RAW development and export |
-| `pdfcraft-cli` | 0.13.0 | PDF inspection, text, editing, rendering and OCR |
-| `effectcraft-cli` | 0.16.0 | Compositing, animation, effects and frame/video rendering |
-| `designcraft-cli` | 0.12.0 | Page layout, document scripting and publishing |
-| `figcraft-cli` | 0.10.0 | Interface design documents, conversion and frame export |
-| `wordcraft-cli` | 0.10.0 | Word-processing documents, conversion and rendering |
-| `soundcraft-cli` | 0.12.1 | Audio files, session editing and offline bounce |
-| `deckcraft-cli` | 0.10.0 | Slide decks, rendering and conversion |
-| `cadcraft-cli` | 0.12.0 | CAD drawings, inspection and interchange |
-| `gridcraft-cli` | 0.11.1 | Spreadsheets, formulas and workbook interchange |
+| `photocraft-cli` | 0.19.0 | Raster images, layered documents, conversion and batch actions |
+| `vectorcraft-cli` | 0.20.0 | Vector illustration and SVG, PDF and raster export |
+| `filmcraft-cli` | 0.16.0 | Video timelines, media inspection, rendering and encoding |
+| `lightcraft-cli` | 0.17.0 | Photo libraries, RAW development and export |
+| `pdfcraft-cli` | 0.17.0 | PDF inspection, text, editing, rendering and OCR |
+| `effectcraft-cli` | 0.20.0 | Compositing, animation, effects and frame/video rendering |
+| `designcraft-cli` | 0.16.0 | Page layout, document scripting and publishing |
+| `figcraft-cli` | 0.14.0 | Interface design documents, conversion and frame export |
+| `wordcraft-cli` | 0.14.0 | Word-processing documents, conversion and rendering |
+| `soundcraft-cli` | 0.16.0 | Audio files, session editing and offline bounce |
+| `deckcraft-cli` | 0.14.1 | Slide decks, rendering and conversion |
+| `cadcraft-cli` | 0.16.0 | CAD drawings, inspection and interchange |
+| `gridcraft-cli` | 0.15.0 | Spreadsheets, formulas and workbook interchange |
+| `texturecraft-cli` | 0.2.0 | Texture projects, mesh inspection and headless texture commands |
+| `craft-anything-cli` | 0.3.0 | Artifact analysis, project tools and MCP server |
+| `solidcraft-cli` | 0.30.1 | Solid modelling and solving (community-maintained) |
 
 ## Installation and dependencies
 
@@ -103,6 +106,54 @@ Run the repository quality gates plus a real installation into a disposable
 prefix, inspect dynamic-library dependencies, and exercise representative
 headless workflows, including PdfCraft OCR asset discovery. A complete Docker
 build additionally verifies installation against a clean Debian base.
+
+## Release refresh on 2026-11-02
+
+All 13 existing tools moved to the latest stable releases, and TextureCraft 0.2.0,
+Craft Anything 0.3.0 and SolidCraft 0.30.1 were added, for 16 in total. Every pin
+matches the published `SHA256SUMS.txt` (SolidCraft: `2be163c6...d0482`) and the
+downloaded archive. All new archives use the standard shape (`bin/<app>-cli`, the
+desktop binary, and `share/doc` licenses), so they use the existing installer.
+Each new CLI passed `--version`, `--help` and `commands` with no display.
+
+### Trusted owners
+
+SolidCraft is a community project in the official suite catalog, released by
+`tangency-labs/solidcraft`. The installer holds an explicit per-application owner
+map: every app must come from `storytold`, except SolidCraft, which must come
+only from `tangency-labs`. Cross-owner URLs are rejected in both directions, and
+unknown applications are rejected. SolidCraft's archive also contains a
+deprecated `solvecraft-cli` alias, which is preserved with its bundled licenses.
+
+### Launcher and ArtCraft Studio
+
+The craft-launcher (v0.13.0) is the app catalogue and updater. ArtCraft itself
+(`artcraft-v0.41.0`) is the GUI studio. Both are desktop applications, are not
+installed, and are not needed for these headless CLIs.
+
+### Review of changes in the existing 13 tools
+
+- PdfCraft 0.17.0: OCR models are now `share/pdfcraft/models/text-*.onnx`
+  instead of `.rten`. The installer's model check was updated, and `ocr_status`
+  reports OCR available. A separate `pdfcraft-cli` archive exists but is not used,
+  so bundled resources stay intact. FigCraft likewise has a separate
+  `figcraft-server` archive, which is not installed.
+- PhotoCraft 0.19.0, LightCraft 0.17.0 and CadCraft 0.16.0 include CLI fixes
+  (PSD font metadata, `--script` UTF-8 BOM and non-finite `--set` rejection, and
+  DXF `$INSUNITS` on `wblock`). FigCraft now uses the shared font catalog on Unix.
+- Many releases add Flatpak OCI packaging helpers and desktop UI changes. Those
+  affect upstream packaging only, not the tarball layout used here. The binary
+  path `bin/<app>-cli` is unchanged for all 13, and the DeckCraft/CadCraft
+  `commands` startup quirk is unchanged.
+- No new Debian packages were needed for the checked CPU workflows. See the
+  [dated acceptance report](artcraft-acceptance-2026-11-02.md) for real 16-tool
+  installation checks, representative workflow results and the remaining
+  host-only Docker/Kata acceptance gate (`jbox-ggb.2`).
+
+MaterialCraft has documented CLI/MCP workflows and a matching new skill, but no
+published GitHub release was available at review time. It is not installed from
+moving source or a fabricated archive URL. A verifiable release integration is
+tracked separately in `jbox-20n`.
 
 ## Release refresh on 2026-10-24
 

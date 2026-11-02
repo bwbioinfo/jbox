@@ -87,15 +87,72 @@ class ArtcraftInstallerTests(unittest.TestCase):
                 f"run) printf '%s\\n' '{status}';;\n"
                 "*) exit 7;;\nesac\n"
             ).encode(),
-            f"{top}/share/pdfcraft/models/text-detection.rten": b"detection",
-            f"{top}/share/pdfcraft/models/text-recognition.rten": b"recognition",
+            f"{top}/share/pdfcraft/models/text-detection.onnx": b"detection",
+            f"{top}/share/pdfcraft/models/text-recognition.onnx": b"recognition",
             f"{top}/share/doc/pdfcraft/MODELS-LICENSE": b"CC-BY-SA-4.0",
         }
 
-    def test_bundled_manifest_pins_all_thirteen_official_releases(self):
+    def test_bundled_manifest_pins_all_sixteen_official_releases(self):
         releases = INSTALLER.load_releases(ROOT / "templates/artcraft-releases.json")
-        self.assertEqual(len(releases), 13)
+        self.assertEqual(len(releases), 16)
         self.assertEqual({release["app"] for release in releases}, set(INSTALLER.APPS))
+
+    def test_new_hyphenated_and_texture_apps_install_with_resources(self):
+        for app in ("craft-anything", "texturecraft"):
+            with self.subTest(app=app):
+                self.setUp()
+                self.select_app(app)
+                top = str(Path(self.release["binary"]).parent.parent)
+                entries = {
+                    self.release["binary"]: b"#!/bin/sh\nexit 0\n",
+                    f"{top}/bin/{app}": b"desktop",
+                    f"{top}/share/doc/{app}/LICENSE-MIT": b"license",
+                    f"{top}/share/doc/{app}/OFL-font.txt": b"font license",
+                }
+                binary = self.install(self.archive(entries))
+                self.assertFalse((binary.parent / app).exists())
+                self.assertEqual((self.bin_dir / f"{app}-cli").resolve(), binary)
+                self.assertEqual(
+                    (self.prefix / app / top / f"share/doc/{app}/LICENSE-MIT").read_bytes(), b"license")
+
+    def test_solidcraft_uses_only_its_trusted_community_owner(self):
+        release = {
+            "app": "solidcraft", "version": "0.30.1", "sha256": "0" * 64,
+            "url": "https://github.com/tangency-labs/solidcraft/releases/download/v0.30.1/solidcraft-0.30.1-linux-x86_64.tar.gz",
+            "binary": "solidcraft-0.30.1-linux-x86_64/bin/solidcraft-cli",
+        }
+        INSTALLER.validate_release(release)
+        for owner in ("storytold", "evil-labs"):
+            with self.subTest(owner=owner):
+                bad = dict(release, url=release["url"].replace("tangency-labs", owner))
+                with self.assertRaisesRegex(ValueError, "official GitHub release tarball"):
+                    INSTALLER.validate_release(bad)
+
+    def test_other_apps_reject_the_community_owner(self):
+        bad = dict(self.release, url=self.release["url"].replace("storytold", "tangency-labs"))
+        with self.assertRaisesRegex(ValueError, "official GitHub release tarball"):
+            INSTALLER.validate_release(bad)
+
+    def test_unknown_app_is_still_rejected(self):
+        with self.assertRaisesRegex(ValueError, "invalid ArtCraft application"):
+            INSTALLER.validate_release(dict(self.release, app="othercraft"))
+
+    def test_solidcraft_install_keeps_deprecated_solvecraft_alias_and_licenses(self):
+        self.select_app("solidcraft")
+        self.release["version"] = "0.30.1"
+        self.release["binary"] = "solidcraft-0.30.1-linux-x86_64/bin/solidcraft-cli"
+        self.release["url"] = "https://github.com/tangency-labs/solidcraft/releases/download/v0.30.1/solidcraft-0.30.1-linux-x86_64.tar.gz"
+        top = "solidcraft-0.30.1-linux-x86_64"
+        entries = {
+            self.release["binary"]: b"#!/bin/sh\nexit 0\n",
+            f"{top}/bin/solvecraft-cli": b"#!/bin/sh\nexit 0\n",
+            f"{top}/bin/solidcraft": b"desktop",
+            f"{top}/share/doc/solidcraft/LICENSE-MIT": b"license",
+        }
+        binary = self.install(self.archive(entries))
+        self.assertTrue((binary.parent / "solvecraft-cli").is_file())
+        self.assertFalse((binary.parent / "solidcraft").exists())
+        self.assertTrue((self.prefix / "solidcraft" / top / "share/doc/solidcraft/LICENSE-MIT").is_file())
 
     def test_documented_versions_match_the_canonical_manifest(self):
         documentation = (ROOT / "docs/artcraft.md").read_text()
@@ -317,7 +374,7 @@ class ArtcraftInstallerTests(unittest.TestCase):
                 with patch.object(INSTALLER, "install_release") as install:
                     with patch.object(INSTALLER.shutil, "copyfile") as copy:
                         INSTALLER.main()
-        self.assertEqual(verify.call_count, 13)
+        self.assertEqual(verify.call_count, 16)
         install.assert_not_called()
         copy.assert_not_called()
         self.assertFalse((self.prefix / "releases.json").exists())
@@ -337,7 +394,7 @@ class ArtcraftInstallerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "does not match manifest"):
                     INSTALLER.main()
 
-    def test_verify_only_cli_checks_all_thirteen_installed_tools(self):
+    def test_verify_only_cli_checks_all_sixteen_installed_tools(self):
         releases = INSTALLER.load_releases(ROOT / "templates/artcraft-releases.json")
         self.bin_dir.mkdir()
         for release in releases:
@@ -362,7 +419,7 @@ class ArtcraftInstallerTests(unittest.TestCase):
                   for path in self.prefix.rglob("*") if path.is_file()}
         result = subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Verified all 13 ArtCraft CLIs", result.stdout)
+        self.assertIn("Verified all 16 ArtCraft CLIs", result.stdout)
         after = {path: (path.stat().st_mode, path.stat().st_mtime_ns, path.read_bytes())
                  for path in self.prefix.rglob("*") if path.is_file()}
         self.assertEqual(before, after)
