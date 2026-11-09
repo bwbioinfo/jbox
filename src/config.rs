@@ -102,12 +102,15 @@ pub const BEADS_BOOTSTRAP_KILL_GRACE_SECONDS: u64 = 5;
 pub struct Beads {
     /// Finite per-workspace budget for hydration and all integrity checks.
     pub bootstrap_timeout_seconds: u64,
+    /// Optional issue prefix for the primary workspace only.
+    pub prefix: Option<String>,
 }
 
 impl Default for Beads {
     fn default() -> Self {
         Self {
             bootstrap_timeout_seconds: DEFAULT_BEADS_BOOTSTRAP_TIMEOUT_SECONDS,
+            prefix: None,
         }
     }
 }
@@ -643,6 +646,18 @@ impl Config {
         {
             bail!(
                 "beads.bootstrap_timeout_seconds must be an integer between 1 and {MAX_BEADS_BOOTSTRAP_TIMEOUT_SECONDS}"
+            );
+        }
+        if let Some(prefix) = &config.beads.prefix
+            && (prefix.is_empty()
+                || prefix.len() > 64
+                || !prefix.as_bytes()[0].is_ascii_alphanumeric()
+                || !prefix
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
+        {
+            bail!(
+                "beads.prefix must be 1 to 64 ASCII letters, digits, hyphens, or underscores, starting with a letter or digit"
             );
         }
         if config.resources.memory.trim().is_empty() || config.resources.disk.trim().is_empty() {
@@ -1253,6 +1268,37 @@ mod tests {
             );
         }
         assert!(Config::from_toml("version = 1\n[beads]\ntimeout_seconds = 300").is_err());
+    }
+
+    #[test]
+    fn beads_prefix_override_is_validated() {
+        assert!(
+            Config::from_toml("version=1")
+                .unwrap()
+                .beads
+                .prefix
+                .is_none()
+        );
+        for prefix in ["a", "legacy-123_name", &"x".repeat(64)] {
+            let config =
+                Config::from_toml(&format!("version=1\n[beads]\nprefix={prefix:?}")).unwrap();
+            assert_eq!(config.beads.prefix.as_deref(), Some(prefix));
+        }
+        for prefix in [
+            "",
+            "-abc",
+            "_abc",
+            "a b",
+            "a.b",
+            "é",
+            "a\n",
+            &"x".repeat(65),
+        ] {
+            let error =
+                Config::from_toml(&format!("version=1\n[beads]\nprefix={prefix:?}")).unwrap_err();
+            assert!(format!("{error:#}").contains("beads.prefix"));
+        }
+        assert!(Config::from_toml("version=1\n[beads]\nprefix=42").is_err());
     }
 
     #[test]

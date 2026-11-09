@@ -501,6 +501,14 @@ status. Host SSH readiness automatically allows 60 seconds of headroom plus
 multi-repository hydration at a fixed 300-second ceiling. A failed workspace
 still stops startup immediately rather than spending every workspace's budget.
 
+If the primary repository's Beads issue prefix differs from its repository name,
+set `prefix = "existing-prefix"` in `[beads]`. Without it, Jbox uses the
+repository name as before. The override applies only to the primary workspace,
+not additional repositories. Prefixes must be 1 to 64 ASCII letters, digits,
+hyphens, or underscores, starting with a letter or digit. The configured value
+must match the existing Beads database prefix; integrity checks still fail closed
+on a mismatch.
+
 Retained sessions reuse their saved image. Updating `.jbox.toml` alone cannot
 change an old image's hard-coded 60-second bootstrap. With the updated Jbox CLI,
 stop a retained session and explicitly restart with

@@ -666,19 +666,25 @@ impl App {
         // starts, never exposing the host database or its locks/secrets.
         let beads_workspaces = repos
             .iter()
-            .filter(|repo| repo.worktree.join(".beads/issues.jsonl").is_file())
+            .enumerate()
+            .filter(|(_, repo)| repo.worktree.join(".beads/issues.jsonl").is_file())
             .collect::<Vec<_>>();
         if !beads_workspaces.is_empty() {
             environment.push((
                 "JBOX_BEADS_WORKSPACE_COUNT".into(),
                 beads_workspaces.len().to_string(),
             ));
-            for (index, repo) in beads_workspaces.into_iter().enumerate() {
+            for (index, (repo_index, repo)) in beads_workspaces.into_iter().enumerate() {
                 environment.push((
                     format!("JBOX_BEADS_WORKSPACE_{index}"),
                     safe_target(&repo.mount)?.to_string_lossy().into_owned(),
                 ));
-                environment.push((format!("JBOX_BEADS_PREFIX_{index}"), repo.name.clone()));
+                let prefix = if repo_index == 0 {
+                    config.beads.prefix.as_ref().unwrap_or(&repo.name)
+                } else {
+                    &repo.name
+                };
+                environment.push((format!("JBOX_BEADS_PREFIX_{index}"), prefix.clone()));
             }
         }
         for mount in &config.mounts {
@@ -5085,7 +5091,10 @@ merge = "user-confirmed"
         assert_eq!(beads_workspace_count(&repos), 2);
         let ssh = temp.path().join("session/ssh");
         std::fs::create_dir_all(&ssh).unwrap();
-        for policy in ["", "[beads]\nbootstrap_timeout_seconds=600\n"] {
+        for policy in [
+            "",
+            "[beads]\nbootstrap_timeout_seconds=600\nprefix='legacy'\n",
+        ] {
             let config = Config::from_toml(&format!(
                 "version=1\n[jcode]\npersistent_credentials=false\n[git]\nnetwork=false\ncredentials='none'\n{policy}"
             ))
@@ -5114,7 +5123,32 @@ merge = "user-confirmed"
             );
             assert_eq!(env["JBOX_BEADS_WORKSPACE_0"], "/workspace/repo");
             assert_eq!(env["JBOX_BEADS_WORKSPACE_1"], "/workspace/second");
+            assert_eq!(
+                env["JBOX_BEADS_PREFIX_0"],
+                config.beads.prefix.as_deref().unwrap_or(&repos[0].name)
+            );
+            assert_eq!(env["JBOX_BEADS_PREFIX_1"], "second");
             assert!(!env.contains_key("JBOX_BEADS_WORKSPACE_2"));
+
+            std::fs::remove_file(repos[0].worktree.join(".beads/issues.jsonl")).unwrap();
+            let spec = app
+                .container_spec(
+                    &config,
+                    &repos,
+                    "jbox-budget",
+                    &ssh,
+                    SessionLaunch {
+                        image: "test-image".into(),
+                        ssh_host: "127.0.0.2".into(),
+                    },
+                )
+                .unwrap();
+            let env = spec
+                .environment
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+            assert_eq!(env["JBOX_BEADS_PREFIX_0"], "second");
+            std::fs::write(repos[0].worktree.join(".beads/issues.jsonl"), "{}\n").unwrap();
         }
     }
 
